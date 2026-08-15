@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+media/webview.js
+media/webview.js.map
+out/
+
+# Test runner
+.vscode-test/
+.vscode-test.mjs.log
+
+# Packaging
+*.vsix
+
+# OS / editor
+.DS_Store
+*.log

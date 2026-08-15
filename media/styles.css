@@ -1,0 +1,134 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--vscode-font-family, monospace);
+  font-size: var(--vscode-font-size, 13px);
+  font-weight: var(--vscode-font-weight, normal);
+  color: var(--vscode-editor-foreground);
+  background-color: var(--vscode-editor-background);
+  overflow: hidden;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+}
+
+.stats-bar {
+  flex-shrink: 0;
+  padding: 4px 12px;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  background-color: var(--vscode-editorGroupHeader-tabsBackground, var(--vscode-editor-background));
+  border-bottom: 1px solid var(--vscode-editorGroup-border, var(--vscode-panel-border));
+  user-select: none;
+}
+
+.scroll-wrapper {
+  flex: 1;
+  overflow: auto;
+  position: relative;
+}
+
+#csv-table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  table-layout: auto;
+}
+
+/* ── Header ─────────────────────────────────────────── */
+
+thead tr {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+th {
+  background-color: var(--vscode-editorGroupHeader-tabsBackground, var(--vscode-editor-background));
+  color: var(--vscode-editor-foreground);
+  font-weight: 600;
+  text-align: left;
+  padding: 6px 12px;
+  border-bottom: 2px solid var(--vscode-editorGroup-border, var(--vscode-panel-border));
+  border-right: 1px solid var(--vscode-editorGroup-border, var(--vscode-panel-border));
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: none;
+}
+
+th:last-child {
+  border-right: none;
+}
+
+/* ── Rows ────────────────────────────────────────────── */
+
+td {
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--vscode-editorGroup-border, var(--vscode-panel-border));
+  border-right: 1px solid var(--vscode-editorGroup-border, var(--vscode-panel-border));
+  max-width: 400px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: top;
+}
+
+td:last-child {
+  border-right: none;
+}
+
+tbody tr:nth-child(even) {
+  background-color: var(--vscode-list-hoverBackground);
+}
+
+tbody tr:hover {
+  background-color: var(--vscode-list-activeSelectionBackground);
+  color: var(--vscode-list-activeSelectionForeground);
+}
+
+/* ── Row number gutter ───────────────────────────────── */
+
+th.row-num,
+td.row-num {
+  max-width: 60px;
+  width: 48px;
+  min-width: 32px;
+  text-align: right;
+  color: var(--vscode-editorLineNumber-foreground);
+  background-color: var(--vscode-editorGutter-background, var(--vscode-editor-background));
+  font-size: 11px;
+  user-select: none;
+  position: sticky;
+  left: 0;
+  z-index: 5;
+  border-right: 2px solid var(--vscode-editorGroup-border, var(--vscode-panel-border));
+}
+
+thead th.row-num {
+  z-index: 15;
+}
+
+/* ── Messages ────────────────────────────────────────── */
+
+.message {
+  padding: 24px;
+  font-size: 13px;
+  color: var(--vscode-descriptionForeground);
+  white-space: pre-wrap;
+}
+
+.message.error {
+  color: var(--vscode-errorForeground);
+}
