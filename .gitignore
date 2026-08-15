@@ -10,6 +10,8 @@ out/
 # Test runner
 .vscode-test/
 .vscode-test.mjs.log
+coverage/
+.nyc_output/
 
 # Packaging
 *.vsix

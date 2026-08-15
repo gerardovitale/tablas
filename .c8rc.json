@@ -1,0 +1,15 @@
+{
+  "reporter": ["text", "html"],
+  "include": ["src/**/*.ts", "src/webview/**/*.js"],
+  "exclude": [
+    "test/**",
+    "**/*.test.ts",
+    "**/*.d.ts",
+    "src/extension.ts",
+    "src/csvEditorProvider.ts"
+  ],
+  "extension": [".ts", ".js"],
+  "all": true,
+  "lines": 80,
+  "check-coverage": true
+}

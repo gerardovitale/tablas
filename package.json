@@ -5,41 +5,69 @@
   "version": "0.1.0",
   "publisher": "gerardovitale",
   "license": "MIT",
-  "engines": { "vscode": "^1.74.0" },
-  "categories": ["Data Science", "Visualization"],
-  "keywords": ["csv", "table", "viewer", "data"],
+  "engines": {
+    "node": ">=20",
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "Data Science",
+    "Visualization"
+  ],
+  "keywords": [
+    "csv",
+    "table",
+    "viewer",
+    "data"
+  ],
   "activationEvents": [],
   "main": "./dist/extension.js",
   "contributes": {
-    "customEditors": [{
-      "viewType": "tablas.csvViewer",
-      "displayName": "CSV Table Viewer",
-      "selector": [{ "filenamePattern": "*.csv" }],
-      "priority": "default"
-    }]
+    "customEditors": [
+      {
+        "viewType": "tablas.csvViewer",
+        "displayName": "CSV Table Viewer",
+        "selector": [
+          {
+            "filenamePattern": "*.csv"
+          }
+        ],
+        "priority": "default"
+      }
+    ]
   },
   "scripts": {
     "compile": "node esbuild.js",
     "compile:production": "node esbuild.js --production",
     "watch": "node esbuild.js --watch",
     "check-types": "tsc --noEmit",
+    "lint": "eslint .",
     "test": "npm run compile && tsc && vscode-test",
-    "test:unit": "mocha --require ts-node/register 'test/unit/**/*.test.ts'",
+    "test:unit": "c8 mocha --require ts-node/register 'test/unit/**/*.test.ts'",
+    "prepare": "husky",
     "vscode:prepublish": "npm run compile:production",
     "install:local": "bash scripts/install-local.sh",
     "install:local:quick": "bash scripts/install-local.sh --skip-tests"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/jsdom": "^30.0.0",
     "@types/mocha": "^10.0.0",
     "@types/node": "^20.0.0",
     "@types/papaparse": "^5.3.0",
     "@types/vscode": "^1.74.0",
     "@vscode/test-cli": "^0.0.10",
-    "@vscode/test-electron": "^2.4.0",
+    "@vscode/test-electron": "^3.1.0",
+    "c8": "^12.0.0",
     "esbuild": "^0.23.0",
+    "eslint": "^10.8.1",
+    "husky": "^9.1.7",
+    "jsdom": "^29.1.1",
     "mocha": "^10.0.0",
     "ts-node": "^10.0.0",
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "typescript-eslint": "^8.67.0"
   },
-  "dependencies": { "papaparse": "^5.5.3" }
+  "dependencies": {
+    "papaparse": "^5.5.3"
+  }
 }

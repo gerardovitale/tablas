@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { parseCsv } from './csvParser';
+import { parseCsv, CsvParseOutcome } from './csvParser';
 
 class CsvDocument implements vscode.CustomDocument {
   constructor(public readonly uri: vscode.Uri) {}
@@ -13,18 +13,43 @@ export class CsvEditorProvider
 {
   public static readonly viewType = 'tablas.csvViewer';
 
-  public static register(context: vscode.ExtensionContext): vscode.Disposable {
-    return vscode.window.registerCustomEditorProvider(
+  /**
+   * Registers the provider and returns both the disposable (for
+   * `context.subscriptions`) and the provider instance itself, so callers
+   * — namely `extension.ts`'s public API — can observe
+   * `onDidPostCsvData`. Integration tests subscribe to that event to
+   * verify the extension-host/webview handshake actually completes,
+   * since `vscode.commands.executeCommand('vscode.openWith', ...)`
+   * resolving doesn't imply the webview ever received data: the
+   * `onDidReceiveMessage` handler below is async and unawaited by
+   * `resolveCustomEditor`, so an error inside it can't reject that
+   * command's promise.
+   */
+  public static register(context: vscode.ExtensionContext): {
+    disposable: vscode.Disposable;
+    provider: CsvEditorProvider;
+  } {
+    const provider = new CsvEditorProvider(context);
+    const disposable = vscode.window.registerCustomEditorProvider(
       CsvEditorProvider.viewType,
-      new CsvEditorProvider(context),
+      provider,
       {
         supportsMultipleEditorsPerDocument: false,
         webviewOptions: { retainContextWhenHidden: true },
       }
     );
+    return { disposable, provider };
   }
 
+  private readonly _onDidPostCsvData = new vscode.EventEmitter<CsvParseOutcome>();
+  /** Fires whenever `csv-data` has been posted to a webview, with the parsed outcome. */
+  public readonly onDidPostCsvData: vscode.Event<CsvParseOutcome> = this._onDidPostCsvData.event;
+
   constructor(private readonly context: vscode.ExtensionContext) {}
+
+  dispose(): void {
+    this._onDidPostCsvData.dispose();
+  }
 
   openCustomDocument(uri: vscode.Uri): CsvDocument {
     return new CsvDocument(uri);
@@ -53,12 +78,13 @@ export class CsvEditorProvider
       if (message?.type === 'ready') {
         disposable.dispose();
         const outcome = await this.loadAndParseCsv(document.uri);
-        webview.postMessage({ type: 'csv-data', payload: outcome });
+        await webview.postMessage({ type: 'csv-data', payload: outcome });
+        this._onDidPostCsvData.fire(outcome);
       }
     });
   }
 
-  private async loadAndParseCsv(uri: vscode.Uri) {
+  private async loadAndParseCsv(uri: vscode.Uri): Promise<CsvParseOutcome> {
     try {
       const bytes = await vscode.workspace.fs.readFile(uri);
       const rawContent = new TextDecoder('utf-8').decode(bytes);

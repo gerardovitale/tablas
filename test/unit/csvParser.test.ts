@@ -1,7 +1,7 @@
 import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
-import { parseCsv, ParsedCsv } from '../../src/csvParser';
+import { parseCsv } from '../../src/csvParser';
 
 // Use process.cwd() (always the project root) to locate fixtures regardless
 // of whether we're running via ts-node or compiled JS in out/.

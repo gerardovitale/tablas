@@ -21,8 +21,18 @@ CSV only, read-only, installed locally (not yet on the Marketplace). Publishing 
 
 ```bash
 npm run compile      # build both bundles (extension + webview)
-npm run test:unit    # fast unit tests, no Electron
+npm run lint         # eslint (includes a project rule banning innerHTML assignment)
+npm run check-types  # tsc --noEmit
+npm run test:unit    # fast unit tests + c8 coverage report, no Electron
 npm test             # full suite: compile + typecheck + vscode-test (unit + integration)
 ```
 
 `npm run install:local` builds, tests, packages, and installs the extension into your local VS Code. See `scripts/install-local.sh --publish-help` for Marketplace publishing steps.
+
+### Test gates
+
+`npm install` installs [husky](https://typicode.github.io/husky/) git hooks (no GitHub remote is configured yet, so this is the enforcement point until CI is wired up):
+- **pre-commit**: `lint` + `check-types` + `test:unit` — fast, no Electron.
+- **pre-push**: full `npm test`, including the Electron-backed integration suite.
+
+Coverage (`npm run test:unit`, via `c8`, config in `.c8rc.json`) only instruments the unit suite. `src/csvEditorProvider.ts` and `src/extension.ts` are explicitly excluded from it: both `import 'vscode'`, a module that only exists inside a real Extension Development Host, so they can only ever be exercised by the integration suite (which `c8` can't instrument — it runs in a separate Electron process). Everything else under `src/` uses `all: true`, so a new unit-testable file with no tests shows up as 0% rather than being silently absent from the report.
