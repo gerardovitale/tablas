@@ -6,7 +6,9 @@
     "**/*.test.ts",
     "**/*.d.ts",
     "src/extension.ts",
-    "src/csvEditorProvider.ts"
+    "src/csvEditorProvider.ts",
+    "src/parquetEditorProvider.ts",
+    "src/webviewHtml.ts"
   ],
   "extension": [".ts", ".js"],
   "all": true,

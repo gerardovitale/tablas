@@ -1,38 +1,38 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { parseCsv, CsvParseOutcome } from './csvParser';
+import { parseParquet, ParquetParseOutcome } from './parquetParser';
 import { buildWebviewHtml } from './webviewHtml';
 
-class CsvDocument implements vscode.CustomDocument {
+class ParquetDocument implements vscode.CustomDocument {
   constructor(public readonly uri: vscode.Uri) {}
   dispose(): void {}
 }
 
-export class CsvEditorProvider
-  implements vscode.CustomReadonlyEditorProvider<CsvDocument>
+export class ParquetEditorProvider
+  implements vscode.CustomReadonlyEditorProvider<ParquetDocument>
 {
-  public static readonly viewType = 'tablas.csvViewer';
+  public static readonly viewType = 'tablas.parquetViewer';
 
   /**
    * Registers the provider and returns both the disposable (for
    * `context.subscriptions`) and the provider instance itself, so callers
    * — namely `extension.ts`'s public API — can observe
-   * `onDidPostCsvData`. Integration tests subscribe to that event to
-   * verify the extension-host/webview handshake actually completes,
-   * since `vscode.commands.executeCommand('vscode.openWith', ...)`
-   * resolving doesn't imply the webview ever received data: the
+   * `onDidPostParquetData`. Integration tests subscribe to that event to
+   * verify the extension-host/webview handshake actually completes, since
+   * `vscode.commands.executeCommand('vscode.openWith', ...)` resolving
+   * doesn't imply the webview ever received data: the
    * `onDidReceiveMessage` handler below is async and unawaited by
    * `resolveCustomEditor`, so an error inside it can't reject that
    * command's promise.
    */
   public static register(context: vscode.ExtensionContext): {
     disposable: vscode.Disposable;
-    provider: CsvEditorProvider;
+    provider: ParquetEditorProvider;
   } {
-    const provider = new CsvEditorProvider(context);
+    const provider = new ParquetEditorProvider(context);
     const disposable = vscode.window.registerCustomEditorProvider(
-      CsvEditorProvider.viewType,
+      ParquetEditorProvider.viewType,
       provider,
       {
         supportsMultipleEditorsPerDocument: false,
@@ -42,22 +42,23 @@ export class CsvEditorProvider
     return { disposable, provider };
   }
 
-  private readonly _onDidPostCsvData = new vscode.EventEmitter<CsvParseOutcome>();
-  /** Fires whenever `csv-data` has been posted to a webview, with the parsed outcome. */
-  public readonly onDidPostCsvData: vscode.Event<CsvParseOutcome> = this._onDidPostCsvData.event;
+  private readonly _onDidPostParquetData = new vscode.EventEmitter<ParquetParseOutcome>();
+  /** Fires whenever `parquet-data` has been posted to a webview, with the parsed outcome. */
+  public readonly onDidPostParquetData: vscode.Event<ParquetParseOutcome> =
+    this._onDidPostParquetData.event;
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
   dispose(): void {
-    this._onDidPostCsvData.dispose();
+    this._onDidPostParquetData.dispose();
   }
 
-  openCustomDocument(uri: vscode.Uri): CsvDocument {
-    return new CsvDocument(uri);
+  openCustomDocument(uri: vscode.Uri): ParquetDocument {
+    return new ParquetDocument(uri);
   }
 
   async resolveCustomEditor(
-    document: CsvDocument,
+    document: ParquetDocument,
     webviewPanel: vscode.WebviewPanel
   ): Promise<void> {
     const webview = webviewPanel.webview;
@@ -72,24 +73,24 @@ export class CsvEditorProvider
     // Generate a per-request nonce for CSP
     const nonce = crypto.randomBytes(16).toString('hex');
 
-    webview.html = buildWebviewHtml(webview, this.context.extensionPath, nonce, 'CSV Viewer');
+    webview.html = buildWebviewHtml(webview, this.context.extensionPath, nonce, 'Parquet Viewer');
 
     // Wait for 'ready' from webview, then send data
     const disposable = webview.onDidReceiveMessage(async (message) => {
       if (message?.type === 'ready') {
         disposable.dispose();
-        const outcome = await this.loadAndParseCsv(document.uri);
-        await webview.postMessage({ type: 'csv-data', payload: outcome });
-        this._onDidPostCsvData.fire(outcome);
+        const outcome = await this.loadAndParseParquet(document.uri);
+        await webview.postMessage({ type: 'parquet-data', payload: outcome });
+        this._onDidPostParquetData.fire(outcome);
       }
     });
   }
 
-  private async loadAndParseCsv(uri: vscode.Uri): Promise<CsvParseOutcome> {
+  private async loadAndParseParquet(uri: vscode.Uri): Promise<ParquetParseOutcome> {
     try {
+      // Binary format -- no TextDecoder step, bytes go straight to parseParquet.
       const bytes = await vscode.workspace.fs.readFile(uri);
-      const rawContent = new TextDecoder('utf-8').decode(bytes);
-      return parseCsv(rawContent);
+      return await parseParquet(bytes);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return {

@@ -92,12 +92,12 @@
   }
 
   /**
-   * @param {import('../../src/csvParser').CsvParseOutcome} outcome
+   * @param {import('../../src/tableData').TableParseOutcome} outcome
    */
   function renderOutcome(outcome) {
     if (!outcome.success) {
       const msgs = outcome.errors.map((e) => e.message).join('\n');
-      showMessage('Failed to parse CSV:\n' + msgs, true);
+      showMessage('Failed to parse file:\n' + msgs, true);
       return;
     }
     renderTable(outcome.data);
@@ -105,7 +105,7 @@
 
   window.addEventListener('message', (event) => {
     const message = event.data;
-    if (message && message.type === 'csv-data') {
+    if (message && (message.type === 'csv-data' || message.type === 'parquet-data')) {
       renderOutcome(message.payload);
     }
   });

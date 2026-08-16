@@ -1,22 +1,9 @@
 import Papa from 'papaparse';
+import type { ParsedTable, ParseError, TableParseOutcome } from './tableData';
 
-export interface ParsedCsv {
-  headers: string[];
-  rows: string[][];
-  rowCount: number;
-  columnCount: number;
-}
-
-export interface ParseError {
-  type: string;
-  code: string;
-  message: string;
-  row?: number;
-}
-
-export type CsvParseOutcome =
-  | { success: true; data: ParsedCsv; errors: ParseError[] }
-  | { success: false; errors: ParseError[] };
+export type ParsedCsv = ParsedTable;
+export type { ParseError };
+export type CsvParseOutcome = TableParseOutcome;
 
 export function parseCsv(rawContent: string): CsvParseOutcome {
   if (rawContent.trim() === '') {

@@ -1,7 +1,7 @@
 {
   "name": "tablas",
-  "displayName": "Tablas - CSV Viewer",
-  "description": "Open CSV files in a pretty, theme-aware table view.",
+  "displayName": "Tablas - CSV & Parquet Viewer",
+  "description": "Open CSV and Parquet files in a pretty, theme-aware table view.",
   "version": "0.1.0",
   "publisher": "gerardovitale",
   "license": "MIT",
@@ -15,6 +15,7 @@
   ],
   "keywords": [
     "csv",
+    "parquet",
     "table",
     "viewer",
     "data"
@@ -29,6 +30,16 @@
         "selector": [
           {
             "filenamePattern": "*.csv"
+          }
+        ],
+        "priority": "default"
+      },
+      {
+        "viewType": "tablas.parquetViewer",
+        "displayName": "Parquet Table Viewer",
+        "selector": [
+          {
+            "filenamePattern": "*.parquet"
           }
         ],
         "priority": "default"
@@ -68,6 +79,7 @@
     "typescript-eslint": "^8.67.0"
   },
   "dependencies": {
+    "hyparquet": "^1.28.2",
     "papaparse": "^5.5.3"
   }
 }
