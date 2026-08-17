@@ -9,3 +9,11 @@ tsconfig.json
 .gitignore
 node_modules/**
 !node_modules/papaparse/**
+coverage/**
+.husky/**
+.claude/**
+.c8rc.json
+.nvmrc
+CLAUDE.md
+eslint.config.js
+scripts/**

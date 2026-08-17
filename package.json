@@ -5,6 +5,10 @@
   "version": "0.1.0",
   "publisher": "gerardovitale",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gerardovitale/tablas.git"
+  },
   "engines": {
     "node": ">=20",
     "vscode": "^1.74.0"
