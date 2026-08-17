@@ -44,7 +44,18 @@
         ],
         "priority": "default"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Tablas",
+      "properties": {
+        "tablas.maxRows": {
+          "type": "number",
+          "default": 5000,
+          "minimum": 1,
+          "description": "Maximum number of rows loaded per file. Increase to see more rows in large files, at the cost of load time."
+        }
+      }
+    }
   },
   "scripts": {
     "compile": "node esbuild.js",

@@ -71,6 +71,7 @@ describe('parseCsv', () => {
       if (result.success) {
         assert.strictEqual(result.data.rowCount, 3);
         assert.strictEqual(result.data.columnCount, 3);
+        assert.strictEqual(result.data.totalRowCount, 3);
       }
     });
 
@@ -138,6 +139,56 @@ describe('parseCsv', () => {
       if (result.success) {
         assert.strictEqual(result.data.rowCount, 3);
         assert.ok(result.data.rows[0][1].includes('\n'));
+      }
+    });
+  });
+
+  describe('maxRows', () => {
+    it('truncates rows and reports the true total via totalRowCount', () => {
+      const result = parseCsv(fixture('simple.csv'), 2);
+      assert.strictEqual(result.success, true);
+      if (result.success) {
+        assert.strictEqual(result.data.rows.length, 2);
+        assert.strictEqual(result.data.rowCount, 2);
+        assert.strictEqual(result.data.totalRowCount, 3);
+        assert.deepStrictEqual(result.data.rows[0], ['Alice', '30', 'New York']);
+        assert.deepStrictEqual(result.data.rows[1], ['Bob', '25', 'London']);
+      }
+    });
+
+    it('is a no-op when maxRows exceeds the actual row count', () => {
+      const result = parseCsv(fixture('simple.csv'), 100);
+      assert.strictEqual(result.success, true);
+      if (result.success) {
+        assert.strictEqual(result.data.rowCount, 3);
+        assert.strictEqual(result.data.totalRowCount, 3);
+      }
+    });
+
+    it('clamps a negative maxRows to 1 row instead of slicing from the end', () => {
+      // A raw Array.slice(0, -1) would mean "all but the last row" --
+      // clampMaxRows must intercept this before it reaches the slice.
+      const result = parseCsv(fixture('simple.csv'), -1);
+      assert.strictEqual(result.success, true);
+      if (result.success) {
+        assert.strictEqual(result.data.rowCount, 1);
+        assert.deepStrictEqual(result.data.rows[0], ['Alice', '30', 'New York']);
+      }
+    });
+
+    it('floors a fractional maxRows', () => {
+      const result = parseCsv(fixture('simple.csv'), 1.9);
+      assert.strictEqual(result.success, true);
+      if (result.success) {
+        assert.strictEqual(result.data.rowCount, 1);
+      }
+    });
+
+    it('clamps a zero maxRows up to 1 row rather than returning none', () => {
+      const result = parseCsv(fixture('simple.csv'), 0);
+      assert.strictEqual(result.success, true);
+      if (result.success) {
+        assert.strictEqual(result.data.rowCount, 1);
       }
     });
   });

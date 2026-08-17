@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { parseParquet, ParquetParseOutcome } from './parquetParser';
 import { buildWebviewHtml } from './webviewHtml';
+import { getMaxRowsSetting } from './config';
 
 class ParquetDocument implements vscode.CustomDocument {
   constructor(public readonly uri: vscode.Uri) {}
@@ -90,7 +91,7 @@ export class ParquetEditorProvider
     try {
       // Binary format -- no TextDecoder step, bytes go straight to parseParquet.
       const bytes = await vscode.workspace.fs.readFile(uri);
-      return await parseParquet(bytes);
+      return await parseParquet(bytes, getMaxRowsSetting());
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return {

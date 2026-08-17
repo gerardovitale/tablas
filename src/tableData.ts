@@ -8,6 +8,12 @@ export interface ParsedTable {
   rows: string[][];
   rowCount: number;
   columnCount: number;
+  /**
+   * True row count in the source file, when it exceeds `rowCount` (i.e. the
+   * result was truncated by a maxRows cap). Omitted, or equal to
+   * `rowCount`, means the result is not truncated.
+   */
+  totalRowCount?: number;
 }
 
 export interface ParseError {
@@ -20,3 +26,30 @@ export interface ParseError {
 export type TableParseOutcome =
   | { success: true; data: ParsedTable; errors: ParseError[] }
   | { success: false; errors: ParseError[] };
+
+/**
+ * Normalizes a caller-supplied `maxRows` into a safe integer >= 1, or
+ * `undefined` (meaning "no cap"). Guards against negative/fractional
+ * values reaching `Array.slice`/hyparquet's `rowEnd` unsanitized -- e.g.
+ * `allRows.slice(0, -5)` doesn't truncate from the start, it means "all
+ * but the last 5," which is not what a negative maxRows should do.
+ * `undefined`/non-finite input passes through as "no cap", matching every
+ * existing caller that omits the parameter.
+ */
+export function clampMaxRows(maxRows: number | undefined): number | undefined {
+  if (maxRows === undefined || !Number.isFinite(maxRows)) {
+    return maxRows;
+  }
+  return Math.max(1, Math.floor(maxRows));
+}
+
+/**
+ * Converts a bigint row count (e.g. Parquet's metadata.num_rows) into a
+ * plain number, clamping to Number.MAX_SAFE_INTEGER instead of letting
+ * Number(bigint) silently round once the value passes 2^53. Unrealistic
+ * for an actual file's row count, but a deterministic clamp beats a
+ * silently-inexact cast.
+ */
+export function bigIntToSafeNumber(value: bigint): number {
+  return value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : Number.MAX_SAFE_INTEGER;
+}

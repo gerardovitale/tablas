@@ -45,6 +45,23 @@ body {
   table-layout: auto;
 }
 
+/* Applied by the webview only for large tables (see main.js) -- fixed
+   layout skips the full-content layout pass across every row to size
+   columns, which is worth the trade-off only once row count makes that
+   pass expensive. Small tables keep table-layout: auto so columns still
+   hug their actual content instead of a flat default width. */
+#csv-table.table-fixed {
+  table-layout: fixed;
+}
+
+/* :not(.row-num) so the gutter column keeps its own width below --
+   #csv-table.table-fixed th alone would outrank th.row-num on specificity
+   (ID+class+element beats class+element) and collapse the gutter. */
+#csv-table.table-fixed th:not(.row-num),
+#csv-table.table-fixed td:not(.row-num) {
+  width: 160px;
+}
+
 /* ── Header ─────────────────────────────────────────── */
 
 thead tr {

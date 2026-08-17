@@ -94,6 +94,76 @@ describe('webview main.js rendering', () => {
     assert.strictEqual(stats?.textContent, '2 rows × 2 columns');
   });
 
+  it('keeps table-layout auto (no table-fixed class) for small tables', () => {
+    const { dom } = loadWebview();
+    sendCsvData(dom, {
+      success: true,
+      errors: [],
+      data: {
+        headers: ['name'],
+        rows: [['Alice'], ['Bob']],
+        rowCount: 2,
+        columnCount: 1,
+      },
+    });
+
+    const app = dom.window.document.getElementById('app')!;
+    const table = app.querySelector('#csv-table');
+    assert.strictEqual(table?.classList.contains('table-fixed'), false);
+  });
+
+  it('switches to table-layout fixed (table-fixed class) once row count is large', () => {
+    const { dom } = loadWebview();
+    const rows = Array.from({ length: 501 }, (_, i) => [`row${i}`]);
+    sendCsvData(dom, {
+      success: true,
+      errors: [],
+      data: { headers: ['name'], rows, rowCount: rows.length, columnCount: 1 },
+    });
+
+    const app = dom.window.document.getElementById('app')!;
+    const table = app.querySelector('#csv-table');
+    assert.strictEqual(table?.classList.contains('table-fixed'), true);
+  });
+
+  it('appends a truncation notice to the stats bar when totalRowCount exceeds rowCount', () => {
+    const { dom } = loadWebview();
+    sendCsvData(dom, {
+      success: true,
+      errors: [],
+      data: {
+        headers: ['name'],
+        rows: [['Alice']],
+        rowCount: 1,
+        columnCount: 1,
+        totalRowCount: 5,
+      },
+    });
+
+    const app = dom.window.document.getElementById('app')!;
+    const stats = app.querySelector('.stats-bar');
+    assert.match(stats?.textContent ?? '', /showing first 1 of 5/i);
+  });
+
+  it('omits the truncation notice when totalRowCount equals rowCount', () => {
+    const { dom } = loadWebview();
+    sendCsvData(dom, {
+      success: true,
+      errors: [],
+      data: {
+        headers: ['name'],
+        rows: [['Alice']],
+        rowCount: 1,
+        columnCount: 1,
+        totalRowCount: 1,
+      },
+    });
+
+    const app = dom.window.document.getElementById('app')!;
+    const stats = app.querySelector('.stats-bar');
+    assert.strictEqual(stats?.textContent, '1 row × 1 column');
+  });
+
   it('shows an empty-file message when columnCount is 0', () => {
     const { dom } = loadWebview();
     sendCsvData(dom, {

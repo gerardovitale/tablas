@@ -40,6 +40,7 @@ describe('parseParquet', () => {
       if (result.success) {
         assert.strictEqual(result.data.rowCount, 3);
         assert.strictEqual(result.data.columnCount, 4);
+        assert.strictEqual(result.data.totalRowCount, 3);
       }
     });
 
@@ -49,6 +50,46 @@ describe('parseParquet', () => {
       if (result.success) {
         assert.deepStrictEqual(result.data.rows[0], ['1', 'Alice', '9.5', 'true']);
         assert.deepStrictEqual(result.data.rows[1], ['2', 'Bob', '4', 'false']);
+      }
+    });
+  });
+
+  describe('maxRows', () => {
+    it('truncates rows and reports the true total via totalRowCount', async () => {
+      const result = await parseParquet(await fixtureBytes('simple.parquet'), 2);
+      assert.strictEqual(result.success, true);
+      if (result.success) {
+        assert.strictEqual(result.data.rows.length, 2);
+        assert.strictEqual(result.data.rowCount, 2);
+        assert.strictEqual(result.data.totalRowCount, 3);
+        assert.deepStrictEqual(result.data.rows[0], ['1', 'Alice', '9.5', 'true']);
+        assert.deepStrictEqual(result.data.rows[1], ['2', 'Bob', '4', 'false']);
+      }
+    });
+
+    it('is a no-op when maxRows exceeds the actual row count', async () => {
+      const result = await parseParquet(await fixtureBytes('simple.parquet'), 100);
+      assert.strictEqual(result.success, true);
+      if (result.success) {
+        assert.strictEqual(result.data.rowCount, 3);
+        assert.strictEqual(result.data.totalRowCount, 3);
+      }
+    });
+
+    it('clamps a negative maxRows to 1 row instead of an invalid rowEnd', async () => {
+      const result = await parseParquet(await fixtureBytes('simple.parquet'), -1);
+      assert.strictEqual(result.success, true);
+      if (result.success) {
+        assert.strictEqual(result.data.rowCount, 1);
+        assert.deepStrictEqual(result.data.rows[0], ['1', 'Alice', '9.5', 'true']);
+      }
+    });
+
+    it('floors a fractional maxRows', async () => {
+      const result = await parseParquet(await fixtureBytes('simple.parquet'), 1.9);
+      assert.strictEqual(result.success, true);
+      if (result.success) {
+        assert.strictEqual(result.data.rowCount, 1);
       }
     });
   });

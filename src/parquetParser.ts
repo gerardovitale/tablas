@@ -1,4 +1,10 @@
-import type { ParsedTable, ParseError, TableParseOutcome } from './tableData';
+import {
+  bigIntToSafeNumber,
+  clampMaxRows,
+  type ParsedTable,
+  type ParseError,
+  type TableParseOutcome,
+} from './tableData';
 
 export type ParsedParquet = ParsedTable;
 export type { ParseError };
@@ -47,7 +53,11 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
 
-export async function parseParquet(bytes: Uint8Array): Promise<ParquetParseOutcome> {
+export async function parseParquet(
+  bytes: Uint8Array,
+  maxRowsInput?: number
+): Promise<ParquetParseOutcome> {
+  const maxRows = clampMaxRows(maxRowsInput);
   if (bytes.byteLength === 0) {
     return {
       success: true,
@@ -72,14 +82,27 @@ export async function parseParquet(bytes: Uint8Array): Promise<ParquetParseOutco
     // breaks for 0-row files (mirrors csvParser's use of result.meta?.fields).
     const headers: string[] = schema.children.map((child) => child.element.name);
 
-    const objectRows = await parquetReadObjects({ file, metadata });
+    // metadata.num_rows is a bigint; hyparquet's rowStart/rowEnd are plain
+    // numbers, so this also bounds the row count read below.
+    const totalRows = bigIntToSafeNumber(metadata.num_rows);
+    const rowEnd = maxRows != null ? Math.min(maxRows, totalRows) : totalRows;
+
+    // rowStart/rowEnd caps how many rows hyparquet decodes at all -- the
+    // actual perf win, not just a slice of an already-fully-decoded result.
+    const objectRows = await parquetReadObjects({ file, metadata, rowStart: 0, rowEnd });
     const rows: string[][] = objectRows.map((row) =>
       headers.map((h) => stringifyCell(row[h]))
     );
 
     return {
       success: true,
-      data: { headers, rows, rowCount: rows.length, columnCount: headers.length },
+      data: {
+        headers,
+        rows,
+        rowCount: rows.length,
+        columnCount: headers.length,
+        totalRowCount: totalRows,
+      },
       errors: [],
     };
   } catch (err) {

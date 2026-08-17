@@ -4,6 +4,12 @@
 (function () {
   const vscode = acquireVsCodeApi();
 
+  // Above this row count, switch to table-layout: fixed (see styles.css)
+  // to skip the full-content layout pass. Below it, auto layout looks
+  // better (columns hug their actual content) and the pass is cheap
+  // enough not to matter.
+  const LARGE_TABLE_ROW_THRESHOLD = 500;
+
   /** @param {string} tag @param {Record<string, string>=} attrs @returns {HTMLElement} */
   function el(tag, attrs) {
     const elem = document.createElement(tag);
@@ -25,7 +31,7 @@
   }
 
   /**
-   * @param {{ headers: string[], rows: string[][], rowCount: number, columnCount: number }} data
+   * @param {{ headers: string[], rows: string[][], rowCount: number, columnCount: number, totalRowCount?: number }} data
    */
   function renderTable(data) {
     const app = document.getElementById('app');
@@ -39,13 +45,20 @@
 
     // Stats bar
     const stats = el('div', { class: 'stats-bar' });
-    stats.textContent = `${data.rowCount} row${data.rowCount !== 1 ? 's' : ''} × ${data.columnCount} column${data.columnCount !== 1 ? 's' : ''}`;
+    let statsText = `${data.rowCount} row${data.rowCount !== 1 ? 's' : ''} × ${data.columnCount} column${data.columnCount !== 1 ? 's' : ''}`;
+    if (data.totalRowCount != null && data.totalRowCount > data.rowCount) {
+      statsText += ` (showing first ${data.rowCount} of ${data.totalRowCount} — increase tablas.maxRows in settings to see more)`;
+    }
+    stats.textContent = statsText;
     app.appendChild(stats);
 
     // Scroll wrapper
     const wrapper = el('div', { class: 'scroll-wrapper' });
 
-    const table = el('table', { id: 'csv-table' });
+    const table = el('table', {
+      id: 'csv-table',
+      ...(data.rows.length > LARGE_TABLE_ROW_THRESHOLD ? { class: 'table-fixed' } : {}),
+    });
 
     // <thead>
     const thead = el('thead');

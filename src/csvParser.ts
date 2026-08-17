@@ -1,11 +1,12 @@
 import Papa from 'papaparse';
-import type { ParsedTable, ParseError, TableParseOutcome } from './tableData';
+import { clampMaxRows, type ParsedTable, type ParseError, type TableParseOutcome } from './tableData';
 
 export type ParsedCsv = ParsedTable;
 export type { ParseError };
 export type CsvParseOutcome = TableParseOutcome;
 
-export function parseCsv(rawContent: string): CsvParseOutcome {
+export function parseCsv(rawContent: string, maxRowsInput?: number): CsvParseOutcome {
+  const maxRows = clampMaxRows(maxRowsInput);
   if (rawContent.trim() === '') {
     return {
       success: true,
@@ -30,9 +31,14 @@ export function parseCsv(rawContent: string): CsvParseOutcome {
   }));
 
   const headers: string[] = result.meta?.fields ?? [];
-  const rows: string[][] = (result.data ?? []).map((row) =>
+  const allRows: string[][] = (result.data ?? []).map((row) =>
     headers.map((h) => String(row[h] ?? ''))
   );
+  const totalRows = allRows.length;
+  // Papaparse has already parsed the whole string by this point, so this
+  // slice doesn't save decode time -- it shrinks the postMessage payload
+  // and the webview's DOM node count, same as the parquet row cap.
+  const rows: string[][] = maxRows != null ? allRows.slice(0, maxRows) : allRows;
 
   const hasFatalError =
     errors.length > 0 &&
@@ -51,6 +57,7 @@ export function parseCsv(rawContent: string): CsvParseOutcome {
       rows,
       rowCount: rows.length,
       columnCount: headers.length,
+      totalRowCount: totalRows,
     },
     errors,
   };
