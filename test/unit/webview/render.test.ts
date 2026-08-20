@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as vm from 'vm';
 import { JSDOM } from 'jsdom';
 import type { CsvParseOutcome } from '../../../src/csvParser';
+import type { MultiTableParseOutcome } from '../../../src/tableData';
 
 const webviewMainPath = path.join(process.cwd(), 'src', 'webview', 'main.js');
 const webviewMainSource = fs.readFileSync(webviewMainPath, 'utf8');
@@ -44,6 +45,12 @@ function loadWebview(): { dom: JSDOM; postedMessages: unknown[] } {
 function sendCsvData(dom: JSDOM, payload: CsvParseOutcome): void {
   dom.window.dispatchEvent(
     new dom.window.MessageEvent('message', { data: { type: 'csv-data', payload } })
+  );
+}
+
+function sendSqliteData(dom: JSDOM, payload: MultiTableParseOutcome): void {
+  dom.window.dispatchEvent(
+    new dom.window.MessageEvent('message', { data: { type: 'sqlite-data', payload } })
   );
 }
 
@@ -210,5 +217,204 @@ describe('webview main.js rendering', () => {
     // The literal string is present as text instead.
     const headerCell = app.querySelector('thead th:not(.row-num)');
     assert.strictEqual(headerCell?.textContent, payload);
+  });
+
+  describe('sqlite-data (multi-table sources)', () => {
+    it('renders a table selector with the right option pre-selected, plus the table', () => {
+      const { dom } = loadWebview();
+      sendSqliteData(dom, {
+        success: true,
+        errors: [],
+        data: {
+          tables: [
+            { name: 'customers', type: 'table' },
+            { name: 'customer_totals', type: 'view' },
+          ],
+          selectedTable: 'customer_totals',
+          data: {
+            headers: ['name', 'total'],
+            rows: [['Acme', '25.49']],
+            rowCount: 1,
+            columnCount: 2,
+          },
+        },
+      });
+
+      const app = dom.window.document.getElementById('app')!;
+      const select = app.querySelector('select') as HTMLSelectElement | null;
+      assert.ok(select, 'a table selector should be rendered');
+      const options = Array.from(select!.querySelectorAll('option'));
+      assert.deepStrictEqual(
+        options.map((o) => [o.getAttribute('value'), o.textContent]),
+        [
+          ['customers', 'customers'],
+          ['customer_totals', 'customer_totals (view)'],
+        ]
+      );
+      assert.strictEqual(select!.value, 'customer_totals');
+
+      const table = app.querySelector('table');
+      assert.ok(table, 'the selected table should also be rendered');
+    });
+
+    it('keeps the selector visible when the selected table has zero columns', () => {
+      const { dom } = loadWebview();
+      sendSqliteData(dom, {
+        success: true,
+        errors: [],
+        data: {
+          tables: [
+            { name: 'empty_table', type: 'table' },
+            { name: 'other', type: 'table' },
+          ],
+          selectedTable: 'empty_table',
+          data: { headers: [], rows: [], rowCount: 0, columnCount: 0 },
+        },
+      });
+
+      const app = dom.window.document.getElementById('app')!;
+      const select = app.querySelector('select') as HTMLSelectElement | null;
+      assert.ok(select, 'the table selector should survive a zero-column selection');
+      assert.strictEqual(select!.value, 'empty_table');
+      assert.match(app.textContent ?? '', /empty file/i);
+    });
+
+    it('drops a stale select-table response superseded by a newer request', () => {
+      const { dom } = loadWebview();
+      sendSqliteData(dom, {
+        success: true,
+        errors: [],
+        data: {
+          tables: [
+            { name: 'a', type: 'table' },
+            { name: 'b', type: 'table' },
+          ],
+          selectedTable: 'a',
+          data: { headers: ['id'], rows: [['1']], rowCount: 1, columnCount: 1 },
+        },
+      });
+
+      const app = dom.window.document.getElementById('app')!;
+      const select = app.querySelector('select') as HTMLSelectElement;
+      // Simulate the user switching twice before either response arrives.
+      select.value = 'b';
+      select.dispatchEvent(new dom.window.Event('change'));
+
+      // A late response for the first (now-superseded) request for 'a'
+      // should be dropped, not flash 'a' back onto the screen.
+      sendSqliteData(dom, {
+        success: true,
+        errors: [],
+        data: {
+          tables: [
+            { name: 'a', type: 'table' },
+            { name: 'b', type: 'table' },
+          ],
+          selectedTable: 'a',
+          data: { headers: ['id'], rows: [['1']], rowCount: 1, columnCount: 1 },
+        },
+      });
+
+      const selectAfterStale = app.querySelector('select') as HTMLSelectElement;
+      assert.strictEqual(selectAfterStale.value, 'b', 'a stale response for "a" must not override "b"');
+
+      // The real response for 'b' should still be accepted normally.
+      sendSqliteData(dom, {
+        success: true,
+        errors: [],
+        data: {
+          tables: [
+            { name: 'a', type: 'table' },
+            { name: 'b', type: 'table' },
+          ],
+          selectedTable: 'b',
+          data: { headers: ['id'], rows: [['2']], rowCount: 1, columnCount: 1 },
+        },
+      });
+
+      const selectAfterFresh = app.querySelector('select') as HTMLSelectElement;
+      assert.strictEqual(selectAfterFresh.value, 'b');
+      const bodyRow = app.querySelector('tbody tr');
+      assert.deepStrictEqual(
+        Array.from(bodyRow!.querySelectorAll('td')).map((td) => td.textContent),
+        ['1', '2']
+      );
+    });
+
+    it('posts a select-table message when the dropdown changes', () => {
+      const { dom, postedMessages } = loadWebview();
+      sendSqliteData(dom, {
+        success: true,
+        errors: [],
+        data: {
+          tables: [
+            { name: 'customers', type: 'table' },
+            { name: 'orders', type: 'table' },
+          ],
+          selectedTable: 'customers',
+          data: { headers: ['id'], rows: [['1']], rowCount: 1, columnCount: 1 },
+        },
+      });
+
+      const app = dom.window.document.getElementById('app')!;
+      const select = app.querySelector('select') as HTMLSelectElement;
+      select.value = 'orders';
+      select.dispatchEvent(new dom.window.Event('change'));
+
+      assert.deepStrictEqual(postedMessages[postedMessages.length - 1], {
+        type: 'select-table',
+        table: 'orders',
+      });
+    });
+
+    it('shows a "no tables" message and no selector/table for a table-less database', () => {
+      const { dom } = loadWebview();
+      sendSqliteData(dom, {
+        success: true,
+        errors: [],
+        data: {
+          tables: [],
+          selectedTable: '',
+          data: { headers: [], rows: [], rowCount: 0, columnCount: 0 },
+        },
+      });
+
+      const app = dom.window.document.getElementById('app')!;
+      assert.strictEqual(app.querySelector('select'), null);
+      assert.strictEqual(app.querySelector('table'), null);
+      assert.match(app.textContent ?? '', /no tables found/i);
+    });
+
+    it('shows an error message when parsing fails, without touching innerHTML', () => {
+      const { dom } = loadWebview();
+      sendSqliteData(dom, {
+        success: false,
+        errors: [{ type: 'SqliteError', code: 'NotASqliteFile', message: 'not a sqlite file' }],
+      });
+
+      const app = dom.window.document.getElementById('app')!;
+      const message = app.querySelector('.message.error');
+      assert.ok(message, 'error message element should be rendered');
+      assert.match(message!.textContent ?? '', /not a sqlite file/);
+    });
+
+    it('renders untrusted table names as inert text, not markup', () => {
+      const { dom } = loadWebview();
+      const payload = '<img src=x onerror=alert(1)>';
+      sendSqliteData(dom, {
+        success: true,
+        errors: [],
+        data: {
+          tables: [{ name: payload, type: 'table' }],
+          selectedTable: payload,
+          data: { headers: ['x'], rows: [['1']], rowCount: 1, columnCount: 1 },
+        },
+      });
+
+      const app = dom.window.document.getElementById('app')!;
+      assert.strictEqual(app.querySelector('img'), null);
+      const option = app.querySelector('option');
+      assert.strictEqual(option?.textContent, payload);
+    });
   });
 });

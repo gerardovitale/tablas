@@ -28,6 +28,33 @@ export type TableParseOutcome =
   | { success: false; errors: ParseError[] };
 
 /**
+ * A single table or view inside a multi-table source (e.g. a SQLite
+ * database). Distinct from `ParsedTable`, which is the *contents* of one
+ * such table/view once selected.
+ */
+export interface TableRef {
+  name: string;
+  type: 'table' | 'view';
+}
+
+/**
+ * The full picture posted to the webview for a multi-table source: every
+ * table/view available in the file, which one is currently selected, and
+ * that selection's parsed contents. Named generically (not `Sqlite*`) so a
+ * future multi-table format (e.g. DuckDB) can reuse this shape and the
+ * webview's rendering path unchanged.
+ */
+export interface MultiTableData {
+  tables: TableRef[];
+  selectedTable: string;
+  data: ParsedTable;
+}
+
+export type MultiTableParseOutcome =
+  | { success: true; data: MultiTableData; errors: ParseError[] }
+  | { success: false; errors: ParseError[] };
+
+/**
  * Normalizes a caller-supplied `maxRows` into a safe integer >= 1, or
  * `undefined` (meaning "no cap"). Guards against negative/fractional
  * values reaching `Array.slice`/hyparquet's `rowEnd` unsanitized -- e.g.

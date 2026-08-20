@@ -11,7 +11,7 @@ const extensionConfig = {
   format: 'cjs',
   platform: 'node',
   target: 'node20',
-  external: ['vscode'],
+  external: ['vscode', 'sql.js'],
   sourcemap: !production,
   minify: production,
 };

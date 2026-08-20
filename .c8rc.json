@@ -8,6 +8,7 @@
     "src/extension.ts",
     "src/csvEditorProvider.ts",
     "src/parquetEditorProvider.ts",
+    "src/sqliteEditorProvider.ts",
     "src/webviewHtml.ts"
   ],
   "extension": [".ts", ".js"],

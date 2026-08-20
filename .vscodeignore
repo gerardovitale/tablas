@@ -9,6 +9,20 @@ tsconfig.json
 .gitignore
 node_modules/**
 !node_modules/papaparse/**
+# Only sql.js's WASM runtime is needed at runtime (loaded via
+# require.resolve('sql.js/dist/sql-wasm.wasm') in sqliteParser.ts) --
+# excluding its many other dist variants (asm.js, debug, browser, worker
+# builds, zip archives) keeps the package ~30x smaller than a blanket
+# `!node_modules/sql.js/**` would. Note: vsce's .vscodeignore matching
+# (see @vscode/vsce's collectFiles) isn't real gitignore semantics -- it's
+# "keep a file if it matches ANY negate line", with no directory-level
+# re-include/last-match-wins precedence. A `!node_modules/sql.js/**`-style
+# broad re-include line would silently defeat every exclusion below it, so
+# list exactly the files actually needed instead of trying to negate a
+# subtraction from a broad include.
+!node_modules/sql.js/package.json
+!node_modules/sql.js/dist/sql-wasm.js
+!node_modules/sql.js/dist/sql-wasm.wasm
 coverage/**
 .husky/**
 .claude/**

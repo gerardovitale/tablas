@@ -1,7 +1,7 @@
 {
   "name": "tablas",
-  "displayName": "Tablas - CSV & Parquet Viewer",
-  "description": "Open CSV and Parquet files in a pretty, theme-aware table view.",
+  "displayName": "Tablas - CSV, Parquet & SQLite Viewer",
+  "description": "Open CSV, Parquet, and SQLite files in a pretty, theme-aware table view.",
   "version": "0.1.0",
   "publisher": "gerardovitale",
   "license": "MIT",
@@ -20,6 +20,8 @@
   "keywords": [
     "csv",
     "parquet",
+    "sqlite",
+    "database",
     "table",
     "viewer",
     "data"
@@ -44,6 +46,22 @@
         "selector": [
           {
             "filenamePattern": "*.parquet"
+          }
+        ],
+        "priority": "default"
+      },
+      {
+        "viewType": "tablas.sqliteViewer",
+        "displayName": "SQLite Table Viewer",
+        "selector": [
+          {
+            "filenamePattern": "*.db"
+          },
+          {
+            "filenamePattern": "*.sqlite"
+          },
+          {
+            "filenamePattern": "*.sqlite3"
           }
         ],
         "priority": "default"
@@ -80,6 +98,7 @@
     "@types/mocha": "^10.0.0",
     "@types/node": "^20.0.0",
     "@types/papaparse": "^5.3.0",
+    "@types/sql.js": "^1.4.11",
     "@types/vscode": "^1.74.0",
     "@vscode/test-cli": "^0.0.10",
     "@vscode/test-electron": "^3.1.0",
@@ -95,6 +114,7 @@
   },
   "dependencies": {
     "hyparquet": "^1.28.2",
-    "papaparse": "^5.5.3"
+    "papaparse": "^5.5.3",
+    "sql.js": "^1.14.2"
   }
 }

@@ -21,25 +21,43 @@
     return elem;
   }
 
-  function showMessage(text, isError) {
+  function clearApp() {
+    const app = document.getElementById('app');
+    if (app) { app.textContent = ''; }
+  }
+
+  // Appends a message paragraph without clearing #app first -- used by
+  // renderTable's empty-data branch so a sibling table selector (multi-table
+  // sources) survives. showMessage (below) is the clear-then-append version
+  // used everywhere else, where #app should be replaced wholesale.
+  function appendMessage(text, isError) {
     const app = document.getElementById('app');
     if (!app) { return; }
-    app.textContent = '';
     const p = el('p', { class: isError ? 'message error' : 'message' });
     p.textContent = text;
     app.appendChild(p);
   }
 
+  function showMessage(text, isError) {
+    clearApp();
+    appendMessage(text, isError);
+  }
+
   /**
+   * Renders the stats bar + table into #app. Does NOT clear #app itself --
+   * callers clear first, so a multi-table source (e.g. SQLite) can render a
+   * table selector as #app's first child and this as a sibling after it.
+   * Empty data likewise only appends a message (via appendMessage, not
+   * showMessage) rather than clearing -- otherwise selecting a table/view
+   * with zero columns would wipe out the selector that was just rendered.
    * @param {{ headers: string[], rows: string[][], rowCount: number, columnCount: number, totalRowCount?: number }} data
    */
   function renderTable(data) {
     const app = document.getElementById('app');
     if (!app) { return; }
-    app.textContent = '';
 
     if (data.columnCount === 0) {
-      showMessage('Empty file — no data to display.', false);
+      appendMessage('Empty file — no data to display.', false);
       return;
     }
 
@@ -108,6 +126,7 @@
    * @param {import('../../src/tableData').TableParseOutcome} outcome
    */
   function renderOutcome(outcome) {
+    clearApp();
     if (!outcome.success) {
       const msgs = outcome.errors.map((e) => e.message).join('\n');
       showMessage('Failed to parse file:\n' + msgs, true);
@@ -116,10 +135,78 @@
     renderTable(outcome.data);
   }
 
+  // Tracks the most recently user-requested table name, so a stale
+  // select-table response (superseded by a newer request already in
+  // flight, if they resolve out of order) can be dropped instead of
+  // flashing outdated data. undefined until the user changes the dropdown
+  // for the first time -- the initial load's response is always accepted.
+  let requestedTable;
+
+  /**
+   * Builds a <select> listing every table/view in a multi-table source
+   * (e.g. SQLite), with `selectedTable` pre-selected. Switching it posts a
+   * `select-table` request back to the extension host, which re-queries the
+   * already-open database and responds with a fresh payload of the same
+   * message type -- see renderMultiTableOutcome below.
+   * @param {import('../../src/tableData').TableRef[]} tables
+   * @param {string} selectedTable
+   */
+  function renderTableSelector(tables, selectedTable) {
+    const wrapper = el('div', { class: 'table-selector' });
+    const select = el('select', { 'aria-label': 'Table' });
+    for (const table of tables) {
+      const option = el('option', { value: table.name });
+      option.textContent = table.type === 'view' ? `${table.name} (view)` : table.name;
+      if (table.name === selectedTable) {
+        option.selected = true;
+      }
+      select.appendChild(option);
+    }
+    select.addEventListener('change', () => {
+      requestedTable = select.value;
+      vscode.postMessage({ type: 'select-table', table: requestedTable });
+    });
+    wrapper.appendChild(select);
+    return wrapper;
+  }
+
+  /**
+   * @param {import('../../src/tableData').MultiTableParseOutcome} outcome
+   */
+  function renderMultiTableOutcome(outcome) {
+    if (
+      outcome.success &&
+      requestedTable !== undefined &&
+      outcome.data.selectedTable !== requestedTable
+    ) {
+      // A response to an older select-table request, superseded by a newer
+      // one already in flight -- drop it rather than momentarily showing a
+      // table the user already moved away from.
+      return;
+    }
+    clearApp();
+    if (!outcome.success) {
+      const msgs = outcome.errors.map((e) => e.message).join('\n');
+      showMessage('Failed to parse file:\n' + msgs, true);
+      return;
+    }
+    if (outcome.data.tables.length === 0) {
+      showMessage('No tables found in this database.', false);
+      return;
+    }
+    const app = document.getElementById('app');
+    if (!app) { return; }
+    app.appendChild(renderTableSelector(outcome.data.tables, outcome.data.selectedTable));
+    renderTable(outcome.data.data);
+  }
+
   window.addEventListener('message', (event) => {
     const message = event.data;
-    if (message && (message.type === 'csv-data' || message.type === 'parquet-data')) {
+    if (!message) { return; }
+    if (message.type === 'csv-data' || message.type === 'parquet-data') {
       renderOutcome(message.payload);
+    } else if (message.type === 'sqlite-data') {
+      renderMultiTableOutcome(message.payload);
     }
   });
 
