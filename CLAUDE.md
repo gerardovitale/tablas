@@ -8,8 +8,8 @@ Tablas aims to become a JetBrains-style data-file editor for VS Code (think Data
 
 Current stage: local install only (`npm run install:local`, unpublished). Target: publish to the VS Code Marketplace under publisher `gerardovitale`. Keep marketplace-readiness in mind for anything packaging/metadata-related — `package.json` fields (`displayName`, `description`, `categories`, `keywords`, `icon`), `CHANGELOG.md` (required by `vsce`, doesn't exist yet), and an `icon.png` are still outstanding before a first `vsce publish`. See `scripts/install-local.sh --publish-help` for the full publishing checklist.
 
-Today: CSV, Parquet, and SQLite (`.db`/`.sqlite`/`.sqlite3`), read-only. Planned, roughly in order:
-1. **DuckDB support** — a second multi-table source alongside SQLite, reusing `MultiTableParseOutcome`/the table-picker UI/the `select-table` message protocol (see the SQLite section below) rather than inventing a new one.
+Today: CSV, Parquet, SQLite (`.db`/`.sqlite`/`.sqlite3`), and Excel (`.xlsx`), read-only. Planned, roughly in order:
+1. **DuckDB support** — a second SQL-backed multi-table source alongside SQLite/XLSX, reusing `MultiTableParseOutcome`/the table-picker UI/the `select-table` message protocol (see the SQLite/XLSX sections below) rather than inventing a new one.
 2. **In-table find/filter** — search within the rendered table (not VS Code's plain-text Ctrl+F).
 3. **Basic cell editing** — writes back to the source file; requires moving off `CustomReadonlyEditorProvider` to a real edit model (dirty state, undo/redo, save).
 
@@ -37,7 +37,7 @@ Run a single unit test file: `npx mocha --require ts-node/register test/unit/csv
 
 Two independent esbuild bundles come out of `esbuild.js`, built together by `npm run compile`:
 
-- `dist/extension.js` — CJS, Node platform, entry `src/extension.ts`. This is the extension host code (`main` in package.json). `papaparse` and `hyparquet` are fully bundled in here; `sql.js` is kept `external` instead (see below).
+- `dist/extension.js` — CJS, Node platform, entry `src/extension.ts`. This is the extension host code (`main` in package.json). `papaparse`, `hyparquet`, and `exceljs` are fully bundled in here (all pure JS, no `.wasm`/native asset); `sql.js` is kept `external` instead (see below).
 - `media/webview.js` — IIFE, browser platform, entry `src/webview/main.js`. This runs inside the VS Code webview sandbox.
 
 **Parsing happens only in the extension host, never in the webview.** `src/csvParser.ts` wraps PapaParse and returns a `CsvParseOutcome` discriminated union (`{success: true, data, errors}` or `{success: false, errors}`). `src/csvEditorProvider.ts` reads the file, calls `parseCsv`, and posts the result to the webview as a `csv-data` message. `src/parquetParser.ts`/`src/parquetEditorProvider.ts` mirror this exactly for `.parquet`. The webview (`src/webview/main.js`) only renders pre-parsed data — it has no format-parsing logic and imports nothing from the parser modules at runtime (only referenced in JSDoc type imports).
@@ -53,6 +53,14 @@ All DOM writes in `src/webview/main.js` use `textContent`/`setAttribute` only �
 - **Library**: `sql.js` (WASM SQLite), not a native binding — a single `.wasm` asset works on every platform VS Code runs on, avoiding a per-OS/arch `.vsix` matrix. It's `external` in `esbuild.js`'s extension bundle (can't be inlined — a `.wasm` binary isn't JS text) and `sqliteParser.ts` locates it via `require.resolve('sql.js/dist/sql-wasm.wasm')`.
 - **Data shape**: `src/tableData.ts`'s `MultiTableParseOutcome`/`MultiTableData`/`TableRef` wrap a list of tables/views plus the currently-selected one's `ParsedTable`, additively alongside (not replacing) the single-table `TableParseOutcome` CSV/Parquet use.
 - **Stateful document + bidirectional messaging**: unlike `CsvDocument`/`ParquetDocument`'s bare stubs, `SqliteDocument` (in `sqliteEditorProvider.ts`) holds the live `SqliteHandle` for the document's lifetime, so switching tables re-queries the already-open database instead of re-reading the file. `SqliteEditorProvider`'s `onDidReceiveMessage` listener stays registered after the ready-handshake (CSV/Parquet's disposes itself) to also handle `{type: 'select-table', table}` requests, responding with the same `sqlite-data` message type used for the initial load. The webview (`renderMultiTableOutcome`/`renderTableSelector` in `main.js`) renders a `<select>` above the table and posts `select-table` on change.
+
+### XLSX (multi-table sources)
+
+`.xlsx` files (registered as `tablas.xlsxViewer`) are the second multi-table source, reusing the exact same `MultiTableParseOutcome`/`select-table` protocol SQLite established (a workbook's sheets fill the role SQLite's tables/views do) — no webview changes were needed beyond routing a new `xlsx-data` message type to the already-generic `renderMultiTableOutcome`.
+
+- **Library**: `exceljs`, not SheetJS's `xlsx` package — deliberately. npm's published `xlsx` is stuck at `0.18.5` with two unfixed high-severity CVEs (ReDoS + prototype pollution) triggerable by opening a crafted file; SheetJS only ships the fix via their own CDN, not npm. Since this extension's whole job is parsing untrusted file bytes, that's a direct hit on the threat model — `exceljs` has no comparable CVE in its own runtime parse path. It's pure JS (no `.wasm`), so — like `hyparquet`/`papaparse` and unlike `sql.js` — it needs no `external`/`.vscodeignore` treatment; see `xlsxParser.ts`'s `openXlsxWorkbook` for the `Buffer` typing workaround its `.d.ts` needs (an ambient `Buffer` interface it declares conflicts with `@types/node`'s generic one).
+- **Cell stringification**: `stringifyXlsxCell` (in `xlsxParser.ts`) delegates to exceljs's own `cell.text` getter, which already formats dates per the cell's number format and resolves formulas to their cached result — unlike `parquetParser.ts`'s `stringifyCell`, no manual type-switching is needed.
+- **Stateful document + bidirectional messaging**: same shape as SQLite — `XlsxDocument` (in `xlsxEditorProvider.ts`) holds the parsed `Workbook` for the document's lifetime (nothing to `.close()`, unlike `SqliteHandle`), and `XlsxEditorProvider`'s message listener stays registered post-handshake to handle `{type: 'select-table', table}` (the field is still named `table`, reused as-is from the SQLite protocol) by re-reading the already-parsed workbook for a different sheet.
 
 ### Packaging gotcha: `.vscodeignore` isn't real gitignore semantics
 
@@ -70,9 +78,9 @@ Test style: `describe`/`it` (BDD), not `suite`/`test` — mocha is configured wi
 
 Fixture paths in tests are built from `process.cwd()`, not `__dirname` — this is required for the same test file to work under both ts-node (`test:unit`) and the tsc-compiled output in `out/` (`test`).
 
-Binary fixtures (`.parquet`, `.db`) are regenerated via `scripts/generate-parquet-fixtures.py` / `scripts/generate-sqlite-fixtures.py` rather than hand-authored — the latter needs only Python's stdlib `sqlite3` module, no `pip install`.
+Binary fixtures (`.parquet`, `.db`, `.xlsx`) are regenerated via `scripts/generate-parquet-fixtures.py` / `scripts/generate-sqlite-fixtures.py` / `scripts/generate-xlsx-fixtures.js` rather than hand-authored — the first two need Python (`pyarrow` / stdlib `sqlite3`, respectively); the xlsx one is a plain Node script using the `exceljs` runtime dependency directly, since that avoids introducing a second new dependency (e.g. `openpyxl`) just for fixture generation.
 
-A file that `import`s `'vscode'` can never live under `test/unit/`: `npm run test:unit` runs that folder directly via ts-node with no Electron and no `vscode` module available, so it would crash the whole run. This is why there's no `sqliteEditorProvider.test.ts`/`csvEditorProvider.test.ts` under `test/unit/` despite `sqliteEditorProvider.ts` having host-side logic (`handleSelectTable`) worth covering in isolation from the webview — that coverage lives in `test/integration/sqliteEditorProvider.test.ts` instead, calling the provider's methods directly (bypassing `resolveCustomEditor`/the webview entirely, since there's no public API to simulate a message arriving *from* a webview).
+A file that `import`s `'vscode'` can never live under `test/unit/`: `npm run test:unit` runs that folder directly via ts-node with no Electron and no `vscode` module available, so it would crash the whole run. This is why there's no `sqliteEditorProvider.test.ts`/`xlsxEditorProvider.test.ts`/`csvEditorProvider.test.ts` under `test/unit/` despite `sqliteEditorProvider.ts`/`xlsxEditorProvider.ts` having host-side logic (`handleSelectTable`) worth covering in isolation from the webview — that coverage lives in `test/integration/sqliteEditorProvider.test.ts`/`test/integration/xlsxEditorProvider.test.ts` instead, calling the provider's methods directly (bypassing `resolveCustomEditor`/the webview entirely, since there's no public API to simulate a message arriving *from* a webview).
 
 ## Packaging / publishing
 

@@ -1,4 +1,4 @@
-# Tablas — CSV, Parquet & SQLite Viewer for VS Code
+# Tablas — CSV, Parquet, SQLite & Excel Viewer for VS Code
 
 Open data files in a pretty, theme-aware table view — right inside VS Code, no leaving the editor.
 
@@ -6,7 +6,7 @@ Open data files in a pretty, theme-aware table view — right inside VS Code, no
 
 VS Code has no first-class way to *look at* structured data files. JetBrains editors (DataGrip, IntelliJ's built-in CSV/table viewer) get this right: open a data file, see a real table, search it, tweak a cell, done. Tablas aims to bring that experience to VS Code.
 
-**Where we are:** read-only viewing for CSV, Parquet, and SQLite (`.db`/`.sqlite`/`.sqlite3`) files — parse → render as `<table>`, theme-aware, XSS-safe. SQLite databases get a dropdown to switch between their tables/views.
+**Where we are:** read-only viewing for CSV, Parquet, SQLite (`.db`/`.sqlite`/`.sqlite3`), and Excel (`.xlsx`) files — parse → render as `<table>`, theme-aware, XSS-safe. SQLite databases and Excel workbooks both get a dropdown to switch between their tables/views or sheets.
 
 **Where we're going**, roughly in order:
 1. **DuckDB support** — a second multi-table source alongside SQLite, reusing the same table-picker UI and message protocol.
@@ -15,7 +15,7 @@ VS Code has no first-class way to *look at* structured data files. JetBrains edi
 
 ## Current status
 
-CSV, Parquet, and SQLite, read-only, installed locally (not yet on the Marketplace). Publishing there is the near-term goal — see `scripts/install-local.sh --publish-help` for the checklist. See `CLAUDE.md` for architecture and how the pieces fit together if you're changing code here.
+CSV, Parquet, SQLite, and Excel (`.xlsx`), read-only, installed locally (not yet on the Marketplace). Publishing there is the near-term goal — see `scripts/install-local.sh --publish-help` for the checklist. See `CLAUDE.md` for architecture and how the pieces fit together if you're changing code here.
 
 ## Development
 

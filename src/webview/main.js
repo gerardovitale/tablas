@@ -191,7 +191,9 @@
       return;
     }
     if (outcome.data.tables.length === 0) {
-      showMessage('No tables found in this database.', false);
+      // Generic wording -- this function is shared by every multi-table
+      // source (SQLite tables/views, XLSX sheets), not just databases.
+      showMessage('No tables found in this file.', false);
       return;
     }
     const app = document.getElementById('app');
@@ -205,7 +207,7 @@
     if (!message) { return; }
     if (message.type === 'csv-data' || message.type === 'parquet-data') {
       renderOutcome(message.payload);
-    } else if (message.type === 'sqlite-data') {
+    } else if (message.type === 'sqlite-data' || message.type === 'xlsx-data') {
       renderMultiTableOutcome(message.payload);
     }
   });

@@ -1,7 +1,7 @@
 {
   "name": "tablas",
-  "displayName": "Tablas - CSV, Parquet & SQLite Viewer",
-  "description": "Open CSV, Parquet, and SQLite files in a pretty, theme-aware table view.",
+  "displayName": "Tablas - CSV, Parquet, SQLite & Excel Viewer",
+  "description": "Open CSV, Parquet, SQLite, and Excel (.xlsx) files in a pretty, theme-aware table view.",
   "version": "0.1.0",
   "publisher": "gerardovitale",
   "license": "MIT",
@@ -21,6 +21,8 @@
     "csv",
     "parquet",
     "sqlite",
+    "xlsx",
+    "excel",
     "database",
     "table",
     "viewer",
@@ -62,6 +64,16 @@
           },
           {
             "filenamePattern": "*.sqlite3"
+          }
+        ],
+        "priority": "default"
+      },
+      {
+        "viewType": "tablas.xlsxViewer",
+        "displayName": "Excel Table Viewer",
+        "selector": [
+          {
+            "filenamePattern": "*.xlsx"
           }
         ],
         "priority": "default"
@@ -113,6 +125,7 @@
     "typescript-eslint": "^8.67.0"
   },
   "dependencies": {
+    "exceljs": "^4.4.0",
     "hyparquet": "^1.28.2",
     "papaparse": "^5.5.3",
     "sql.js": "^1.14.2"

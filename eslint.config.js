@@ -32,7 +32,7 @@ const noInnerHtml = {
 };
 
 const nodeConfigFiles = {
-  files: ['eslint.config.js', 'esbuild.js', '.mocharc*.js'],
+  files: ['eslint.config.js', 'esbuild.js', '.mocharc*.js', 'scripts/**/*.js'],
   languageOptions: {
     sourceType: 'commonjs',
     globals: {
