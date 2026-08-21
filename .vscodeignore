@@ -23,6 +23,22 @@ node_modules/**
 !node_modules/sql.js/package.json
 !node_modules/sql.js/dist/sql-wasm.js
 !node_modules/sql.js/dist/sql-wasm.wasm
+# @duckdb/node-api is pure JS (its lib/**/*.js), needed at runtime.
+# @duckdb/node-bindings is a thin platform dispatcher; the actual native
+# engine (duckdb.node + libduckdb.{dylib,so}/duckdb.dll) ships in a
+# per-platform @duckdb/node-bindings-<platform-arch> package that npm only
+# installs the matching one of (see esbuild.js's comment on why both
+# packages are kept external instead of bundled). Same flat-negate caveat
+# as sql.js above -- list exactly what's needed, no broad re-include.
+!node_modules/@duckdb/node-api/package.json
+!node_modules/@duckdb/node-api/lib/**/*.js
+!node_modules/@duckdb/node-bindings/package.json
+!node_modules/@duckdb/node-bindings/duckdb.js
+!node_modules/@duckdb/node-bindings-*/package.json
+!node_modules/@duckdb/node-bindings-*/duckdb.node
+!node_modules/@duckdb/node-bindings-*/*.dylib
+!node_modules/@duckdb/node-bindings-*/*.so
+!node_modules/@duckdb/node-bindings-*/*.dll
 coverage/**
 .husky/**
 .claude/**

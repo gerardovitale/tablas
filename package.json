@@ -1,7 +1,7 @@
 {
   "name": "tablas",
-  "displayName": "Tablas - CSV, Parquet, SQLite & Excel Viewer",
-  "description": "Open CSV, Parquet, SQLite, and Excel (.xlsx) files in a pretty, theme-aware table view.",
+  "displayName": "Tablas - CSV, Parquet, SQLite, DuckDB & Excel Viewer",
+  "description": "Open CSV, Parquet, SQLite, DuckDB, and Excel (.xlsx) files in a pretty, theme-aware table view.",
   "version": "0.1.0",
   "publisher": "gerardovitale",
   "license": "MIT",
@@ -21,6 +21,7 @@
     "csv",
     "parquet",
     "sqlite",
+    "duckdb",
     "xlsx",
     "excel",
     "database",
@@ -77,6 +78,19 @@
           }
         ],
         "priority": "default"
+      },
+      {
+        "viewType": "tablas.duckdbViewer",
+        "displayName": "DuckDB Table Viewer",
+        "selector": [
+          {
+            "filenamePattern": "*.duckdb"
+          },
+          {
+            "filenamePattern": "*.ddb"
+          }
+        ],
+        "priority": "default"
       }
     ],
     "configuration": {
@@ -125,6 +139,7 @@
     "typescript-eslint": "^8.67.0"
   },
   "dependencies": {
+    "@duckdb/node-api": "^1.5.5-r.4",
     "exceljs": "^4.4.0",
     "hyparquet": "^1.28.2",
     "papaparse": "^5.5.3",

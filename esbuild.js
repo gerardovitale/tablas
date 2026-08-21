@@ -11,7 +11,11 @@ const extensionConfig = {
   format: 'cjs',
   platform: 'node',
   target: 'node20',
-  external: ['vscode', 'sql.js'],
+  // '@duckdb/node-api' and '@duckdb/node-bindings' both ship native .node
+  // binaries under the hood -- esbuild can't bundle a native binary, so
+  // both stay external like sql.js's .wasm, and are resolved from
+  // node_modules at runtime instead.
+  external: ['vscode', 'sql.js', '@duckdb/node-api', '@duckdb/node-bindings'],
   sourcemap: !production,
   minify: production,
 };

@@ -54,6 +54,12 @@ function sendSqliteData(dom: JSDOM, payload: MultiTableParseOutcome): void {
   );
 }
 
+function sendDuckdbData(dom: JSDOM, payload: MultiTableParseOutcome): void {
+  dom.window.dispatchEvent(
+    new dom.window.MessageEvent('message', { data: { type: 'duckdb-data', payload } })
+  );
+}
+
 describe('webview main.js rendering', () => {
   afterEach(() => {
     webviewGlobal.window = undefined;
@@ -415,6 +421,39 @@ describe('webview main.js rendering', () => {
       assert.strictEqual(app.querySelector('img'), null);
       const option = app.querySelector('option');
       assert.strictEqual(option?.textContent, payload);
+    });
+  });
+
+  describe('duckdb-data', () => {
+    // duckdb-data is routed to the exact same renderMultiTableOutcome as
+    // sqlite-data/xlsx-data (see the 'sqlite-data (multi-table sources)'
+    // suite above for full coverage of that shared rendering path) -- this
+    // just proves the dispatch wiring for the new message type itself.
+    it('renders a table selector and the table', () => {
+      const { dom } = loadWebview();
+      sendDuckdbData(dom, {
+        success: true,
+        errors: [],
+        data: {
+          tables: [
+            { name: 'customers', type: 'table' },
+            { name: 'customer_totals', type: 'view' },
+          ],
+          selectedTable: 'customer_totals',
+          data: {
+            headers: ['name', 'total'],
+            rows: [['Acme', '25.49']],
+            rowCount: 1,
+            columnCount: 2,
+          },
+        },
+      });
+
+      const app = dom.window.document.getElementById('app')!;
+      const select = app.querySelector('select') as HTMLSelectElement | null;
+      assert.ok(select, 'a table selector should be rendered');
+      assert.strictEqual(select!.value, 'customer_totals');
+      assert.ok(app.querySelector('table'), 'the selected table should also be rendered');
     });
   });
 });

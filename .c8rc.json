@@ -10,6 +10,7 @@
     "src/parquetEditorProvider.ts",
     "src/sqliteEditorProvider.ts",
     "src/xlsxEditorProvider.ts",
+    "src/duckdbEditorProvider.ts",
     "src/webviewHtml.ts"
   ],
   "extension": [".ts", ".js"],

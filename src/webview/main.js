@@ -207,7 +207,11 @@
     if (!message) { return; }
     if (message.type === 'csv-data' || message.type === 'parquet-data') {
       renderOutcome(message.payload);
-    } else if (message.type === 'sqlite-data' || message.type === 'xlsx-data') {
+    } else if (
+      message.type === 'sqlite-data' ||
+      message.type === 'xlsx-data' ||
+      message.type === 'duckdb-data'
+    ) {
       renderMultiTableOutcome(message.payload);
     }
   });
