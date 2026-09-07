@@ -15,6 +15,7 @@ coverage/
 
 # Packaging
 *.vsix
+dist-vsix/
 
 # OS / editor
 .DS_Store
