@@ -141,6 +141,8 @@ describe('XlsxEditorProvider Integration', () => {
       if (outcome?.success) {
         assert.strictEqual(outcome.data.selectedTable, 'orders');
         assert.strictEqual(outcome.data.data.rowCount, 3);
+        // Stats are lazy now: rows never carry them (see handleGetStats below).
+        assert.strictEqual('stats' in outcome.data.data, false);
         // The full sheet list is preserved regardless of which one is selected.
         assert.strictEqual(outcome.data.tables.length, 2);
       }
@@ -162,6 +164,27 @@ describe('XlsxEditorProvider Integration', () => {
       const document = provider.openCustomDocument(fixtureUri('multi-sheet.xlsx'));
       const outcome = provider.handleSelectTable(document, 'orders');
       assert.strictEqual(outcome, undefined);
+    });
+
+    describe('handleGetStats (lazy column statistics)', () => {
+      it('computes stats for the requested sheet, echoing its name', async () => {
+        const { provider, document } = await openDocumentWithWorkbook('multi-sheet.xlsx');
+        const payload = await provider.handleGetStats(document, 'orders');
+        assert.strictEqual(payload?.table, 'orders');
+        assert.ok(payload?.stats && payload.stats.columns.length > 0);
+      });
+
+      it('answers an unknown sheet with a payload that has no stats, rather than throwing', async () => {
+        const { provider, document } = await openDocumentWithWorkbook('multi-sheet.xlsx');
+        assert.deepStrictEqual(await provider.handleGetStats(document, 'nope'), { table: 'nope', stats: undefined });
+        assert.deepStrictEqual(await provider.handleGetStats(document), { table: undefined, stats: undefined });
+      });
+
+      it('is a no-op returning undefined when the workbook is not parsed yet', async () => {
+        const provider = new XlsxEditorProvider({ extensionPath: process.cwd() } as vscode.ExtensionContext);
+        const document = provider.openCustomDocument(fixtureUri('multi-sheet.xlsx'));
+        assert.strictEqual(await provider.handleGetStats(document, 'orders'), undefined);
+      });
     });
   });
 });

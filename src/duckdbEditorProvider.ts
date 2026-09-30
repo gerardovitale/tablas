@@ -2,12 +2,15 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import {
+  duckdbTableStats,
   emptyParsedTable,
   listDuckdbTables,
   openDuckdbDatabase,
   readSelectedTable,
   type DuckdbHandle,
 } from './duckdbParser';
+import { reportStatsFailure } from './columnStats';
+import { isGetStatsMessage, statsDataMessage, type StatsPayload } from './statsMessage';
 import type { MultiTableParseOutcome } from './tableData';
 import { buildWebviewHtml } from './webviewHtml';
 import { getMaxRowsSetting } from './config';
@@ -123,6 +126,11 @@ export class DuckdbEditorProvider
           await webview.postMessage({ type: 'duckdb-data', payload: outcome });
           this._onDidPostDuckdbData.fire(outcome);
         }
+      } else if (isGetStatsMessage(message)) {
+        const payload = await this.handleGetStats(document, message.table);
+        if (payload) {
+          await webview.postMessage(statsDataMessage(payload));
+        }
       }
     });
   }
@@ -187,6 +195,28 @@ export class DuckdbEditorProvider
         success: false,
         errors: [{ type: 'DuckdbError', code: 'ReadFailed', message }],
       };
+    }
+  }
+
+  /**
+   * Column statistics for one table, computed against the already-open
+   * database when the webview first asks for them. Like `handleSelectTable`,
+   * public so an integration test can call it without a real webview.
+   * Returns `undefined` if the database isn't open yet; an unknown or
+   * missing table (or a failure) yields a payload without `stats`. Stats
+   * queue behind any other query on the same connection (see
+   * `runExclusive`), so a slow scan can't collide with a table switch.
+   */
+  public async handleGetStats(document: DuckdbDocument, table?: string): Promise<StatsPayload | undefined> {
+    if (!document.handle) {
+      return undefined;
+    }
+    try {
+      const known = table !== undefined && (await listDuckdbTables(document.handle)).some((t) => t.name === table);
+      return { table, stats: known ? await duckdbTableStats(document.handle, table) : undefined };
+    } catch (err) {
+      reportStatsFailure(err);
+      return { table, stats: undefined };
     }
   }
 }

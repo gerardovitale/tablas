@@ -1,11 +1,25 @@
 import initSqlJs from 'sql.js';
 import {
+  clipStat,
+  exceedsStatsCellCap,
+  histogramFromCounts,
+  planHistogram,
+  reportStatsFailure,
+  skippedStats,
+  StatsCache,
+  STATS_TOO_LARGE_REASON,
+  statsLimits,
+} from './columnStats';
+import {
   clampMaxRows,
+  type ColumnKind,
+  type ColumnStats,
   type MultiTableData,
   type MultiTableParseOutcome,
   type ParsedTable,
   type ParseError,
   type TableRef,
+  type TableStats,
 } from './tableData';
 
 type SqlJsStatic = Awaited<ReturnType<typeof initSqlJs>>;
@@ -122,6 +136,167 @@ export function listSqliteTables(handle: SqliteHandle): TableRef[] {
     stmt.free();
   }
   return tables;
+}
+
+// Columns per aggregate scan. Keeps the generated SQL comfortably under
+// SQLite's expression/term limits for very wide tables; each chunk is one
+// full table scan.
+const STATS_COLUMN_CHUNK = 40;
+// Aggregates selected per column, in the order buildColumnStats reads them.
+const STATS_VALUES_PER_COLUMN = 8;
+
+// Handles are read-only for the document's lifetime, so asking again for an
+// already-computed table's stats (including a failure) reuses the answer
+// instead of re-scanning.
+const statsCache = new StatsCache<SqliteHandle>();
+
+function resolveSqliteKind(ints: number, reals: number, texts: number, blobs: number): ColumnKind {
+  const numeric = ints + reals > 0;
+  const kinds = (numeric ? 1 : 0) + (texts > 0 ? 1 : 0) + (blobs > 0 ? 1 : 0);
+  if (kinds === 0) {
+    return 'empty';
+  }
+  if (kinds > 1) {
+    return 'mixed';
+  }
+  if (numeric) {
+    return reals > 0 ? 'float' : 'integer';
+  }
+  return texts > 0 ? 'text' : 'other';
+}
+
+/**
+ * Builds one column's stats from its aggregate row slice. Types come from
+ * `typeof()` storage-class counts, not declared column types: SQLite's
+ * dynamic typing lets a column declared INTEGER hold text, so declared types
+ * aren't trustworthy.
+ */
+function buildColumnStats(
+  handle: SqliteHandle,
+  quotedTable: string,
+  quotedColumn: string,
+  total: number,
+  agg: readonly SqlCellValue[]
+): ColumnStats {
+  const [nonNullRaw, intsRaw, realsRaw, textsRaw, distinctRaw, minRaw, maxRaw, avgRaw] = agg;
+  const nonNull = Number(nonNullRaw ?? 0);
+  const ints = Number(intsRaw ?? 0);
+  const reals = Number(realsRaw ?? 0);
+  const texts = Number(textsRaw ?? 0);
+  const type = resolveSqliteKind(ints, reals, texts, nonNull - ints - reals - texts);
+
+  const stats: ColumnStats = { type, nullCount: total - nonNull };
+  if (type === 'other') {
+    return stats;
+  }
+  stats.distinctCount = Number(distinctRaw ?? 0);
+
+  if (type === 'text') {
+    stats.min = clipStat(String(minRaw));
+    stats.max = clipStat(String(maxRaw));
+  } else if ((type === 'integer' || type === 'float') && typeof minRaw === 'number' && typeof maxRaw === 'number') {
+    let min = String(minRaw);
+    let max = String(maxRaw);
+    if (type === 'integer' && !(Number.isSafeInteger(minRaw) && Number.isSafeInteger(maxRaw))) {
+      // sql.js hands back a rounded double for INTEGERs beyond 2^53; ask
+      // SQLite for the exact text instead.
+      const exact = handle.db.exec(
+        `SELECT CAST(MIN(${quotedColumn}) AS TEXT), CAST(MAX(${quotedColumn}) AS TEXT) FROM ${quotedTable}`
+      )[0]?.values[0];
+      min = String(exact?.[0] ?? min);
+      max = String(exact?.[1] ?? max);
+    }
+    stats.min = min;
+    stats.max = max;
+    if (typeof avgRaw === 'number' && Number.isFinite(avgRaw)) {
+      stats.mean = avgRaw;
+    }
+    const plan = planHistogram(minRaw, maxRaw, type === 'integer');
+    if (plan) {
+      // CAST(... AS REAL) forces real division (integer / integer would
+      // truncate); the two-arg scalar MIN clamps the max value into the last
+      // bin, mirroring columnStats.bucketIndex.
+      const buckets = handle.db.exec(
+        `SELECT MIN(CAST((CAST(${quotedColumn} AS REAL) - ?) / ? AS INTEGER), ?), COUNT(*) ` +
+          `FROM ${quotedTable} WHERE ${quotedColumn} IS NOT NULL GROUP BY 1 ORDER BY 1`,
+        [plan.lo, plan.width, plan.bins - 1]
+      )[0]?.values ?? [];
+      stats.histogram = histogramFromCounts(
+        plan,
+        buckets.map(([bucket, count]) => [Number(bucket), Number(count)] as const)
+      );
+    }
+  }
+  return stats;
+}
+
+/** The uncached work behind `sqliteTableStats`; may throw. */
+function computeSqliteStats(handle: SqliteHandle, tableName: string): TableStats | undefined {
+  const quotedTable = quoteIdentifier(tableName);
+  const totalRowCount = Number(handle.db.exec(`SELECT COUNT(*) FROM ${quotedTable}`)[0]?.values[0]?.[0] ?? 0);
+  // Zero rows still need the column names, which db.exec drops (see readSqliteTable).
+  const probe = handle.db.prepare(`SELECT * FROM ${quotedTable} LIMIT 0`);
+  let headers: string[];
+  try {
+    headers = probe.getColumnNames();
+  } finally {
+    probe.free();
+  }
+  if (headers.length === 0) {
+    return undefined;
+  }
+  if (exceedsStatsCellCap(totalRowCount, headers.length, statsLimits.sqliteMaxCells)) {
+    return skippedStats(STATS_TOO_LARGE_REASON);
+  }
+
+  const columns: ColumnStats[] = [];
+  for (let start = 0; start < headers.length; start += STATS_COLUMN_CHUNK) {
+    const quotedColumns = headers.slice(start, start + STATS_COLUMN_CHUNK).map(quoteIdentifier);
+    const selectList = quotedColumns
+      .map(
+        (q) =>
+          `COUNT(${q}), SUM(typeof(${q}) = 'integer'), SUM(typeof(${q}) = 'real'), ` +
+          `SUM(typeof(${q}) = 'text'), COUNT(DISTINCT ${q}), MIN(${q}), MAX(${q}), AVG(${q})`
+      )
+      .join(', ');
+    const row = handle.db.exec(`SELECT COUNT(*), ${selectList} FROM ${quotedTable}`)[0]?.values[0];
+    if (!row) {
+      return undefined;
+    }
+    const total = Number(row[0]);
+    quotedColumns.forEach((q, i) => {
+      const offset = 1 + i * STATS_VALUES_PER_COLUMN;
+      columns.push(
+        buildColumnStats(handle, quotedTable, q, total, row.slice(offset, offset + STATS_VALUES_PER_COLUMN) as SqlCellValue[])
+      );
+    });
+  }
+  return { columns };
+}
+
+/**
+ * Whole-table column statistics via SQL push-down (regardless of
+ * `tablas.maxRows`): one aggregate scan per chunk of columns plus one small
+ * bucket query per numeric column. Computed on demand -- when the user first
+ * opens the Statistics view -- and synchronous, so it holds the extension
+ * host for the duration (hence `statsLimits.sqliteMaxCells`). `undefined` =
+ * no stats (no columns, or a failure such as a view with duplicate column
+ * names, reported through `statsHooks`); it never throws, and every outcome
+ * is remembered per handle.
+ */
+export function sqliteTableStats(handle: SqliteHandle, tableName: string): TableStats | undefined {
+  const cached = statsCache.lookup(handle, tableName);
+  if (cached.hit) {
+    return cached.stats;
+  }
+  let stats: TableStats | undefined;
+  try {
+    stats = computeSqliteStats(handle, tableName);
+  } catch (err) {
+    reportStatsFailure(err);
+  }
+  statsCache.store(handle, tableName, stats);
+  return stats;
 }
 
 /** Reads one table/view's contents, honoring `maxRowsInput` the same way CSV/Parquet do. */

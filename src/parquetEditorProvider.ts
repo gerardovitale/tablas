@@ -1,7 +1,9 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { parseParquet, ParquetParseOutcome } from './parquetParser';
+import { parquetStats, parseParquet, ParquetParseOutcome } from './parquetParser';
+import { reportStatsFailure } from './columnStats';
+import { isGetStatsMessage, statsDataMessage, type StatsPayload } from './statsMessage';
 import { buildWebviewHtml } from './webviewHtml';
 import { getMaxRowsSetting } from './config';
 
@@ -76,15 +78,38 @@ export class ParquetEditorProvider
 
     webview.html = buildWebviewHtml(webview, this.context.extensionPath, nonce, 'Parquet Viewer');
 
-    // Wait for 'ready' from webview, then send data
-    const disposable = webview.onDidReceiveMessage(async (message) => {
+    // Stays registered for the document's lifetime: after the 'ready'
+    // handshake it also answers 'get-stats' requests (the guard keeps a
+    // duplicate 'ready' from decoding the file twice).
+    let hasLoadedInitial = false;
+    webview.onDidReceiveMessage(async (message) => {
       if (message?.type === 'ready') {
-        disposable.dispose();
+        if (hasLoadedInitial) {
+          return;
+        }
+        hasLoadedInitial = true;
         const outcome = await this.loadAndParseParquet(document.uri);
         await webview.postMessage({ type: 'parquet-data', payload: outcome });
         this._onDidPostParquetData.fire(outcome);
+      } else if (isGetStatsMessage(message)) {
+        await webview.postMessage(statsDataMessage(await this.handleGetStats(document)));
       }
     });
+  }
+
+  /**
+   * Whole-file column statistics, computed when the webview first asks for
+   * them. The document keeps no bytes, so this re-reads the file; a file
+   * edited on disk since it was loaded therefore yields stats for its newer
+   * content. Public so an integration test can exercise it without a webview.
+   */
+  public async handleGetStats(document: ParquetDocument): Promise<StatsPayload> {
+    try {
+      return { stats: await parquetStats(await vscode.workspace.fs.readFile(document.uri)) };
+    } catch (err) {
+      reportStatsFailure(err);
+      return { stats: undefined };
+    }
   }
 
   private async loadAndParseParquet(uri: vscode.Uri): Promise<ParquetParseOutcome> {

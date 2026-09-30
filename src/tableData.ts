@@ -16,6 +16,53 @@ export interface ParsedTable {
   totalRowCount?: number;
 }
 
+export type ColumnKind =
+  | 'integer'
+  | 'float'
+  | 'boolean'
+  | 'date'
+  | 'text'
+  | 'mixed'
+  | 'other'
+  | 'empty';
+
+export interface HistogramStats {
+  lo: number;
+  hi: number;
+  counts: number[];
+}
+
+/**
+ * Stats for one column. Crosses `postMessage` as JSON, so no bigint, NaN,
+ * Infinity or Date may appear anywhere: min/max are display strings, and
+ * mean/histogram bounds are always finite.
+ */
+export interface ColumnStats {
+  type: ColumnKind;
+  nullCount: number;
+  /** Omitted for `'other'` columns (nested/binary values). */
+  distinctCount?: number;
+  /** True when distinct tracking hit its cap, so `distinctCount` is a floor. */
+  distinctIsLowerBound?: boolean;
+  min?: string;
+  max?: string;
+  /** Integer/float columns only. */
+  mean?: number;
+  /** Integer/float columns with more than one distinct numeric value only. */
+  histogram?: HistogramStats;
+}
+
+/**
+ * Whole-table column statistics (never limited by maxRows). Not part of
+ * `ParsedTable`: they're computed lazily, on request, and travel in their own
+ * `stats-data` message (see statsMessage.ts).
+ */
+export interface TableStats {
+  /** Parallel to the table's headers; empty when `skippedReason` is set. */
+  columns: ColumnStats[];
+  skippedReason?: string;
+}
+
 export interface ParseError {
   type: string;
   code: string;

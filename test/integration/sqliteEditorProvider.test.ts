@@ -151,6 +151,8 @@ describe('SqliteEditorProvider Integration', () => {
         if (outcome?.success) {
           assert.strictEqual(outcome.data.selectedTable, 'orders');
           assert.strictEqual(outcome.data.data.rowCount, 3);
+          // Stats are lazy now: rows never carry them (see handleGetStats below).
+          assert.strictEqual('stats' in outcome.data.data, false);
           // The full table list is preserved regardless of which one is selected.
           assert.strictEqual(outcome.data.tables.length, 3);
         }
@@ -179,6 +181,46 @@ describe('SqliteEditorProvider Integration', () => {
       const document = provider.openCustomDocument(fixtureUri('multi-table.db'));
       const outcome = provider.handleSelectTable(document, 'orders');
       assert.strictEqual(outcome, undefined);
+    });
+
+    describe('handleGetStats (lazy column statistics)', () => {
+      it('computes stats for the requested table, echoing its name', async () => {
+        const { provider, document } = await openDocumentWithHandle('multi-table.db');
+        try {
+          const payload = await provider.handleGetStats(document, 'orders');
+          assert.strictEqual(payload?.table, 'orders');
+          assert.strictEqual(payload?.stats?.columns.length, 3);
+          assert.strictEqual(payload?.stats?.columns[2].max, '42');
+        } finally {
+          document.dispose();
+        }
+      });
+
+      it('works for a view too', async () => {
+        const { provider, document } = await openDocumentWithHandle('multi-table.db');
+        try {
+          const payload = await provider.handleGetStats(document, 'customer_totals');
+          assert.strictEqual(payload?.stats?.columns.length, 2);
+        } finally {
+          document.dispose();
+        }
+      });
+
+      it('answers an unknown table with a payload that has no stats, rather than throwing', async () => {
+        const { provider, document } = await openDocumentWithHandle('multi-table.db');
+        try {
+          assert.deepStrictEqual(await provider.handleGetStats(document, 'nope'), { table: 'nope', stats: undefined });
+          assert.deepStrictEqual(await provider.handleGetStats(document), { table: undefined, stats: undefined });
+        } finally {
+          document.dispose();
+        }
+      });
+
+      it('is a no-op returning undefined when the database is not open yet', async () => {
+        const provider = new SqliteEditorProvider({ extensionPath: process.cwd() } as vscode.ExtensionContext);
+        const document = provider.openCustomDocument(fixtureUri('multi-table.db'));
+        assert.strictEqual(await provider.handleGetStats(document, 'orders'), undefined);
+      });
     });
   });
 });

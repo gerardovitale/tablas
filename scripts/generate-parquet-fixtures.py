@@ -11,6 +11,8 @@ binaries. Run from the repo root:
 Requires pyarrow (`pip install pyarrow`).
 """
 
+import datetime
+import decimal
 import os
 
 import pyarrow as pa
@@ -25,9 +27,9 @@ FIXTURES_DIR = os.path.join(os.path.dirname(__file__), '..', 'test', 'fixtures')
 COMPRESSION = 'snappy'
 
 
-def write(name, table):
+def write(name, table, **kwargs):
     path = os.path.join(FIXTURES_DIR, name)
-    pq.write_table(table, path, compression=COMPRESSION)
+    pq.write_table(table, path, compression=COMPRESSION, **kwargs)
     print(f'wrote {path}')
 
 
@@ -62,6 +64,27 @@ def main():
         'id': pa.array([1, 2], type=pa.int64()),
         'info': pa.array([{'x': 1, 'y': 'a'}, {'x': 2, 'y': 'b'}], type=struct_type),
     }))
+
+    # stats.parquet -- one column per type parseParquet's column statistics
+    # care about, in 3 row groups (2 + 2 + 1 rows) so the per-row-group read
+    # loop is exercised. Includes an int64 beyond 2^53 (exact min/max text),
+    # a NaN, nulls in every nullable column, a list (unsummarised), and an
+    # all-null column (falls back to its declared type).
+    D = decimal.Decimal
+    dt = datetime.datetime
+    write('stats.parquet', pa.table({
+        'id': pa.array([1, 2, 3, 4, 5], type=pa.int64()),
+        'big': pa.array([9007199254740993, 1, None, 3, 4], type=pa.int64()),
+        'score': pa.array([1.5, 2.5, None, 4.0, float('nan')], type=pa.float64()),
+        'flag': pa.array([True, False, None, True, False], type=pa.bool_()),
+        'ts': pa.array([dt(2020, 1, 1), dt(2021, 6, 1), None, dt(2019, 3, 1), dt(2020, 1, 1)], type=pa.timestamp('ms')),
+        'day': pa.array([datetime.date(2020, 1, 1), datetime.date(2021, 1, 1), None,
+                         datetime.date(2019, 1, 1), datetime.date(2020, 1, 1)], type=pa.date32()),
+        'name': pa.array(['b', 'a', None, 'c', 'a'], type=pa.string()),
+        'amount': pa.array([D('1.50'), D('2.25'), None, D('10.00'), D('3.10')], type=pa.decimal128(10, 2)),
+        'tags': pa.array([['a'], ['b', 'c'], None, [], ['d']], type=pa.list_(pa.string())),
+        'all_null': pa.array([None, None, None, None, None], type=pa.int64()),
+    }), row_group_size=2)
 
     # unsupported-codec.parquet -- gzip-compressed, deliberately NOT written
     # via write() (which pins snappy): hyparquet only decompresses

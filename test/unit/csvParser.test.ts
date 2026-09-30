@@ -1,7 +1,8 @@
 import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
-import { parseCsv } from '../../src/csvParser';
+import { csvStats, parseCsv } from '../../src/csvParser';
+import { statsHooks, statsLimits, STATS_TOO_LARGE_REASON } from '../../src/columnStats';
 
 // Use process.cwd() (always the project root) to locate fixtures regardless
 // of whether we're running via ts-node or compiled JS in out/.
@@ -224,5 +225,95 @@ describe('parseCsv', () => {
         assert.strictEqual(typeof result.data.rows[1][0], 'string');
       }
     });
+  });
+});
+
+describe('csvStats', () => {
+  it('computes per-column stats for simple.csv', () => {
+    const stats = csvStats(fixture('simple.csv'))!;
+    assert.strictEqual(stats.columns.length, 3);
+    const [name, age, city] = stats.columns;
+    assert.strictEqual(name.type, 'text');
+    assert.strictEqual(name.min, 'Alice');
+    assert.strictEqual(name.max, 'Carol');
+    assert.strictEqual(age.type, 'integer');
+    assert.strictEqual(age.min, '25');
+    assert.strictEqual(age.max, '35');
+    assert.strictEqual(age.mean, 30);
+    assert.strictEqual(age.nullCount, 0);
+    assert.strictEqual(city.distinctCount, 3);
+  });
+
+  it('counts empty cells as nulls', () => {
+    const stats = csvStats('a,b\n1,\n,x\n3,y')!;
+    assert.strictEqual(stats.columns[0].nullCount, 1);
+    assert.strictEqual(stats.columns[1].nullCount, 1);
+  });
+
+  it('covers every row: it does not depend on how many rows parseCsv returns', () => {
+    const csv = 'n\n' + Array.from({ length: 50 }, (_, i) => String(i + 1)).join('\n');
+    const shown = parseCsv(csv, 5);
+    assert.ok(shown.success);
+    if (shown.success) {
+      assert.strictEqual(shown.data.rowCount, 5);
+    }
+    assert.strictEqual(csvStats(csv)!.columns[0].max, '50');
+  });
+
+  it('returns nothing for blank content and gives empty-typed columns for headers-only', () => {
+    assert.strictEqual(csvStats(''), undefined);
+    assert.strictEqual(csvStats('   \n  '), undefined);
+    const stats = csvStats(fixture('headers-only.csv'))!;
+    assert.strictEqual(stats.columns.length, 3);
+    assert.ok(stats.columns.every((c) => c.type === 'empty' && c.nullCount === 0));
+  });
+
+  it('skips with a reason when the table exceeds the cell cap', () => {
+    const original = statsLimits.maxCells;
+    try {
+      statsLimits.maxCells = 3;
+      assert.deepStrictEqual(csvStats('a,b\n1,2\n3,4'), { columns: [], skippedReason: STATS_TOO_LARGE_REASON });
+    } finally {
+      statsLimits.maxCells = original;
+    }
+  });
+
+  it('is JSON-safe (it crosses postMessage)', () => {
+    const stats = csvStats('a,b\n1.5,x\n2,y\n3,')!;
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(stats)), stats);
+  });
+
+  it('never throws: an unexpected failure is reported through statsHooks and yields undefined', () => {
+    const original = statsLimits.maxCells;
+    const originalHook = statsHooks.onError;
+    const reported: unknown[] = [];
+    statsHooks.onError = (err) => {
+      reported.push(err);
+    };
+    try {
+      // Make reading the cap throw, standing in for any unexpected failure inside stats.
+      Object.defineProperty(statsLimits, 'maxCells', {
+        configurable: true,
+        get() {
+          throw new Error('boom');
+        },
+      });
+      assert.strictEqual(csvStats('a\n1'), undefined);
+      assert.strictEqual(reported.length, 1);
+      assert.strictEqual((reported[0] as Error).message, 'boom');
+    } finally {
+      Object.defineProperty(statsLimits, 'maxCells', { configurable: true, writable: true, value: original });
+      statsHooks.onError = originalHook;
+    }
+  });
+});
+
+describe('parseCsv no longer carries stats', () => {
+  it('leaves stats to csvStats', () => {
+    const result = parseCsv(fixture('simple.csv'));
+    assert.ok(result.success);
+    if (result.success) {
+      assert.strictEqual('stats' in result.data, false);
+    }
   });
 });

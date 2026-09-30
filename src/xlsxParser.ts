@@ -1,4 +1,13 @@
-import { Workbook, type Cell, type Worksheet } from 'exceljs';
+import { ValueType, Workbook, type Cell, type CellValue, type Worksheet } from 'exceljs';
+import {
+  ColumnStatsAccumulator,
+  DistinctBudget,
+  exceedsStatsCellCap,
+  reportStatsFailure,
+  skippedStats,
+  StatsCache,
+  STATS_TOO_LARGE_REASON,
+} from './columnStats';
 import {
   clampMaxRows,
   type MultiTableData,
@@ -6,6 +15,7 @@ import {
   type ParsedTable,
   type ParseError,
   type TableRef,
+  type TableStats,
 } from './tableData';
 
 // First 2 bytes of every ZIP archive -- .xlsx files are a ZIP (OOXML)
@@ -31,6 +41,119 @@ export function emptyParsedTable(): ParsedTable {
  */
 export function stringifyXlsxCell(cell: Cell): string {
   return cell.text ?? '';
+}
+
+/**
+ * A cell's underlying value with formulas replaced by their cached result.
+ * Two exceljs quirks drive the shape of this:
+ * - `cell.value` and `effectiveType` both drop falsy formula results (0, false)
+ *   and report Boolean/Error results as Null, so formulas read `cell.result`
+ *   (the raw cached result) instead.
+ * - A merged non-master cell has type Merge; `cell.master` is the cell that
+ *   owns the value (and is the cell itself when unmerged).
+ */
+function unwrapCellValue(cell: Cell): CellValue {
+  const source = cell.master;
+  if (source.type === ValueType.Formula) {
+    return (source.result as CellValue | undefined) ?? null;
+  }
+  return source.value;
+}
+
+function addXlsxCellToStats(acc: ColumnStatsAccumulator, cell: Cell | undefined): void {
+  const value = cell ? unwrapCellValue(cell) : null;
+  if (cell === undefined || value === null || value === undefined) {
+    acc.addNull();
+  } else if (typeof value === 'number') {
+    acc.addNumber(value, Number.isInteger(value));
+  } else if (typeof value === 'boolean') {
+    acc.addBoolean(value);
+  } else if (value instanceof Date) {
+    // Format lazily so only new min/max candidates pay for cell.text.
+    acc.addDate(value.getTime(), () => cell.text);
+  } else if (typeof value === 'string') {
+    if (value.trim() === '') {
+      acc.addNull();
+    } else {
+      acc.addText(value);
+    }
+  } else if ('error' in value) {
+    acc.addText(value.error);
+  } else if ('richText' in value) {
+    const text = value.richText.map((part) => part.text).join('');
+    if (text.trim() === '') {
+      acc.addNull();
+    } else {
+      acc.addText(text);
+    }
+  } else if ('hyperlink' in value) {
+    acc.addText(String(value.text));
+  } else {
+    acc.addText(cell.text);
+  }
+}
+
+// Worksheets are immutable for the document's lifetime (read-only viewer), so
+// asking again for an already-computed sheet's stats reuses the answer.
+const statsCache = new StatsCache<Worksheet>();
+
+/**
+ * Whole-sheet column statistics (data rows 2..rowCount, regardless of
+ * `tablas.maxRows`), computed on demand from native cell values before
+ * stringification. `undefined` = no stats (empty sheet, or an unexpected
+ * failure, reported through `statsHooks`); it never throws, so a stats bug
+ * can't break showing the table.
+ */
+export function xlsxSheetStats(worksheet: Worksheet): TableStats | undefined {
+  const columnCount = worksheet.columnCount;
+  if (worksheet.rowCount === 0 || columnCount === 0) {
+    return undefined;
+  }
+  // rowCount is the last row that has values, header included.
+  const dataRowCount = worksheet.rowCount - 1;
+  if (exceedsStatsCellCap(dataRowCount, columnCount)) {
+    return skippedStats(STATS_TOO_LARGE_REASON);
+  }
+  const cached = statsCache.lookup(worksheet, '');
+  if (cached.hit) {
+    return cached.stats;
+  }
+  try {
+    const budget = new DistinctBudget();
+    const accs: ColumnStatsAccumulator[] = [];
+    for (let col = 1; col <= columnCount; col++) {
+      accs.push(new ColumnStatsAccumulator({ budget }));
+    }
+    const lastRow = dataRowCount + 1;
+    // findRow/findCell (not getRow/getCell) so sparse sheets don't allocate
+    // an empty Row/Cell for every gap.
+    for (let r = 2; r <= lastRow; r++) {
+      const row = worksheet.findRow(r);
+      for (let col = 1; col <= columnCount; col++) {
+        addXlsxCellToStats(accs[col - 1], row?.findCell(col));
+      }
+    }
+    for (let col = 1; col <= columnCount; col++) {
+      const acc = accs[col - 1];
+      if (!acc.histogramPlan()) {
+        continue;
+      }
+      for (let r = 2; r <= lastRow; r++) {
+        const cell = worksheet.findRow(r)?.findCell(col);
+        const value = cell ? unwrapCellValue(cell) : null;
+        if (typeof value === 'number') {
+          acc.addHistogramValue(value);
+        }
+      }
+    }
+    const stats: TableStats = { columns: accs.map((acc) => acc.finalize()) };
+    statsCache.store(worksheet, '', stats);
+    return stats;
+  } catch (err) {
+    reportStatsFailure(err);
+    statsCache.store(worksheet, '', undefined);
+    return undefined;
+  }
 }
 
 /**

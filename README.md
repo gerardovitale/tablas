@@ -6,7 +6,7 @@ Open data files in a pretty, theme-aware table view — right inside VS Code, no
 
 VS Code has no first-class way to *look at* structured data files. JetBrains editors (DataGrip, IntelliJ's built-in CSV/table viewer) get this right: open a data file, see a real table, search it, tweak a cell, done. Tablas aims to bring that experience to VS Code.
 
-**Where we are:** read-only viewing for CSV, Parquet, SQLite (`.db`/`.sqlite`/`.sqlite3`), DuckDB (`.duckdb`/`.ddb`), and Excel (`.xlsx`) files — parse → render as `<table>`, theme-aware, XSS-safe. SQLite/DuckDB databases and Excel workbooks all get a dropdown to switch between their tables/views or sheets.
+**Where we are:** read-only viewing for CSV, Parquet, SQLite (`.db`/`.sqlite`/`.sqlite3`), DuckDB (`.duckdb`/`.ddb`), and Excel (`.xlsx`) files — parse → render as `<table>`, theme-aware, XSS-safe. SQLite/DuckDB databases and Excel workbooks all get a dropdown to switch between their tables/views or sheets. A **Statistics** control next to the row count adds a profile to every column header — type, null share, and a mini histogram (or distinct count for text) — with a detail card on click (nulls, distinct, min/max/mean, full histogram), or an **Overview** list of all columns. Everything is computed over the whole table, not just the rows shown.
 
 **Where we're going**, roughly in order:
 1. **Find/filter within a file** — locate matching cells/rows in the currently open table (JetBrains-style in-table search, not just VS Code's text-based Ctrl+F, which doesn't work well on a rendered table).

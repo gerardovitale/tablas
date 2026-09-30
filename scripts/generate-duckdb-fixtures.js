@@ -83,6 +83,33 @@ async function main() {
        (1, DATE '2023-11-14', 1234.5, 9007199254740993)`,
   ]);
 
+  // stats.duckdb -- one column per DuckDB type family readDuckdbTable's
+  // column statistics care about: BIGINT beyond 2^53 and a HUGEINT (exact
+  // min/max text), DOUBLE with NaN/Infinity (excluded from numeric stats),
+  // DECIMAL, BOOLEAN, DATE, TIMESTAMP, VARCHAR, BLOB and LIST (unsummarised),
+  // an all-NULL column, and an identifier needing quote-doubling. Plus a
+  // zero-row table and a view, which take the same stats path.
+  await write('stats.duckdb', [
+    `CREATE TABLE mixed (
+       id INTEGER, big BIGINT, huge HUGEINT, ratio DOUBLE, amount DECIMAL(10,2),
+       flag BOOLEAN, day DATE, ts TIMESTAMP, label VARCHAR, payload BLOB,
+       tags INTEGER[], all_null INTEGER, "odd ""name""" INTEGER)`,
+    `INSERT INTO mixed VALUES
+       (1, 9007199254740993, 170141183460469231731687303715884105727, 1.5, 1.50, true,
+        DATE '2020-01-01', TIMESTAMP '2020-01-01 10:00:00', 'b', '\\x00\\xff'::BLOB, [1], NULL, 10),
+       (2, 1, 2, 2.5, 2.25, false,
+        DATE '2021-01-01', TIMESTAMP '2021-06-01 12:30:00', 'a', '\\x00\\xff'::BLOB, [2, 3], NULL, 20),
+       (3, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 30),
+       (4, 3, 4, 4.0, 10.00, true,
+        DATE '2019-01-01', TIMESTAMP '2019-03-01 00:00:00', 'c', '\\x01'::BLOB, [], NULL, 40),
+       (5, 4, 5, 'NaN', 3.10, false,
+        DATE '2020-01-01', TIMESTAMP '2020-01-01 10:00:00', 'a', NULL, [4], NULL, 50),
+       (6, 5, 6, 'Infinity', 0.05, true,
+        DATE '2020-06-01', TIMESTAMP '2020-06-01 00:00:00', 'b', NULL, [5], NULL, 60)`,
+    'CREATE TABLE empty_table (a INTEGER, b VARCHAR)',
+    'CREATE VIEW label_counts AS SELECT label, COUNT(*) AS n FROM mixed GROUP BY label',
+  ]);
+
   // no-tables.duckdb -- a valid DuckDB database (openable) with zero
   // tables/views left. Distinct from a 0-byte file: this exercises
   // parseDuckdb's "opened fine, nothing to show" branch specifically.

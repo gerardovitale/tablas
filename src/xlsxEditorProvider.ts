@@ -2,7 +2,15 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import type { Workbook } from 'exceljs';
-import { emptyParsedTable, listXlsxSheets, openXlsxWorkbook, readSelectedSheet } from './xlsxParser';
+import {
+  emptyParsedTable,
+  listXlsxSheets,
+  openXlsxWorkbook,
+  readSelectedSheet,
+  xlsxSheetStats,
+} from './xlsxParser';
+import { reportStatsFailure } from './columnStats';
+import { isGetStatsMessage, statsDataMessage, type StatsPayload } from './statsMessage';
 import type { MultiTableParseOutcome } from './tableData';
 import { buildWebviewHtml } from './webviewHtml';
 import { getMaxRowsSetting } from './config';
@@ -114,6 +122,11 @@ export class XlsxEditorProvider implements vscode.CustomReadonlyEditorProvider<X
           await webview.postMessage({ type: 'xlsx-data', payload: outcome });
           this._onDidPostXlsxData.fire(outcome);
         }
+      } else if (isGetStatsMessage(message)) {
+        const payload = await this.handleGetStats(document, message.table);
+        if (payload) {
+          await webview.postMessage(statsDataMessage(payload));
+        }
       }
     });
   }
@@ -178,6 +191,26 @@ export class XlsxEditorProvider implements vscode.CustomReadonlyEditorProvider<X
         success: false,
         errors: [{ type: 'XlsxError', code: 'ReadFailed', message }],
       };
+    }
+  }
+
+  /**
+   * Column statistics for one sheet, computed from the already-parsed
+   * workbook when the webview first asks for them. Like `handleSelectTable`,
+   * public so an integration test can call it without a real webview.
+   * Returns `undefined` if the workbook isn't parsed yet; an unknown or
+   * missing sheet (or a failure) yields a payload without `stats`.
+   */
+  public async handleGetStats(document: XlsxDocument, table?: string): Promise<StatsPayload | undefined> {
+    if (!document.workbook) {
+      return undefined;
+    }
+    try {
+      const worksheet = table !== undefined ? document.workbook.getWorksheet(table) : undefined;
+      return { table, stats: worksheet ? xlsxSheetStats(worksheet) : undefined };
+    } catch (err) {
+      reportStatsFailure(err);
+      return { table, stats: undefined };
     }
   }
 }

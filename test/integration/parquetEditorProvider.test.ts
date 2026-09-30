@@ -3,6 +3,8 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import type { TablasApi } from '../../src/extension';
 import type { ParquetParseOutcome } from '../../src/parquetParser';
+import { ParquetEditorProvider } from '../../src/parquetEditorProvider';
+import { statsHooks } from '../../src/columnStats';
 
 const fixturesDir = path.join(process.cwd(), 'test', 'fixtures');
 
@@ -105,5 +107,41 @@ describe('ParquetEditorProvider Integration', () => {
       false,
       'Parsing a gzip-compressed file should fail cleanly'
     );
+  });
+
+  describe('handleGetStats (lazy column statistics, no webview involved)', () => {
+    function providerAndDocument(name: string) {
+      const provider = new ParquetEditorProvider({ extensionPath: process.cwd() } as vscode.ExtensionContext);
+      return { provider, document: provider.openCustomDocument(fixtureUri(name)) };
+    }
+
+    /** These cases fail on purpose; keep the expected warning out of the test output. */
+    async function quietly<T>(fn: () => Promise<T>): Promise<T> {
+      const original = statsHooks.log;
+      statsHooks.log = () => undefined;
+      try {
+        return await fn();
+      } finally {
+        statsHooks.log = original;
+      }
+    }
+
+    it('re-reads the file and computes whole-file stats', async () => {
+      const { provider, document } = providerAndDocument('stats.parquet');
+      const payload = await provider.handleGetStats(document);
+      assert.strictEqual(payload.table, undefined);
+      assert.strictEqual(payload.stats?.columns.length, 10);
+      assert.strictEqual(payload.stats?.columns[0].max, '5');
+    });
+
+    it('answers a corrupt file with no stats instead of throwing', async () => {
+      const { provider, document } = providerAndDocument('corrupt.parquet');
+      assert.deepStrictEqual(await quietly(() => provider.handleGetStats(document)), { stats: undefined });
+    });
+
+    it('answers an unreadable file with no stats instead of throwing', async () => {
+      const { provider, document } = providerAndDocument('does-not-exist.parquet');
+      assert.deepStrictEqual(await quietly(() => provider.handleGetStats(document)), { stats: undefined });
+    });
   });
 });

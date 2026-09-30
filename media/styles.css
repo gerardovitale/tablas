@@ -22,14 +22,482 @@ body {
   width: 100vw;
 }
 
-.stats-bar {
+/* ── Statistics: colours ───────────────────────────────
+   Fallback chains keep these usable on themes that lack the chart colours.
+   Types are told apart by glyph and bars carry text labels, so nothing here
+   is colour-only. */
+
+:root {
+  --tb-valid: var(--vscode-charts-blue, var(--vscode-textLink-foreground));
+  --tb-null: var(--vscode-charts-orange, var(--vscode-editorWarning-foreground));
+  --tb-distinct: var(--vscode-charts-purple, var(--vscode-textLink-foreground));
+  --tb-track: var(--vscode-scrollbarSlider-background, rgba(128, 128, 128, 0.3));
+}
+
+/* ── Statistics: header bar + mode control ───────────── */
+
+.stats-header {
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  background-color: var(--vscode-editorGroupHeader-tabsBackground, var(--vscode-editor-background));
+  border-bottom: 1px solid var(--vscode-editorGroup-border, var(--vscode-panel-border));
+}
+
+.stats-bar {
+  flex: 1;
+  min-width: 0;
   padding: 4px 12px;
   font-size: 11px;
   color: var(--vscode-descriptionForeground);
-  background-color: var(--vscode-editorGroupHeader-tabsBackground, var(--vscode-editor-background));
-  border-bottom: 1px solid var(--vscode-editorGroup-border, var(--vscode-panel-border));
   user-select: none;
+}
+
+.stats-mode {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 8px;
+}
+
+.stats-mode-label {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.stats-mode-seg {
+  display: flex;
+}
+
+/* "Computing…" / "unavailable" next to the control. Empty (and so invisible)
+   when there is nothing to say; a live region so it is announced. */
+.stats-status {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.stats-mode-btn {
+  margin-left: -1px;
+  padding: 2px 10px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--vscode-button-secondaryForeground, var(--vscode-editor-foreground));
+  background-color: var(--vscode-button-secondaryBackground, transparent);
+  border: 1px solid var(--vscode-button-border, var(--vscode-editorGroup-border, var(--vscode-panel-border)));
+  cursor: pointer;
+}
+
+.stats-mode-btn:first-child {
+  margin-left: 0;
+  border-radius: 2px 0 0 2px;
+}
+
+.stats-mode-btn:last-child {
+  border-radius: 0 2px 2px 0;
+}
+
+.stats-mode-btn:hover:not(:disabled) {
+  background-color: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground));
+}
+
+/* Active segment: filled AND bold, so it isn't distinguished by colour alone. */
+.stats-mode-btn[aria-pressed='true'] {
+  color: var(--vscode-button-foreground);
+  background-color: var(--vscode-button-background);
+  border-color: var(--vscode-button-background);
+  font-weight: 600;
+  position: relative;
+}
+
+.stats-mode-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.stats-mode-btn:focus-visible,
+.col-profile:focus-visible,
+.col-jump:focus-visible,
+.card-close:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+/* ── Statistics: shared bits ─────────────────────────── */
+
+.type-badge {
+  display: inline-block;
+  min-width: 2.4em;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 14px;
+  text-align: center;
+  white-space: nowrap;
+  color: var(--vscode-badge-foreground);
+  background-color: var(--vscode-badge-background);
+}
+
+.nullbar,
+.distbar {
+  display: block;
+  width: 100%;
+  height: 4px;
+  shape-rendering: crispEdges;
+}
+
+.nullbar-lg {
+  height: 6px;
+  margin-top: 4px;
+}
+
+.nullbar-null {
+  fill: var(--tb-null);
+}
+
+.nullbar-valid {
+  fill: var(--tb-valid);
+}
+
+.distbar-track {
+  fill: var(--tb-track);
+}
+
+.distbar-fill {
+  fill: var(--tb-distinct);
+}
+
+.stats-hist {
+  display: block;
+  shape-rendering: crispEdges;
+}
+
+.stats-hist .bar {
+  fill: var(--tb-valid);
+}
+
+.stats-hist .bin-hit {
+  fill: transparent;
+}
+
+.stats-hist .bin:hover .bar {
+  fill: var(--vscode-focusBorder, var(--tb-valid));
+}
+
+/* ── Statistics: header profile strip ("Headers" mode) ─ */
+
+thead th {
+  vertical-align: top;
+}
+
+.col-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.col-profile {
+  display: none;
+  width: 100%;
+  min-width: 96px;
+  margin-top: 4px;
+  padding: 2px 0;
+  font: inherit;
+  font-weight: normal;
+  text-align: left;
+  color: var(--vscode-descriptionForeground);
+  background: none;
+  border: 0;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+#csv-table.show-profile .col-profile {
+  display: block;
+}
+
+.col-profile:hover {
+  background-color: var(--vscode-list-hoverBackground);
+}
+
+/* The strip whose detail card is open. Deliberately not the strong
+   active-selection colour: that is a saturated blue on light themes, and the
+   strip's grey text would be unreadable on it. The outline keeps it visible
+   on high-contrast themes, where the background is transparent. */
+.col-profile[aria-expanded='true'] {
+  background-color: var(--vscode-list-inactiveSelectionBackground, var(--vscode-list-hoverBackground));
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.profile-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.profile-row .nullbar {
+  flex: 1;
+  min-width: 0;
+}
+
+.null-pct {
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.profile-dist {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  font-size: 10px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.hist-mini {
+  width: 100%;
+  height: 26px;
+}
+
+.profile-dist .distbar {
+  flex: 0 0 32px;
+  width: 32px;
+}
+
+.dist-text,
+.range-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dist-tag {
+  padding: 0 4px;
+  border: 1px solid var(--vscode-editorGroup-border, var(--vscode-panel-border));
+  border-radius: 3px;
+}
+
+/* Cell flashed after jumping to it from the overview list. Inset box-shadow,
+   not outline: the th's overflow:hidden would clip an outline. */
+.col-flash {
+  animation: col-flash 1.5s ease-out;
+}
+
+@keyframes col-flash {
+  0%, 60% {
+    box-shadow: inset 0 0 0 2px var(--vscode-focusBorder);
+    background-color: var(--vscode-list-activeSelectionBackground);
+  }
+  100% {
+    box-shadow: inset 0 0 0 2px transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .col-flash {
+    animation: none;
+    box-shadow: inset 0 0 0 2px var(--vscode-focusBorder);
+  }
+}
+
+/* ── Statistics: detail card ─────────────────────────── */
+
+.stats-card {
+  position: fixed;
+  z-index: 100;
+  width: 300px;
+  max-width: calc(100vw - 16px);
+  overflow: auto;
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--vscode-editorWidget-foreground, var(--vscode-editor-foreground));
+  background-color: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  border: 1px solid var(--vscode-editorWidget-border, var(--vscode-editorGroup-border));
+  border-radius: 4px;
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
+}
+
+.stats-card:focus {
+  outline: none;
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.card-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-close {
+  flex-shrink: 0;
+  padding: 0 6px;
+  font: inherit;
+  font-size: 16px;
+  line-height: 18px;
+  color: inherit;
+  background: none;
+  border: 0;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.card-close:hover {
+  background-color: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+
+.card-sub {
+  margin: 2px 0 8px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+}
+
+.card-grid dt {
+  color: var(--vscode-descriptionForeground);
+}
+
+.card-grid dd {
+  min-width: 0;
+}
+
+.card-value {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-hist {
+  margin-top: 10px;
+}
+
+.hist-large {
+  width: 100%;
+  height: 96px;
+}
+
+.hist-axis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.card-note {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+
+/* ── Statistics: overview panel ("Overview" mode) ────── */
+
+.stats-panel {
+  flex-shrink: 0;
+  max-height: 40vh;
+  overflow: auto;
+  border-bottom: 1px solid var(--vscode-editorGroup-border, var(--vscode-panel-border));
+}
+
+/* An author `display` rule would otherwise defeat the [hidden] attribute. */
+.stats-panel[hidden] {
+  display: none;
+}
+
+.stats-note {
+  padding: 6px 12px;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.stats-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+/* Beats the global th/td padding and max-width; the sticky thead rule is
+   deliberately inherited so headers stay visible while the panel scrolls. */
+.stats-table th,
+.stats-table td {
+  padding: 3px 10px;
+  max-width: 220px;
+}
+
+.stats-table th.num,
+.stats-table td.num {
+  text-align: right;
+}
+
+.stats-table tbody tr {
+  cursor: pointer;
+}
+
+.stats-table .type-badge {
+  margin-right: 6px;
+}
+
+.stats-table td .nullbar {
+  display: inline-block;
+  width: 48px;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+
+.col-jump {
+  max-width: 100%;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hist-row {
+  width: 80px;
+  height: 24px;
+}
+
+/* ── Statistics: high contrast ───────────────────────── */
+
+body[class*='vscode-high-contrast'] .stats-hist .bar,
+body[class*='vscode-high-contrast'] .nullbar rect,
+body[class*='vscode-high-contrast'] .distbar rect {
+  stroke: var(--vscode-contrastBorder, currentColor);
+  stroke-width: 1px;
+  vector-effect: non-scaling-stroke;
+}
+
+body[class*='vscode-high-contrast'] .type-badge {
+  border: 1px solid var(--vscode-contrastBorder, currentColor);
+}
+
+body[class*='vscode-high-contrast'] .stats-mode-btn[aria-pressed='true'] {
+  outline: 1px solid var(--vscode-contrastActiveBorder, var(--vscode-focusBorder));
+}
+
+body[class*='vscode-high-contrast'] .stats-card {
+  border-color: var(--vscode-contrastBorder, currentColor);
 }
 
 .scroll-wrapper {

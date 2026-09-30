@@ -77,6 +77,30 @@ def main():
         )
     write('nulls.db', build_nulls)
 
+    # stats.db -- one column per storage-class situation readSqliteTable's
+    # column statistics care about: an INTEGER beyond 2^53 (exact min/max
+    # text), REAL, TEXT, a column mixing INTEGER/TEXT/REAL, a BLOB, an
+    # all-NULL column, and an identifier needing quote-doubling. Plus a
+    # zero-row table and a view, which take the same stats path.
+    def build_stats(conn):
+        conn.execute(
+            'CREATE TABLE mixed (id INTEGER, big INTEGER, ratio REAL, label TEXT, '
+            'mixedcol, payload BLOB, all_null TEXT, "odd ""name""" INTEGER)'
+        )
+        conn.executemany(
+            'INSERT INTO mixed VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            [
+                (1, 9007199254740993, 1.5, 'b', 1, b'\x00\xff', None, 10),
+                (2, 1, 2.5, 'a', 'x', b'\x00\xff', None, 20),
+                (3, None, None, None, 2.5, None, None, 30),
+                (4, 3, 4.0, 'c', None, b'\x01', None, 40),
+                (5, 4, 10.0, 'a', 'x', None, None, 50),
+            ],
+        )
+        conn.execute('CREATE TABLE empty_table (a INTEGER, b TEXT)')
+        conn.execute('CREATE VIEW label_counts AS SELECT label, COUNT(*) AS n FROM mixed GROUP BY label')
+    write('stats.db', build_stats)
+
     # no-tables.db -- a valid SQLite database (correct header, openable)
     # with zero tables/views. Distinct from a 0-byte file: this exercises
     # parseSqlite's "opened fine, nothing to show" branch specifically.

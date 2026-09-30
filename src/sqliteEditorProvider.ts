@@ -6,8 +6,11 @@ import {
   listSqliteTables,
   openSqliteDatabase,
   readSelectedTable,
+  sqliteTableStats,
   type SqliteHandle,
 } from './sqliteParser';
+import { reportStatsFailure } from './columnStats';
+import { isGetStatsMessage, statsDataMessage, type StatsPayload } from './statsMessage';
 import type { MultiTableParseOutcome } from './tableData';
 import { buildWebviewHtml } from './webviewHtml';
 import { getMaxRowsSetting } from './config';
@@ -126,6 +129,11 @@ export class SqliteEditorProvider
           await webview.postMessage({ type: 'sqlite-data', payload: outcome });
           this._onDidPostSqliteData.fire(outcome);
         }
+      } else if (isGetStatsMessage(message)) {
+        const payload = await this.handleGetStats(document, message.table);
+        if (payload) {
+          await webview.postMessage(statsDataMessage(payload));
+        }
       }
     });
   }
@@ -190,6 +198,26 @@ export class SqliteEditorProvider
         success: false,
         errors: [{ type: 'SqliteError', code: 'ReadFailed', message }],
       };
+    }
+  }
+
+  /**
+   * Column statistics for one table, computed against the already-open
+   * database when the webview first asks for them. Like `handleSelectTable`,
+   * public so an integration test can call it without a real webview.
+   * Returns `undefined` if the database isn't open yet; an unknown or
+   * missing table (or a failure) yields a payload without `stats`.
+   */
+  public async handleGetStats(document: SqliteDocument, table?: string): Promise<StatsPayload | undefined> {
+    if (!document.handle) {
+      return undefined;
+    }
+    try {
+      const known = table !== undefined && listSqliteTables(document.handle).some((t) => t.name === table);
+      return { table, stats: known ? sqliteTableStats(document.handle, table) : undefined };
+    } catch (err) {
+      reportStatsFailure(err);
+      return { table, stats: undefined };
     }
   }
 }

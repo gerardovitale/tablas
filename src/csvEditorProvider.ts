@@ -1,7 +1,9 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { parseCsv, CsvParseOutcome } from './csvParser';
+import { csvStats, parseCsv, CsvParseOutcome } from './csvParser';
+import { reportStatsFailure } from './columnStats';
+import { isGetStatsMessage, statsDataMessage, type StatsPayload } from './statsMessage';
 import { buildWebviewHtml } from './webviewHtml';
 import { getMaxRowsSetting } from './config';
 
@@ -75,15 +77,41 @@ export class CsvEditorProvider
 
     webview.html = buildWebviewHtml(webview, this.context.extensionPath, nonce, 'CSV Viewer');
 
-    // Wait for 'ready' from webview, then send data
-    const disposable = webview.onDidReceiveMessage(async (message) => {
+    // Stays registered for the document's lifetime: after the 'ready'
+    // handshake it also answers 'get-stats' requests (the guard keeps a
+    // duplicate 'ready' from parsing the file twice).
+    let hasLoadedInitial = false;
+    webview.onDidReceiveMessage(async (message) => {
       if (message?.type === 'ready') {
-        disposable.dispose();
+        if (hasLoadedInitial) {
+          return;
+        }
+        hasLoadedInitial = true;
         const outcome = await this.loadAndParseCsv(document.uri);
         await webview.postMessage({ type: 'csv-data', payload: outcome });
         this._onDidPostCsvData.fire(outcome);
+      } else if (isGetStatsMessage(message)) {
+        await webview.postMessage(statsDataMessage(await this.handleGetStats(document)));
       }
     });
+  }
+
+  /**
+   * Whole-file column statistics, computed when the webview first asks for
+   * them. The document keeps no parsed rows (they'd sit in memory for the
+   * editor's whole lifetime), so this re-reads and re-parses the file; a file
+   * edited on disk since it was loaded therefore yields stats for its newer
+   * content. Public, like the multi-table providers' `handleSelectTable`, so
+   * an integration test can exercise it without a real webview.
+   */
+  public async handleGetStats(document: CsvDocument): Promise<StatsPayload> {
+    try {
+      const bytes = await vscode.workspace.fs.readFile(document.uri);
+      return { stats: csvStats(new TextDecoder('utf-8').decode(bytes)) };
+    } catch (err) {
+      reportStatsFailure(err);
+      return { stats: undefined };
+    }
   }
 
   private async loadAndParseCsv(uri: vscode.Uri): Promise<CsvParseOutcome> {

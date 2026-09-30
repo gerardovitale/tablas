@@ -3,6 +3,8 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import type { TablasApi } from '../../src/extension';
 import type { CsvParseOutcome } from '../../src/csvParser';
+import { CsvEditorProvider } from '../../src/csvEditorProvider';
+import { statsHooks } from '../../src/columnStats';
 
 const fixturesDir = path.join(process.cwd(), 'test', 'fixtures');
 
@@ -102,5 +104,42 @@ describe('CsvEditorProvider Integration', () => {
     if (outcome.success) {
       assert.ok(outcome.data.rowCount > 0, 'quoted.csv should parse at least one row');
     }
+  });
+
+  describe('handleGetStats (lazy column statistics, no webview involved)', () => {
+    function providerAndDocument(name: string) {
+      const provider = new CsvEditorProvider({ extensionPath: process.cwd() } as vscode.ExtensionContext);
+      return { provider, document: provider.openCustomDocument(fixtureUri(name)) };
+    }
+
+    /** These cases fail on purpose; keep the expected warning out of the test output. */
+    async function quietly<T>(fn: () => Promise<T>): Promise<T> {
+      const original = statsHooks.log;
+      statsHooks.log = () => undefined;
+      try {
+        return await fn();
+      } finally {
+        statsHooks.log = original;
+      }
+    }
+
+    it('re-reads the file and computes whole-file stats', async () => {
+      const { provider, document } = providerAndDocument('simple.csv');
+      const payload = await provider.handleGetStats(document);
+      assert.strictEqual(payload.table, undefined);
+      assert.strictEqual(payload.stats?.columns.length, 3);
+      assert.strictEqual(payload.stats?.columns[1].type, 'integer');
+      assert.strictEqual(payload.stats?.columns[1].max, '35');
+    });
+
+    it('gives an empty file no stats', async () => {
+      const { provider, document } = providerAndDocument('empty.csv');
+      assert.deepStrictEqual(await provider.handleGetStats(document), { stats: undefined });
+    });
+
+    it('answers an unreadable file with no stats instead of throwing', async () => {
+      const { provider, document } = providerAndDocument('does-not-exist.csv');
+      assert.deepStrictEqual(await quietly(() => provider.handleGetStats(document)), { stats: undefined });
+    });
   });
 });
