@@ -53,71 +53,27 @@ body {
   user-select: none;
 }
 
-.stats-mode {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 0 8px;
-}
-
-.stats-mode-label {
-  font-size: 11px;
-  color: var(--vscode-descriptionForeground);
-}
-
-.stats-mode-seg {
-  display: flex;
-}
-
-/* "Computing…" / "unavailable" next to the control. Empty (and so invisible)
-   when there is nothing to say; a live region so it is announced. */
+/* "Computing…" / "unavailable" / skip reason beside the stats bar. Empty (and
+   so invisible) when there is nothing to say; a live region so it is announced. */
 .stats-status {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 60%;
+  margin: 0 12px;
   font-size: 11px;
   color: var(--vscode-descriptionForeground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.stats-mode-btn {
-  margin-left: -1px;
-  padding: 2px 10px;
-  font: inherit;
-  font-size: 11px;
-  color: var(--vscode-button-secondaryForeground, var(--vscode-editor-foreground));
-  background-color: var(--vscode-button-secondaryBackground, transparent);
-  border: 1px solid var(--vscode-button-border, var(--vscode-editorGroup-border, var(--vscode-panel-border)));
-  cursor: pointer;
+/* Stay rendered while empty (no display:none): a live region only announces
+   changes if it was already in the accessibility tree. Just drop its margin. */
+.stats-status:empty {
+  margin: 0;
 }
 
-.stats-mode-btn:first-child {
-  margin-left: 0;
-  border-radius: 2px 0 0 2px;
-}
-
-.stats-mode-btn:last-child {
-  border-radius: 0 2px 2px 0;
-}
-
-.stats-mode-btn:hover:not(:disabled) {
-  background-color: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground));
-}
-
-/* Active segment: filled AND bold, so it isn't distinguished by colour alone. */
-.stats-mode-btn[aria-pressed='true'] {
-  color: var(--vscode-button-foreground);
-  background-color: var(--vscode-button-background);
-  border-color: var(--vscode-button-background);
-  font-weight: 600;
-  position: relative;
-}
-
-.stats-mode-btn:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.stats-mode-btn:focus-visible,
 .col-profile:focus-visible,
-.col-jump:focus-visible,
 .card-close:focus-visible {
   outline: 1px solid var(--vscode-focusBorder);
   outline-offset: 1px;
@@ -185,7 +141,7 @@ body {
   fill: var(--vscode-focusBorder, var(--tb-valid));
 }
 
-/* ── Statistics: header profile strip ("Headers" mode) ─ */
+/* ── Statistics: header profile strip ────────────────── */
 
 thead th {
   vertical-align: top;
@@ -198,7 +154,7 @@ thead th {
 }
 
 .col-profile {
-  display: none;
+  display: block;
   width: 100%;
   min-width: 96px;
   margin-top: 4px;
@@ -211,10 +167,6 @@ thead th {
   border: 0;
   border-radius: 2px;
   cursor: pointer;
-}
-
-#csv-table.show-profile .col-profile {
-  display: block;
 }
 
 .col-profile:hover {
@@ -277,29 +229,6 @@ thead th {
   padding: 0 4px;
   border: 1px solid var(--vscode-editorGroup-border, var(--vscode-panel-border));
   border-radius: 3px;
-}
-
-/* Cell flashed after jumping to it from the overview list. Inset box-shadow,
-   not outline: the th's overflow:hidden would clip an outline. */
-.col-flash {
-  animation: col-flash 1.5s ease-out;
-}
-
-@keyframes col-flash {
-  0%, 60% {
-    box-shadow: inset 0 0 0 2px var(--vscode-focusBorder);
-    background-color: var(--vscode-list-activeSelectionBackground);
-  }
-  100% {
-    box-shadow: inset 0 0 0 2px transparent;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .col-flash {
-    animation: none;
-    box-shadow: inset 0 0 0 2px var(--vscode-focusBorder);
-  }
 }
 
 /* ── Statistics: detail card ─────────────────────────── */
@@ -405,79 +334,6 @@ thead th {
   color: var(--vscode-descriptionForeground);
 }
 
-/* ── Statistics: overview panel ("Overview" mode) ────── */
-
-.stats-panel {
-  flex-shrink: 0;
-  max-height: 40vh;
-  overflow: auto;
-  border-bottom: 1px solid var(--vscode-editorGroup-border, var(--vscode-panel-border));
-}
-
-/* An author `display` rule would otherwise defeat the [hidden] attribute. */
-.stats-panel[hidden] {
-  display: none;
-}
-
-.stats-note {
-  padding: 6px 12px;
-  font-size: 11px;
-  color: var(--vscode-descriptionForeground);
-}
-
-.stats-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 12px;
-}
-
-/* Beats the global th/td padding and max-width; the sticky thead rule is
-   deliberately inherited so headers stay visible while the panel scrolls. */
-.stats-table th,
-.stats-table td {
-  padding: 3px 10px;
-  max-width: 220px;
-}
-
-.stats-table th.num,
-.stats-table td.num {
-  text-align: right;
-}
-
-.stats-table tbody tr {
-  cursor: pointer;
-}
-
-.stats-table .type-badge {
-  margin-right: 6px;
-}
-
-.stats-table td .nullbar {
-  display: inline-block;
-  width: 48px;
-  vertical-align: middle;
-  margin-right: 6px;
-}
-
-.col-jump {
-  max-width: 100%;
-  padding: 0;
-  font: inherit;
-  text-align: left;
-  color: inherit;
-  background: none;
-  border: 0;
-  cursor: pointer;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.hist-row {
-  width: 80px;
-  height: 24px;
-}
-
 /* ── Statistics: high contrast ───────────────────────── */
 
 body[class*='vscode-high-contrast'] .stats-hist .bar,
@@ -490,10 +346,6 @@ body[class*='vscode-high-contrast'] .distbar rect {
 
 body[class*='vscode-high-contrast'] .type-badge {
   border: 1px solid var(--vscode-contrastBorder, currentColor);
-}
-
-body[class*='vscode-high-contrast'] .stats-mode-btn[aria-pressed='true'] {
-  outline: 1px solid var(--vscode-contrastActiveBorder, var(--vscode-focusBorder));
 }
 
 body[class*='vscode-high-contrast'] .stats-card {

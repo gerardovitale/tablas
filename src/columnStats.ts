@@ -61,7 +61,7 @@ export function skippedStats(reason: string): TableStats {
  * Stats are best-effort: a failure must never break showing the table, so
  * every compute path catches and returns `undefined`. This is the one place
  * those catches report to, so a real bug leaves a trace instead of silently
- * making the Statistics control unavailable. Mutable so tests can observe or
+ * leaving a table without its column profiles. Mutable so tests can observe or
  * silence it (`log` exists separately because VS Code's extension host makes
  * `console.warn` itself unassignable, so tests can't stub it there).
  */

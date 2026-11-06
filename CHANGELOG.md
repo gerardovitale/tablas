@@ -7,7 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
-- Column statistics for every supported format, computed over the whole table (not just the rows shown; `tablas.maxRows` does not limit them). A **Statistics** control next to the row count switches between Off, **Headers** (a profile strip in every column header: type badge, null share, and a mini histogram for numeric columns or a distinct-count bar for text), and **Overview** (one row per column). Clicking a header profile opens a detail card with nulls, distinct count, min, max, mean and a full histogram with per-bin tooltips. The chosen mode is remembered. Statistics are computed only when you first switch the view on, so they add nothing to the time it takes to open a file.
+- Column statistics for every supported format, computed over the whole table (not just the rows shown; `tablas.maxRows` does not limit them). Every column header shows a profile strip: type badge, null share, and a mini histogram for numeric columns or a distinct-count bar for text. Clicking a header profile opens a detail card with nulls, distinct count, min, max, mean and a full histogram with per-bin tooltips. Statistics are requested after the rows are already on screen, so the table never waits for them; a status note next to the row count shows "Computing…", or why statistics were skipped or unavailable for a very large table.
 
 ## [0.1.0] - 2026-08-21
 

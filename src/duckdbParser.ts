@@ -368,8 +368,8 @@ async function computeDuckdbStats(handle: DuckdbHandle, tableName: string): Prom
 /**
  * Whole-table column statistics via SQL push-down (regardless of
  * `tablas.maxRows`): one aggregate scan plus one small bucket query per
- * numeric column. Computed on demand -- when the user first opens the
- * Statistics view. DuckDB is native and async so it doesn't block the
+ * numeric column. Computed on request -- the webview asks right after it
+ * renders each table. DuckDB is native and async so it doesn't block the
  * extension host the way sql.js would, but a pathological table could still
  * run long, hence a wall-clock budget enforced with `connection.interrupt()`
  * (safe because `runExclusive` guarantees nothing else is running); hitting it

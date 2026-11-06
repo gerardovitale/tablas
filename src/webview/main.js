@@ -12,24 +12,21 @@
 
   const SVG_NS = 'http://www.w3.org/2000/svg';
 
-  const STATS_MODES = ['off', 'headers', 'overview'];
-  const FLASH_MS = 1500;
-
   /**
    * How each ColumnStats.type is shown. Types are told apart by glyph, not
    * colour (no icon font is available in the webview, and colour-only
    * distinctions fail high-contrast themes).
-   * @type {Record<string, { glyph: string, name: string, label: string }>}
+   * @type {Record<string, { glyph: string, name: string }>}
    */
   const KIND_INFO = {
-    integer: { glyph: '123', name: 'integer', label: 'int' },
-    float: { glyph: '1.5', name: 'float', label: 'float' },
-    boolean: { glyph: 'T/F', name: 'boolean', label: 'bool' },
-    date: { glyph: 'date', name: 'date/time', label: 'date/time' },
-    text: { glyph: 'Abc', name: 'text', label: 'text' },
-    mixed: { glyph: 'mix', name: 'mixed types', label: 'mixed' },
-    other: { glyph: '{ }', name: 'nested or binary', label: 'other' },
-    empty: { glyph: '∅', name: 'no values', label: 'empty' },
+    integer: { glyph: '123', name: 'integer' },
+    float: { glyph: '1.5', name: 'float' },
+    boolean: { glyph: 'T/F', name: 'boolean' },
+    date: { glyph: 'date', name: 'date/time' },
+    text: { glyph: 'Abc', name: 'text' },
+    mixed: { glyph: 'mix', name: 'mixed types' },
+    other: { glyph: '{ }', name: 'nested or binary' },
+    empty: { glyph: '∅', name: 'no values' },
   };
 
   /**
@@ -37,7 +34,7 @@
    * @property {number} index
    * @property {string} name
    * @property {import('../../src/tableData').ColumnStats} column
-   * @property {{ glyph: string, name: string, label: string }} info
+   * @property {{ glyph: string, name: string }} info
    * @property {number} nonNull
    * @property {number} nullFrac
    * @property {string} nullText   "0", or "N (P%)"
@@ -49,41 +46,26 @@
    * @property {string} summary    accessible name for the profile button
    */
 
-  // The statistics view mode. Module-level (not per-render) so it survives the
-  // full #app re-render that switching tables triggers, and mirrored into the
-  // webview's saved state so it survives reloads.
-  /** @type {string} */
-  let statsMode = readSavedStatsMode();
-
   /**
    * The rendered table plus everything the stats UI needs after the fact.
    * Reassigned on every renderTable; undefined while no table is shown.
    *
-   * Statistics are lazy: `stats` walks idle -> pending (a `get-stats` request
-   * is in flight) -> ready (strips + overview attached) | skipped (the host
-   * deliberately didn't compute them; the reason is in the Overview panel) |
-   * failed. The table itself never waits on any of it.
-   * @type {{ table: HTMLElement, wrapper: HTMLElement, panel: HTMLElement, ths: HTMLElement[],
-   *          gutterTh: HTMLElement, modeBtns: HTMLElement[], statusEl: HTMLElement,
+   * Statistics are always on but still arrive after the rows: `stats` walks
+   * idle -> pending (a `get-stats` request is in flight) -> ready (profile
+   * strips attached) | skipped (the host deliberately didn't compute them;
+   * `skippedReason` says why) | failed. The table itself never waits on any
+   * of it.
+   * @type {{ wrapper: HTMLElement, ths: HTMLElement[],
+   *          gutterTh: HTMLElement, statusEl: HTMLElement,
    *          tableName: string | undefined, headers: string[], rowCount: number, totalRowCount?: number,
    *          coverNote: string | undefined, models: ColumnModel[] | undefined,
+   *          skippedReason: string | undefined,
    *          stats: 'idle' | 'pending' | 'ready' | 'skipped' | 'failed' } | undefined}
    */
   let currentView;
 
   /** @type {{ card: HTMLElement, trigger: HTMLElement, th: HTMLElement } | undefined} */
   let openCard;
-
-  /** @type {number | undefined} */
-  let flashTimer;
-  /** @type {HTMLElement | undefined} */
-  let flashedTh;
-
-  function readSavedStatsMode() {
-    const state = vscode.getState();
-    const mode = state && state.statsMode;
-    return STATS_MODES.includes(mode) ? mode : 'off';
-  }
 
   /** @param {string} tag @param {Record<string, string>=} attrs @returns {HTMLElement} */
   function el(tag, attrs) {
@@ -151,7 +133,7 @@
   }
 
   /**
-   * Everything the header strip, the detail card and the overview row need
+   * Everything the header strip and the detail card need
    * to say about one column, computed once per render.
    * @param {import('../../src/tableData').TableStats} stats
    * @param {{ headers: string[], rowCount: number, totalRowCount?: number }} data
@@ -238,10 +220,10 @@
    * setAttribute only: the CSP has no 'unsafe-inline' for styles, so bar
    * geometry can't go through style="" attributes.
    * @param {ColumnModel} model
-   * @param {{ width: number, height: number, className: string, tooltips: 'none' | 'bar' | 'group',
+   * @param {{ width: number, height: number, className: string, tooltips: 'none' | 'group',
    *           decorative?: boolean, stretch?: boolean }} opts
-   *   tooltips: 'bar' puts a <title> in each bar; 'group' wraps each bin in a
-   *   <g> with a full-height transparent hit rect so empty bins are hoverable.
+   *   tooltips: 'group' wraps each bin in a <g> with a <title> and a
+   *   full-height transparent hit rect so empty bins are hoverable.
    */
   function renderHistogram(model, opts) {
     const histogram = /** @type {import('../../src/tableData').HistogramStats} */ (model.column.histogram);
@@ -278,13 +260,10 @@
         width: String(Math.max(1, slot - 1)),
         height: String(barHeight),
       });
-      let tip;
-      if (opts.tooltips !== 'none') {
-        tip = svgEl('title');
+      if (opts.tooltips === 'group') {
+        const tip = svgEl('title');
         const share = total > 0 ? ` (${formatPercent((count / total) * 100)}%)` : '';
         tip.textContent = `${binLabel(model.column.type, histogram, i)}: ${count.toLocaleString()} value${count !== 1 ? 's' : ''}${share}`;
-      }
-      if (opts.tooltips === 'group' && tip) {
         const group = svgEl('g', { class: 'bin' });
         group.appendChild(tip);
         group.appendChild(svgEl('rect', {
@@ -293,7 +272,6 @@
         group.appendChild(bar);
         svg.appendChild(group);
       } else {
-        if (tip) { bar.appendChild(tip); }
         svg.appendChild(bar);
       }
     });
@@ -346,7 +324,7 @@
   // ── Statistics: column header profile strip ───────────────────────────
 
   /**
-   * The compact strip inside a column header (shown in "Headers" mode): type
+   * The compact strip inside a column header: type
    * badge + null bar on top, a distribution summary underneath. It is a
    * <button> so it is keyboard-reachable and opens the detail card.
    * @param {ColumnModel} model
@@ -406,113 +384,46 @@
     return button;
   }
 
-  // ── Statistics: mode control ──────────────────────────────────────────
+  // ── Statistics: status ────────────────────────────────────────────────
 
-  /**
-   * Off / Headers / Overview. The saved choice is never overwritten by what a
-   * particular table allows: a table whose stats were skipped can't show
-   * Headers, so it shows Overview (which carries the reason); one whose stats
-   * failed shows neither.
-   */
-  function effectiveMode() {
-    if (!currentView) { return statsMode; }
-    if (currentView.stats === 'failed') { return 'off'; }
-    if (currentView.stats === 'skipped' && statsMode === 'headers') { return 'overview'; }
-    return statsMode;
+  /** A live-region span beside the stats bar. Empty (and so invisible) when there is nothing to say. */
+  function renderStatsStatus() {
+    return el('span', { class: 'stats-status', role: 'status', 'aria-live': 'polite' });
   }
 
-  const STATUS_TEXT = {
-    pending: 'Computing…',
-    failed: 'Statistics unavailable for this table',
-  };
-
-  function applyStatsMode() {
+  function applyStatsStatus() {
     const view = currentView;
     if (!view) { return; }
-    const mode = effectiveMode();
-    view.table.classList.toggle('show-profile', mode === 'headers');
-    view.panel.hidden = mode !== 'overview';
-    for (const btn of view.modeBtns) {
-      const btnMode = btn.getAttribute('data-mode');
-      btn.setAttribute('aria-pressed', String(btnMode === mode));
-      const unavailable =
-        (btnMode === 'headers' && (view.stats === 'skipped' || view.stats === 'failed')) ||
-        (btnMode === 'overview' && view.stats === 'failed');
-      if (unavailable) {
-        btn.setAttribute('disabled', '');
-        btn.title = 'Per-column statistics are unavailable for this table';
-      } else {
-        btn.removeAttribute('disabled');
-        btn.removeAttribute('title');
-      }
+    let text = '';
+    if (view.stats === 'pending') {
+      text = 'Computing…';
+    } else if (view.stats === 'failed') {
+      text = 'Statistics unavailable for this table';
+    } else if (view.stats === 'skipped') {
+      text = view.skippedReason || '';
     }
-    view.statusEl.textContent = STATUS_TEXT[view.stats] || '';
-    closeCard(false);
-  }
-
-  /** @param {string} mode */
-  function setStatsMode(mode) {
-    statsMode = mode;
-    vscode.setState({ ...(vscode.getState() || {}), statsMode: mode });
-    applyStatsMode();
-    if (mode !== 'off') {
-      requestStats();
+    view.statusEl.textContent = text;
+    // A long skip reason is ellipsised in the bar; the title keeps it readable.
+    if (view.stats === 'skipped') {
+      view.statusEl.title = text;
+    } else {
+      view.statusEl.removeAttribute('title');
     }
   }
 
-  function renderModeControl() {
-    const group = el('div', { class: 'stats-mode', role: 'group', 'aria-label': 'Column statistics' });
-    const label = el('span', { class: 'stats-mode-label', 'aria-hidden': 'true' });
-    label.textContent = 'Statistics';
-    group.appendChild(label);
-    const seg = el('div', { class: 'stats-mode-seg' });
-    /** @type {HTMLElement[]} */
-    const buttons = [];
-    for (const [mode, text] of [['off', 'Off'], ['headers', 'Headers'], ['overview', 'Overview']]) {
-      const btn = el('button', {
-        type: 'button', class: 'stats-mode-btn', 'data-mode': mode, 'aria-pressed': 'false',
-      });
-      btn.textContent = text;
-      if (mode === 'overview') {
-        btn.setAttribute('aria-controls', 'stats-panel');
-      }
-      btn.addEventListener('click', () => setStatsMode(mode));
-      seg.appendChild(btn);
-      buttons.push(btn);
-    }
-    group.appendChild(seg);
-    const statusEl = el('span', { class: 'stats-status', role: 'status', 'aria-live': 'polite' });
-    group.appendChild(statusEl);
-    return { group, buttons, statusEl };
-  }
-
-  // ── Statistics: lazy loading ──────────────────────────────────────────
-
-  /** Swaps the (hidden or visible) overview panel's contents for a single note. */
-  function showPanelNote(text) {
-    const view = currentView;
-    if (!view) { return; }
-    const panel = el('div', { id: 'stats-panel', class: 'stats-panel' });
-    const note = el('p', { class: 'stats-note' });
-    note.textContent = text;
-    panel.appendChild(note);
-    view.panel.replaceWith(panel);
-    view.panel = panel;
-  }
+  // ── Statistics: loading ───────────────────────────────────────────────
 
   /**
-   * Asks the extension host for this table's statistics -- once per rendered
-   * view, and only when the user has turned the view on (or a saved "on" mode
-   * is restored), so tables that never use it never pay for it. The state
-   * flips to 'pending' *before* posting, so a reply that lands synchronously
-   * (as it does in tests) finds the view ready to receive it.
+   * Asks the extension host for this table's statistics, once per rendered
+   * view, right after its rows are in the DOM. The state flips to 'pending'
+   * *before* posting, so a reply that lands synchronously (as it does in
+   * tests) finds the view ready to receive it.
    */
   function requestStats() {
     const view = currentView;
     if (!view || view.stats !== 'idle') { return; }
     view.stats = 'pending';
-    showPanelNote('Computing column statistics…');
-    applyStatsMode();
+    applyStatsStatus();
     vscode.postMessage(
       view.tableName !== undefined ? { type: 'get-stats', table: view.tableName } : { type: 'get-stats' }
     );
@@ -530,23 +441,18 @@
     const stats = payload.stats;
     if (!stats || (!stats.skippedReason && (!Array.isArray(stats.columns) || stats.columns.length !== view.headers.length))) {
       view.stats = 'failed';
-      showPanelNote('Statistics are unavailable for this table.');
     } else if (stats.skippedReason) {
       view.stats = 'skipped';
-      const panel = renderStatsPanel(stats, undefined, undefined);
-      view.panel.replaceWith(panel);
-      view.panel = panel;
+      view.skippedReason = stats.skippedReason;
     } else {
       attachStats(view, stats);
     }
-    applyStatsMode();
+    applyStatsStatus();
   }
 
   /**
-   * Fills in the parts of an already-rendered table that need statistics:
-   * the overview panel and a profile strip in every header. The strips are
-   * `display: none` until Headers mode is on, so attaching them changes no
-   * layout by itself and the table is never re-rendered.
+   * Appends a profile strip to every header of an already-rendered table, so
+   * the table is never re-rendered.
    * @param {NonNullable<typeof currentView>} view
    * @param {import('../../src/tableData').TableStats} stats
    */
@@ -554,139 +460,7 @@
     const models = buildColumnModels(stats, view);
     view.models = models;
     view.stats = 'ready';
-    const panel = renderStatsPanel(stats, models, view.coverNote);
-    view.panel.replaceWith(panel);
-    view.panel = panel;
     models.forEach((model, i) => view.ths[i].appendChild(renderProfileStrip(model)));
-  }
-
-  // ── Statistics: overview panel (one row per column) ───────────────────
-
-  /**
-   * Builds the overview panel. Every cell is textContent-only, like the main
-   * table: min/max are untrusted file content.
-   * @param {import('../../src/tableData').TableStats} stats
-   * @param {ColumnModel[] | undefined} models
-   * @param {string | undefined} coverNote
-   */
-  function renderStatsPanel(stats, models, coverNote) {
-    const panel = el('div', { id: 'stats-panel', class: 'stats-panel' });
-    if (stats.skippedReason) {
-      const note = el('p', { class: 'stats-note' });
-      note.textContent = stats.skippedReason;
-      panel.appendChild(note);
-      return panel;
-    }
-    if (coverNote) {
-      const note = el('p', { class: 'stats-note' });
-      note.textContent = coverNote;
-      panel.appendChild(note);
-    }
-    if (!models) { return panel; }
-
-    const table = el('table', { class: 'stats-table' });
-    const headerRow = el('tr');
-    for (const [label, numeric] of [
-      ['Column', false],
-      ['Type', false],
-      ['Nulls', true],
-      ['Distinct', true],
-      ['Min', false],
-      ['Max', false],
-      ['Mean', true],
-      ['Distribution', false],
-    ]) {
-      const th = el('th', numeric ? { class: 'num' } : undefined);
-      th.textContent = String(label);
-      headerRow.appendChild(th);
-    }
-    const thead = el('thead');
-    thead.appendChild(headerRow);
-    table.appendChild(thead);
-
-    const tbody = el('tbody');
-    for (const model of models) {
-      const { column } = model;
-      const tr = el('tr', { 'data-col': String(model.index) });
-      /** @param {boolean=} numeric @param {string=} title */
-      const addCell = (numeric, title) => {
-        const td = el('td', numeric ? { class: 'num' } : undefined);
-        if (title !== undefined) { td.title = title; }
-        tr.appendChild(td);
-        return td;
-      };
-      /** @param {string} text @param {boolean=} numeric */
-      const addTextCell = (text, numeric) => {
-        const td = addCell(numeric, text);
-        td.textContent = text;
-        return td;
-      };
-
-      const nameCell = addCell(false, model.name);
-      const jump = el('button', { type: 'button', class: 'col-jump' });
-      jump.textContent = model.name;
-      nameCell.appendChild(jump);
-
-      const typeCell = addCell(false, model.info.name);
-      typeCell.appendChild(renderTypeBadge(model));
-      const typeName = el('span', { class: 'type-name' });
-      typeName.textContent = model.info.label;
-      typeCell.appendChild(typeName);
-
-      const nullCell = addCell(true, model.nullText);
-      nullCell.appendChild(renderNullBar(model));
-      const nullText = el('span', { class: 'null-text' });
-      nullText.textContent = model.nullText;
-      nullCell.appendChild(nullText);
-
-      addTextCell(model.distinctText, true);
-      addTextCell(column.min !== undefined ? column.min : '—');
-      addTextCell(column.max !== undefined ? column.max : '—');
-      addTextCell(column.mean !== undefined ? formatNumber(column.mean) : '—', true);
-
-      const distribution = el('td');
-      if (column.histogram) {
-        distribution.appendChild(renderHistogram(model, {
-          width: 80, height: 24, className: 'hist-row', tooltips: 'bar',
-        }));
-      } else {
-        distribution.textContent = '—';
-      }
-      tr.appendChild(distribution);
-      tbody.appendChild(tr);
-    }
-    tbody.addEventListener('click', (event) => {
-      const target = /** @type {Element} */ (event.target);
-      const row = target.closest('tr[data-col]');
-      if (row) {
-        jumpToColumn(Number(row.getAttribute('data-col')));
-      }
-    });
-    table.appendChild(tbody);
-    panel.appendChild(table);
-    return panel;
-  }
-
-  /** Scrolls the data table to column `index` and flashes its header. */
-  function jumpToColumn(index) {
-    const th = currentView && currentView.ths[index];
-    if (!th) { return; }
-    th.scrollIntoView({ inline: 'center', block: 'nearest' });
-    if (flashTimer !== undefined) {
-      window.clearTimeout(flashTimer);
-    }
-    if (flashedTh) {
-      flashedTh.classList.remove('col-flash');
-    }
-    // Reading offsetWidth forces a reflow, so re-adding the class restarts
-    // the animation even when the same column is flashed twice in a row.
-    void th.offsetWidth;
-    th.classList.add('col-flash');
-    flashedTh = th;
-    flashTimer = window.setTimeout(() => {
-      th.classList.remove('col-flash');
-      flashTimer = undefined;
-    }, FLASH_MS);
   }
 
   // ── Statistics: detail card ───────────────────────────────────────────
@@ -904,9 +678,9 @@
       ? `Statistics cover all ${data.totalRowCount.toLocaleString()} rows, not just the ${data.rowCount.toLocaleString()} shown.`
       : undefined;
 
-    // Stats header: the text-only stats bar plus the Off / Headers / Overview
-    // mode control. Statistics themselves aren't in `data`: they're requested
-    // lazily (see requestStats) once the user picks Headers or Overview.
+    // Stats header: the text-only stats bar plus a status span. Column
+    // statistics themselves aren't in `data`: they're requested once the rows
+    // are in the DOM (see requestStats) and drawn into the headers on arrival.
     const statsHeader = el('div', { class: 'stats-header' });
     const statsBar = el('div', { class: 'stats-bar' });
     let statsText = `${data.rowCount} row${data.rowCount !== 1 ? 's' : ''} × ${data.columnCount} column${data.columnCount !== 1 ? 's' : ''}`;
@@ -916,11 +690,9 @@
     statsBar.textContent = statsText;
     statsHeader.appendChild(statsBar);
 
-    const control = renderModeControl();
-    statsHeader.appendChild(control.group);
-    const statsPanel = el('div', { id: 'stats-panel', class: 'stats-panel' });
+    const statusEl = renderStatsStatus();
+    statsHeader.appendChild(statusEl);
     app.appendChild(statsHeader);
-    app.appendChild(statsPanel);
 
     // Scroll wrapper
     const wrapper = el('div', { class: 'scroll-wrapper' });
@@ -994,27 +766,20 @@
     app.appendChild(wrapper);
 
     currentView = {
-      table,
       wrapper,
-      panel: statsPanel,
       ths,
       gutterTh: rnHeader,
-      modeBtns: control.buttons,
-      statusEl: control.statusEl,
+      statusEl,
       tableName,
       headers: data.headers,
       rowCount: data.rowCount,
       totalRowCount: data.totalRowCount,
       coverNote,
       models: undefined,
+      skippedReason: undefined,
       stats: 'idle',
     };
-    applyStatsMode();
-    // A restored or carried-over "on" mode (reload, table switch) has no user
-    // click to trigger the request, so make it here.
-    if (statsMode !== 'off') {
-      requestStats();
-    }
+    requestStats();
   }
 
   /**

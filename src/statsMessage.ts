@@ -1,10 +1,10 @@
 import type { TableStats } from './tableData';
 
 /**
- * The lazy column-statistics protocol between an editor's webview and its
+ * The column-statistics protocol between an editor's webview and its
  * provider. Row data (`*-data` messages) never carries stats; the webview asks
- * for them the first time the user turns the Statistics view on, so tables
- * that never use it pay nothing at open time.
+ * for them in a separate request right after it renders each table, so the
+ * rows never wait on the statistics.
  *
  * Kept free of any `vscode` import so it can be unit-tested from `test/unit/`.
  */

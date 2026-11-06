@@ -96,8 +96,8 @@ export function parseCsv(rawContent: string, maxRowsInput?: number): CsvParseOut
 
 /**
  * Whole-file column statistics (every row, regardless of `tablas.maxRows`).
- * Computed on demand -- the editor re-reads and re-parses the file when the
- * user first opens the Statistics view -- so it takes the raw text rather than
+ * Computed on request -- the editor re-reads and re-parses the file when the
+ * webview asks after rendering the table -- so it takes the raw text rather than
  * relying on anything `parseCsv` kept. `undefined` means "no stats" (blank
  * file, unparseable file, no columns, or an unexpected failure, which is
  * reported through `statsHooks`); it never throws, because a stats problem

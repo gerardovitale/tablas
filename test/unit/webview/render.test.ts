@@ -585,21 +585,11 @@ describe('webview main.js statistics', () => {
     });
   }
 
-  /** Opens with the Headers view already on (as after a reload), so strips exist right after `send`. */
-  const loadHeaders = () => loadWebview({ statsMode: 'headers' });
-
   const doc = (dom: JSDOM) => dom.window.document;
-  const panelOf = (dom: JSDOM): HTMLElement | null => doc(dom).getElementById('stats-panel');
   const cardOf = (dom: JSDOM): HTMLElement | null => doc(dom).getElementById('stats-card');
   const tableEl = (dom: JSDOM): HTMLElement | null => doc(dom).getElementById('csv-table');
-  const modeBtn = (dom: JSDOM, mode: string): HTMLButtonElement | null =>
-    doc(dom).querySelector(`.stats-mode-btn[data-mode="${mode}"]`);
   const profile = (dom: JSDOM, col: number): HTMLButtonElement | null =>
     doc(dom).querySelector(`#csv-table thead button.col-profile[data-col="${col}"]`);
-  const pressed = (dom: JSDOM): string[] =>
-    Array.from(doc(dom).querySelectorAll('.stats-mode-btn'))
-      .filter((b) => b.getAttribute('aria-pressed') === 'true')
-      .map((b) => b.getAttribute('data-mode')!);
   const text = (node: Element | null | undefined): string | null | undefined => node?.textContent;
 
   function press(dom: JSDOM, key: string, target?: EventTarget): void {
@@ -610,104 +600,7 @@ describe('webview main.js statistics', () => {
     doc(dom).body.dispatchEvent(new dom.window.Event('pointerdown', { bubbles: true }));
   }
 
-  describe('mode control', () => {
-    it('always renders the control and an empty, hidden panel -- stats are only requested on demand', () => {
-      const { dom, postedMessages } = loadWebview();
-      send(dom, table());
-      assert.ok(modeBtn(dom, 'headers') && modeBtn(dom, 'overview') && modeBtn(dom, 'off'));
-      assert.strictEqual(panelOf(dom)?.hidden, true);
-      assert.strictEqual(panelOf(dom)?.textContent, '');
-      assert.strictEqual(doc(dom).querySelector('.col-profile'), null);
-      assert.deepStrictEqual(postedMessages, [{ type: 'ready' }], 'nothing is requested while Off');
-    });
-
-    it('defaults to Off, keeping the stats bar text unchanged', () => {
-      const { dom } = loadWebview();
-      send(dom, table());
-      assert.strictEqual(text(doc(dom).querySelector('.stats-bar')), '2 rows × 2 columns');
-      assert.deepStrictEqual(pressed(dom), ['off']);
-      assert.strictEqual(panelOf(dom)?.hidden, true);
-      assert.strictEqual(tableEl(dom)?.classList.contains('show-profile'), false);
-      assert.strictEqual(modeBtn(dom, 'overview')?.getAttribute('aria-controls'), 'stats-panel');
-    });
-
-    it('switches modes without re-rendering the table, and saves the choice', () => {
-      const { dom, savedStates } = loadWebview();
-      send(dom, table());
-      const before = tableEl(dom);
-
-      modeBtn(dom, 'headers')!.click();
-      assert.deepStrictEqual(pressed(dom), ['headers']);
-      assert.strictEqual(tableEl(dom)?.classList.contains('show-profile'), true);
-      assert.strictEqual(panelOf(dom)?.hidden, true);
-
-      modeBtn(dom, 'overview')!.click();
-      assert.deepStrictEqual(pressed(dom), ['overview']);
-      assert.strictEqual(tableEl(dom)?.classList.contains('show-profile'), false);
-      assert.strictEqual(panelOf(dom)?.hidden, false);
-
-      modeBtn(dom, 'off')!.click();
-      assert.deepStrictEqual(pressed(dom), ['off']);
-      assert.strictEqual(panelOf(dom)?.hidden, true);
-
-      assert.strictEqual(tableEl(dom), before, 'table node must be reused, not re-rendered');
-      assert.deepStrictEqual(savedStates, [
-        { statsMode: 'headers' },
-        { statsMode: 'overview' },
-        { statsMode: 'off' },
-      ]);
-    });
-
-    it('keeps unrelated saved state when saving the mode', () => {
-      const { dom, savedStates } = loadWebview({ scrollTop: 12 });
-      send(dom, table());
-      modeBtn(dom, 'headers')!.click();
-      assert.deepStrictEqual(savedStates, [{ scrollTop: 12, statsMode: 'headers' }]);
-    });
-
-    it('restores a saved mode on load, and ignores a bogus one', () => {
-      const restored = loadWebview({ statsMode: 'overview' });
-      send(restored.dom, table());
-      assert.deepStrictEqual(pressed(restored.dom), ['overview']);
-      assert.strictEqual(panelOf(restored.dom)?.hidden, false);
-
-      const bogus = loadWebview({ statsMode: 'sideways' });
-      send(bogus.dom, table());
-      assert.deepStrictEqual(pressed(bogus.dom), ['off']);
-    });
-
-    it('keeps the mode when the table re-renders (e.g. a table switch)', () => {
-      const { dom } = loadWebview();
-      send(dom, table());
-      modeBtn(dom, 'headers')!.click();
-      send(dom, table());
-      assert.deepStrictEqual(pressed(dom), ['headers']);
-      assert.strictEqual(tableEl(dom)?.classList.contains('show-profile'), true);
-    });
-
-    it('works for multi-table sources too', () => {
-      const { dom } = loadWebview();
-      sendMulti(dom, 't', table());
-      assert.ok(modeBtn(dom, 'headers'));
-      modeBtn(dom, 'overview')!.click();
-      assert.strictEqual(panelOf(dom)?.querySelectorAll('tbody tr').length, 2);
-    });
-
-    it('disables Headers and falls back to Overview when stats were skipped', () => {
-      const { dom, savedStates } = loadWebview({ statsMode: 'headers' });
-      send(dom, table({ stats: { columns: [], skippedReason: 'Table is too large.' } }));
-      assert.strictEqual(modeBtn(dom, 'headers')?.disabled, true);
-      assert.deepStrictEqual(pressed(dom), ['overview']);
-      const panel = panelOf(dom)!;
-      assert.strictEqual(panel.hidden, false);
-      assert.strictEqual(text(panel.querySelector('.stats-note')), 'Table is too large.');
-      assert.strictEqual(panel.querySelector('table'), null);
-      assert.strictEqual(doc(dom).querySelector('.col-profile'), null);
-      assert.deepStrictEqual(savedStates, [], 'the saved choice must not be overwritten');
-    });
-  });
-
-  describe('lazy statistics', () => {
+  describe('always-on statistics', () => {
     const getStats = (postedMessages: unknown[]) =>
       postedMessages.filter((m) => (m as { type: string }).type === 'get-stats');
 
@@ -716,94 +609,77 @@ describe('webview main.js statistics', () => {
       dom.window.dispatchEvent(new dom.window.MessageEvent('message', { data: { type: 'stats-data', payload } }));
     }
 
-    it('asks for stats once, the first time Headers or Overview is chosen', () => {
-      const { dom, postedMessages } = loadWebview();
+    const strips = (dom: JSDOM) => doc(dom).querySelectorAll('#csv-table thead button.col-profile');
+
+    it('renders no mode control and no overview panel', () => {
+      const { dom } = loadWebview();
       send(dom, table());
-      assert.deepStrictEqual(getStats(postedMessages), []);
-      modeBtn(dom, 'headers')!.click();
-      assert.deepStrictEqual(getStats(postedMessages), [{ type: 'get-stats' }], 'no table name for CSV/Parquet');
+      assert.strictEqual(doc(dom).querySelector('.stats-mode'), null);
+      assert.strictEqual(doc(dom).querySelector('.stats-mode-btn'), null);
+      assert.strictEqual(doc(dom).getElementById('stats-panel'), null);
     });
 
-    it('does not ask again when the mode is toggled around', () => {
+    it('shows a profile strip in every header without any click, leaving the stats bar text unchanged', () => {
+      const { dom } = loadWebview();
+      send(dom, table());
+      assert.strictEqual(text(doc(dom).querySelector('.stats-bar')), '2 rows × 2 columns');
+      assert.strictEqual(strips(dom).length, 2);
+    });
+
+    it('requests stats as soon as a table renders, naming no table for CSV/Parquet', () => {
       const { dom, postedMessages } = loadWebview();
       send(dom, table());
-      for (const mode of ['headers', 'overview', 'off', 'headers', 'overview']) {
-        modeBtn(dom, mode)!.click();
-      }
-      assert.strictEqual(getStats(postedMessages).length, 1);
+      assert.deepStrictEqual(postedMessages, [{ type: 'ready' }, { type: 'get-stats' }]);
     });
 
     it('names the selected table for a multi-table source', () => {
       const { dom, postedMessages } = loadWebview();
       sendMulti(dom, 'orders', table(), ['customers', 'orders']);
-      modeBtn(dom, 'overview')!.click();
       assert.deepStrictEqual(getStats(postedMessages), [{ type: 'get-stats', table: 'orders' }]);
+      assert.strictEqual(strips(dom).length, 2);
     });
 
-    it('asks on load when a saved On mode is restored', () => {
-      const { dom, postedMessages } = loadWebview({ statsMode: 'headers' });
-      send(dom, table());
-      assert.strictEqual(getStats(postedMessages).length, 1);
-      assert.ok(profile(dom, 0), 'the strips are there without any click');
-    });
-
-    it('asks again for each newly shown table while a mode is on, but not while Off', () => {
-      const on = loadWebview({ statsMode: 'overview' });
-      sendMulti(on.dom, 'a', table(), ['a', 'b']);
-      sendMulti(on.dom, 'b', table(), ['a', 'b']);
-      assert.deepStrictEqual(getStats(on.postedMessages), [
+    it('asks again for each newly shown table', () => {
+      const { dom, postedMessages } = loadWebview();
+      sendMulti(dom, 'a', table(), ['a', 'b']);
+      sendMulti(dom, 'b', table(), ['a', 'b']);
+      assert.deepStrictEqual(getStats(postedMessages), [
         { type: 'get-stats', table: 'a' },
         { type: 'get-stats', table: 'b' },
       ]);
+    });
 
-      const off = loadWebview();
-      sendMulti(off.dom, 'a', table(), ['a', 'b']);
-      sendMulti(off.dom, 'b', table(), ['a', 'b']);
-      assert.deepStrictEqual(getStats(off.postedMessages), []);
+    it('ignores a legacy saved Off mode and never writes webview state', () => {
+      const { dom, savedStates } = loadWebview({ statsMode: 'off' });
+      send(dom, table());
+      assert.strictEqual(strips(dom).length, 2);
+      assert.deepStrictEqual(savedStates, []);
     });
 
     describe('while the answer is pending', () => {
-      it('says so, shows a placeholder in Overview, and has no strips yet', () => {
+      it('says so and has no strips yet', () => {
         const { dom } = loadWebview(undefined, () => undefined);
         send(dom, table());
-        modeBtn(dom, 'headers')!.click();
         assert.strictEqual(text(doc(dom).querySelector('.stats-status')), 'Computing…');
         assert.strictEqual(doc(dom).querySelector('.col-profile'), null);
-        assert.deepStrictEqual(pressed(dom), ['headers'], 'the choice is honoured, not flipped to Overview');
-
-        modeBtn(dom, 'overview')!.click();
-        assert.strictEqual(panelOf(dom)?.hidden, false);
-        assert.strictEqual(text(panelOf(dom)!.querySelector('.stats-note')), 'Computing column statistics…');
+        assert.strictEqual(doc(dom).querySelectorAll('#csv-table tbody tr').length, 2, 'the rows never wait for stats');
       });
 
-      it('fills in the strips and the overview when the answer arrives, without re-rendering the table', () => {
+      it('fills in the strips when the answer arrives, without re-rendering the table', () => {
         const { dom } = loadWebview(undefined, () => undefined);
         send(dom, table());
-        modeBtn(dom, 'headers')!.click();
         const before = tableEl(dom);
         deliver(dom, { stats: twoColumnStats });
 
         assert.strictEqual(tableEl(dom), before);
-        assert.strictEqual(doc(dom).querySelectorAll('#csv-table thead button.col-profile').length, 2);
-        assert.strictEqual(tableEl(dom)?.classList.contains('show-profile'), true);
+        assert.strictEqual(strips(dom).length, 2);
         assert.strictEqual(text(doc(dom).querySelector('.stats-status')), '');
-        assert.strictEqual(panelOf(dom)?.querySelectorAll('tbody tr').length, 2);
-        assert.strictEqual(panelOf(dom)?.id, 'stats-panel', 'aria-controls must keep pointing at it');
-      });
-
-      it('keeps an open Overview visible through the swap', () => {
-        const { dom } = loadWebview(undefined, () => undefined);
-        send(dom, table());
-        modeBtn(dom, 'overview')!.click();
-        deliver(dom, { stats: twoColumnStats });
-        assert.strictEqual(panelOf(dom)?.hidden, false);
-        assert.deepStrictEqual(pressed(dom), ['overview']);
       });
     });
 
     describe('answers that do not belong', () => {
       it("drops an answer for a table that is no longer shown, and accepts the current table's", () => {
-        const { dom } = loadWebview({ statsMode: 'headers' }, () => undefined);
+        const { dom } = loadWebview(undefined, () => undefined);
         sendMulti(dom, 'a', table(), ['a', 'b']);
         sendMulti(dom, 'b', table(), ['a', 'b']);
 
@@ -815,75 +691,86 @@ describe('webview main.js statistics', () => {
         assert.strictEqual(doc(dom).querySelectorAll('.col-profile').length, 2);
       });
 
-      it('ignores an answer nobody asked for', () => {
+      it('ignores an answer that arrives before any table is shown', () => {
         const { dom } = loadWebview();
-        send(dom, table());
         deliver(dom, { stats: twoColumnStats });
         assert.strictEqual(doc(dom).querySelector('.col-profile'), null);
-        assert.strictEqual(panelOf(dom)?.textContent, '');
       });
 
       it('ignores a duplicate answer once one has been applied', () => {
-        const { dom } = loadWebview({ statsMode: 'headers' });
+        const { dom } = loadWebview();
         send(dom, table());
         deliver(dom, { stats: { columns: [] } });
         assert.strictEqual(doc(dom).querySelectorAll('.col-profile').length, 2);
       });
 
       it('ignores an empty payload', () => {
-        const { dom } = loadWebview({ statsMode: 'headers' }, () => undefined);
+        const { dom } = loadWebview(undefined, () => undefined);
         send(dom, table());
         deliver(dom, undefined);
         assert.strictEqual(text(doc(dom).querySelector('.stats-status')), 'Computing…');
       });
     });
 
-    describe('when the stats cannot be had', () => {
-      it('says so, disables Headers and Overview, and keeps the saved choice', () => {
-        const { dom, savedStates } = loadWebview();
-        send(dom, table({ stats: undefined })); // the host answers a failure with no stats
-        modeBtn(dom, 'headers')!.click();
-
-        assert.strictEqual(text(doc(dom).querySelector('.stats-status')), 'Statistics unavailable for this table');
-        assert.strictEqual(modeBtn(dom, 'headers')?.disabled, true);
-        assert.strictEqual(modeBtn(dom, 'overview')?.disabled, true);
-        assert.strictEqual(modeBtn(dom, 'off')?.disabled, false);
-        assert.deepStrictEqual(pressed(dom), ['off']);
-        assert.strictEqual(panelOf(dom)?.hidden, true);
+    describe('when the stats are skipped', () => {
+      it("shows the host's reason in the status, with no strips", () => {
+        const { dom } = loadWebview();
+        send(dom, table({ stats: { columns: [], skippedReason: 'Table is too large.' } }));
+        const status = doc(dom).querySelector('.stats-status');
+        assert.strictEqual(text(status), 'Table is too large.');
+        assert.strictEqual(status?.getAttribute('title'), 'Table is too large.');
         assert.strictEqual(doc(dom).querySelector('.col-profile'), null);
-        assert.deepStrictEqual(savedStates, [{ statsMode: 'headers' }]);
+        assert.strictEqual(doc(dom).querySelectorAll('#csv-table tbody tr').length, 2);
       });
 
-      it('treats a column count that does not match the headers as a failure, never an empty Overview', () => {
-        const { dom } = loadWebview({ statsMode: 'overview' });
+      it('clears the reason once a later table has stats', () => {
+        const { dom } = loadWebview();
+        send(dom, table({ stats: { columns: [], skippedReason: 'Table is too large.' } }));
+        send(dom, table());
+        const status = doc(dom).querySelector('.stats-status');
+        assert.strictEqual(text(status), '');
+        assert.strictEqual(status?.hasAttribute('title'), false);
+        assert.strictEqual(strips(dom).length, 2);
+      });
+    });
+
+    describe('when the stats cannot be had', () => {
+      it('says so, shows no strips, and keeps the table', () => {
+        const { dom } = loadWebview();
+        send(dom, table({ stats: undefined })); // the host answers a failure with no stats
+        assert.strictEqual(text(doc(dom).querySelector('.stats-status')), 'Statistics unavailable for this table');
+        assert.strictEqual(doc(dom).querySelector('.col-profile'), null);
+        assert.strictEqual(doc(dom).querySelectorAll('#csv-table tbody tr').length, 2);
+      });
+
+      it('treats a column count that does not match the headers as a failure', () => {
+        const { dom } = loadWebview();
         send(dom, table({ stats: { columns: [twoColumnStats.columns[0]] } }));
         assert.strictEqual(text(doc(dom).querySelector('.stats-status')), 'Statistics unavailable for this table');
-        assert.strictEqual(panelOf(dom)?.hidden, true);
         assert.strictEqual(doc(dom).querySelector('.col-profile'), null);
       });
 
       it('tries again the next time the table is rendered', () => {
-        const { dom, postedMessages } = loadWebview({ statsMode: 'headers' });
+        const { dom, postedMessages } = loadWebview();
         send(dom, table({ stats: undefined }));
-        assert.strictEqual(modeBtn(dom, 'headers')?.disabled, true);
         send(dom, table());
         assert.strictEqual(getStats(postedMessages).length, 2);
-        assert.strictEqual(modeBtn(dom, 'headers')?.disabled, false);
-        assert.strictEqual(doc(dom).querySelectorAll('.col-profile').length, 2);
+        assert.strictEqual(text(doc(dom).querySelector('.stats-status')), '');
+        assert.strictEqual(strips(dom).length, 2);
       });
     });
   });
 
   describe('header profile strips', () => {
     it('adds one strip per column to thead, and none to the body', () => {
-      const { dom } = loadHeaders();
+      const { dom } = loadWebview();
       send(dom, table());
       assert.strictEqual(doc(dom).querySelectorAll('#csv-table thead button.col-profile').length, 2);
       assert.strictEqual(doc(dom).querySelectorAll('#csv-table tbody button').length, 0);
     });
 
     it('does the same for a large (table-fixed) table', () => {
-      const { dom } = loadHeaders();
+      const { dom } = loadWebview();
       const rows = Array.from({ length: 501 }, () => ['1', 'a']);
       send(dom, table({ rows, rowCount: 501 }));
       assert.strictEqual(tableEl(dom)?.classList.contains('table-fixed'), true);
@@ -891,14 +778,14 @@ describe('webview main.js statistics', () => {
     });
 
     it('keeps the column name separate from the strip', () => {
-      const { dom } = loadHeaders();
+      const { dom } = loadWebview();
       send(dom, table());
       const names = Array.from(doc(dom).querySelectorAll('#csv-table thead .col-name')).map((n) => n.textContent);
       assert.deepStrictEqual(names, ['n', 'label']);
     });
 
     it('shows a type badge, a null bar and a mini histogram for a numeric column', () => {
-      const { dom } = loadHeaders();
+      const { dom } = loadWebview();
       send(dom, table());
       const strip = profile(dom, 0)!;
       assert.strictEqual(text(strip.querySelector('.type-badge')), '123');
@@ -909,7 +796,7 @@ describe('webview main.js statistics', () => {
     });
 
     it('sizes the valid part of the null bar and shows the null percentage', () => {
-      const { dom } = loadHeaders();
+      const { dom } = loadWebview();
       send(dom, table());
       const strip = profile(dom, 1)!; // 1 null in 2 rows
       assert.strictEqual(text(strip.querySelector('.type-badge')), 'Abc');
@@ -918,7 +805,7 @@ describe('webview main.js statistics', () => {
     });
 
     it('keeps a sliver of the bar for a tiny null share, and none valid for all-null', () => {
-      const { dom } = loadHeaders();
+      const { dom } = loadWebview();
       send(
         dom,
         tableOf(
@@ -934,14 +821,14 @@ describe('webview main.js statistics', () => {
       assert.strictEqual(text(profile(dom, 0)!.querySelector('.null-pct')), '0.1%');
       assert.strictEqual(profile(dom, 1)!.querySelector('.nullbar-valid')?.getAttribute('width'), '99');
 
-      const all = loadHeaders();
+      const all = loadWebview();
       send(all.dom, tableOf([{ type: 'empty', nullCount: 4 }]));
       assert.strictEqual(profile(all.dom, 0)!.querySelector('.nullbar-valid')?.getAttribute('width'), '0');
       assert.strictEqual(text(profile(all.dom, 0)!.querySelector('.null-pct')), '100%');
     });
 
     it('shows distinct-ratio treatment for text columns, tagging unique and constant ones', () => {
-      const { dom } = loadHeaders();
+      const { dom } = loadWebview();
       send(
         dom,
         tableOf([
@@ -963,7 +850,7 @@ describe('webview main.js statistics', () => {
     });
 
     it('shows the range for dates, distinct for booleans and mixed, and nothing for other/empty', () => {
-      const { dom } = loadHeaders();
+      const { dom } = loadWebview();
       send(
         dom,
         tableOf([
@@ -989,7 +876,7 @@ describe('webview main.js statistics', () => {
     });
 
     it('gives each strip an accessible summary', () => {
-      const { dom } = loadHeaders();
+      const { dom } = loadWebview();
       send(dom, table());
       assert.strictEqual(
         profile(dom, 1)!.getAttribute('aria-label'),
@@ -1003,7 +890,7 @@ describe('webview main.js statistics', () => {
 
   describe('detail card', () => {
     it('opens on click with the full stats, focus, and ARIA wiring', () => {
-      const { dom } = loadHeaders();
+      const { dom } = loadWebview();
       send(dom, table());
       profile(dom, 0)!.click();
 
@@ -1029,7 +916,7 @@ describe('webview main.js statistics', () => {
     });
 
     it('omits stats the column does not have', () => {
-      const { dom } = loadHeaders();
+      const { dom } = loadWebview();
       send(dom, tableOf([{ type: 'other', nullCount: 1 }]));
       profile(dom, 0)!.click();
       const labels = Array.from(cardOf(dom)!.querySelectorAll('dt')).map((dt) => dt.textContent);
@@ -1039,7 +926,7 @@ describe('webview main.js statistics', () => {
     });
 
     it('draws a large histogram with axis labels and a hoverable group per bin', () => {
-      const { dom } = loadHeaders();
+      const { dom } = loadWebview();
       send(dom, table());
       profile(dom, 0)!.click();
       const card = cardOf(dom)!;
@@ -1060,7 +947,7 @@ describe('webview main.js statistics', () => {
     });
 
     it('closes on the same trigger, swaps for another, and only ever shows one card', () => {
-      const { dom } = loadHeaders();
+      const { dom } = loadWebview();
       send(dom, table());
       profile(dom, 0)!.click();
       profile(dom, 1)!.click();
@@ -1075,7 +962,7 @@ describe('webview main.js statistics', () => {
     });
 
     it('closes on Escape and returns focus to the trigger', () => {
-      const { dom } = loadHeaders();
+      const { dom } = loadWebview();
       send(dom, table());
       profile(dom, 0)!.click();
       press(dom, 'Escape');
@@ -1084,7 +971,7 @@ describe('webview main.js statistics', () => {
     });
 
     it('closes from its close button and returns focus', () => {
-      const { dom } = loadHeaders();
+      const { dom } = loadWebview();
       send(dom, table());
       profile(dom, 1)!.click();
       (cardOf(dom)!.querySelector('.card-close') as HTMLButtonElement).click();
@@ -1093,7 +980,7 @@ describe('webview main.js statistics', () => {
     });
 
     it('closes on an outside pointerdown but not on one inside the card', () => {
-      const { dom } = loadHeaders();
+      const { dom } = loadWebview();
       send(dom, table());
       profile(dom, 0)!.click();
       cardOf(dom)!.dispatchEvent(new dom.window.Event('pointerdown', { bubbles: true }));
@@ -1103,7 +990,7 @@ describe('webview main.js statistics', () => {
     });
 
     it('closes when Tab leaves it, handing focus back to the trigger', () => {
-      const { dom } = loadHeaders();
+      const { dom } = loadWebview();
       send(dom, table());
       profile(dom, 0)!.click();
       const close = cardOf(dom)!.querySelector('.card-close') as HTMLButtonElement;
@@ -1114,21 +1001,16 @@ describe('webview main.js statistics', () => {
     });
 
     it('keeps the card open on other keys', () => {
-      const { dom } = loadHeaders();
+      const { dom } = loadWebview();
       send(dom, table());
       profile(dom, 0)!.click();
       press(dom, 'a');
       assert.ok(cardOf(dom));
     });
 
-    it('closes when the mode changes, and when the table re-renders', () => {
-      const { dom } = loadHeaders();
+    it('closes when the table re-renders', () => {
+      const { dom } = loadWebview();
       send(dom, table());
-      modeBtn(dom, 'headers')!.click();
-      profile(dom, 0)!.click();
-      modeBtn(dom, 'off')!.click();
-      assert.strictEqual(cardOf(dom), null);
-
       profile(dom, 0)!.click();
       assert.ok(cardOf(dom));
       send(dom, table());
@@ -1136,7 +1018,7 @@ describe('webview main.js statistics', () => {
     });
 
     it('closes when the page is hidden', () => {
-      const { dom } = loadHeaders();
+      const { dom } = loadWebview();
       send(dom, table());
       profile(dom, 0)!.click();
       Object.defineProperty(doc(dom), 'hidden', { configurable: true, get: () => true });
@@ -1145,7 +1027,7 @@ describe('webview main.js statistics', () => {
     });
 
     it('says the stats cover the whole table when rows were truncated', () => {
-      const { dom } = loadHeaders();
+      const { dom } = loadWebview();
       send(dom, table({ totalRowCount: 50 }));
       profile(dom, 1)!.click();
       assert.strictEqual(
@@ -1173,7 +1055,7 @@ describe('webview main.js statistics', () => {
       }
 
       it('anchors the card under its header', () => {
-        const { dom } = loadHeaders();
+        const { dom } = loadWebview();
         send(dom, table());
         stubLayout(dom, { viewportWidth: 1000, cardWidth: 300, anchor: 200 });
         profile(dom, 0)!.click();
@@ -1183,7 +1065,7 @@ describe('webview main.js statistics', () => {
       });
 
       it('clamps the card inside the right edge of the viewport', () => {
-        const { dom } = loadHeaders();
+        const { dom } = loadWebview();
         send(dom, table());
         stubLayout(dom, { viewportWidth: 1000, cardWidth: 300, anchor: 900 });
         profile(dom, 0)!.click();
@@ -1191,7 +1073,7 @@ describe('webview main.js statistics', () => {
       });
 
       it('keeps the card clear of the row-number gutter', () => {
-        const { dom } = loadHeaders();
+        const { dom } = loadWebview();
         send(dom, table());
         stubLayout(dom, { viewportWidth: 1000, cardWidth: 300, anchor: 10 });
         profile(dom, 0)!.click();
@@ -1199,7 +1081,7 @@ describe('webview main.js statistics', () => {
       });
 
       it('follows its header on horizontal scroll', () => {
-        const { dom } = loadHeaders();
+        const { dom } = loadWebview();
         send(dom, table());
         const { ths, rect } = stubLayout(dom, { viewportWidth: 1000, cardWidth: 300, anchor: 200 });
         profile(dom, 0)!.click();
@@ -1209,7 +1091,7 @@ describe('webview main.js statistics', () => {
       });
 
       it('closes when its column scrolls out of view', () => {
-        const { dom } = loadHeaders();
+        const { dom } = loadWebview();
         send(dom, table());
         const { ths, rect } = stubLayout(dom, { viewportWidth: 1000, cardWidth: 300, anchor: 200 });
         profile(dom, 0)!.click();
@@ -1225,7 +1107,7 @@ describe('webview main.js statistics', () => {
       });
 
       it('ignores scrolling inside the card itself', () => {
-        const { dom } = loadHeaders();
+        const { dom } = loadWebview();
         send(dom, table());
         const { ths, rect } = stubLayout(dom, { viewportWidth: 1000, cardWidth: 300, anchor: 200 });
         profile(dom, 0)!.click();
@@ -1235,7 +1117,7 @@ describe('webview main.js statistics', () => {
       });
 
       it('does not treat an unmeasurable (all-zero) rect as scrolled out of view', () => {
-        const { dom } = loadHeaders();
+        const { dom } = loadWebview();
         send(dom, table());
         profile(dom, 0)!.click();
         doc(dom).dispatchEvent(new dom.window.Event('scroll'));
@@ -1247,7 +1129,7 @@ describe('webview main.js statistics', () => {
   describe('histogram bin labels', () => {
     /** Opens the card of a one-column table and returns its bin tooltip labels. */
     function labelsFor(type: 'integer' | 'float', lo: number, hi: number, bins: number): string[] {
-      const { dom } = loadHeaders();
+      const { dom } = loadWebview();
       send(
         dom,
         tableOf([
@@ -1323,132 +1205,40 @@ describe('webview main.js statistics', () => {
     });
   });
 
-  describe('overview', () => {
-    function openOverview(data: ParsedTable = table(), initialState?: unknown) {
-      const loaded = loadWebview(initialState);
-      send(loaded.dom, data);
-      modeBtn(loaded.dom, 'overview')!.click();
-      return loaded;
-    }
-
-    it('shows one row per column with badge, null bar and type name', () => {
-      const { dom } = openOverview();
-      const panel = panelOf(dom)!;
-      assert.deepStrictEqual(
-        Array.from(panel.querySelectorAll('thead th')).map((th) => th.textContent),
-        ['Column', 'Type', 'Nulls', 'Distinct', 'Min', 'Max', 'Mean', 'Distribution']
-      );
-      const rows = panel.querySelectorAll('tbody tr');
-      assert.strictEqual(rows.length, 2);
-      const cells = (i: number) => Array.from(rows[i].querySelectorAll('td'));
-      const [n, label] = [cells(0), cells(1)];
-
-      assert.strictEqual(text(n[0]), 'n');
-      assert.strictEqual(text(n[1].querySelector('.type-badge')), '123');
-      assert.strictEqual(text(n[1].querySelector('.type-name')), 'int');
-      assert.strictEqual(text(n[2].querySelector('.null-text')), '0');
-      assert.strictEqual(n[2].querySelector('.nullbar-valid')?.getAttribute('width'), '100');
-      assert.deepStrictEqual(n.slice(3, 7).map((c) => c.textContent), ['2', '1', '2', '1.5']);
-      assert.ok(n[7].querySelector('svg.hist-row'));
-
-      assert.strictEqual(text(label[1].querySelector('.type-name')), 'text');
-      assert.strictEqual(text(label[2].querySelector('.null-text')), '1 (50%)');
-      assert.strictEqual(label[2].querySelector('.nullbar-valid')?.getAttribute('width'), '50');
-      assert.deepStrictEqual(label.slice(3, 8).map((c) => c.textContent), ['1', 'a', 'a', '—', '—']);
-    });
-
-    it('draws one histogram bar per bin, scaled to the tallest', () => {
-      const { dom } = openOverview();
-      const rects = panelOf(dom)!.querySelectorAll('svg.hist-row rect');
+  describe('histograms and distinct counts', () => {
+    it('draws one mini-histogram bar per bin in the strip, scaled to the tallest', () => {
+      const { dom } = loadWebview();
+      send(dom, table());
+      const rects = profile(dom, 0)!.querySelectorAll('svg.hist-mini rect');
       assert.strictEqual(rects.length, 2);
       assert.deepStrictEqual(Array.from(rects).map((r) => r.getAttribute('height')), ['11', '22']);
     });
 
     it('keeps a non-empty but tiny bin at least 1px tall and an empty bin flat', () => {
-      const { dom } = openOverview(
+      const { dom } = loadWebview();
+      send(
+        dom,
         tableOf([{ type: 'integer', nullCount: 0, distinctCount: 3, histogram: { lo: 0, hi: 2, counts: [1, 0, 1000] } }])
       );
-      const heights = Array.from(panelOf(dom)!.querySelectorAll('svg.hist-row rect')).map((r) => r.getAttribute('height'));
+      const heights = Array.from(profile(dom, 0)!.querySelectorAll('svg.hist-mini rect')).map((r) => r.getAttribute('height'));
       assert.deepStrictEqual(heights, ['1', '0', '22']);
     });
 
-    it('titles each bar with its bin range, count and share', () => {
-      const { dom } = openOverview();
-      const titles = Array.from(panelOf(dom)!.querySelectorAll('svg.hist-row title')).map((t) => t.textContent);
+    it('titles each bin in the card with its range, count and share', () => {
+      const { dom } = loadWebview();
+      send(dom, table());
+      profile(dom, 0)!.click();
+      const titles = Array.from(cardOf(dom)!.querySelectorAll('svg.hist-large title')).map((t) => t.textContent);
       assert.deepStrictEqual(titles, ['1: 1 value (33.3%)', '2: 2 values (66.7%)']);
     });
 
-    it('says the stats cover the whole table when rows were truncated', () => {
-      const { dom } = openOverview(table({ totalRowCount: 50 }));
-      assert.strictEqual(
-        text(panelOf(dom)!.querySelector('.stats-note')),
-        'Statistics cover all 50 rows, not just the 2 shown.'
-      );
-      assert.strictEqual(text(panelOf(dom)!.querySelectorAll('tbody tr')[1].querySelectorAll('td')[2]), '1 (2%)');
-    });
-
-    it('prefixes a capped distinct count with ≥', () => {
-      const { dom } = openOverview(
-        tableOf([{ type: 'text', nullCount: 0, distinctCount: 100000, distinctIsLowerBound: true }])
-      );
-      assert.strictEqual(text(panelOf(dom)!.querySelectorAll('tbody td')[3]), '≥ 100,000');
-    });
-
-    describe('jumping to a column', () => {
-      function stubJump(dom: JSDOM) {
-        const scrolls: Array<{ el: Element; opts: unknown }> = [];
-        (dom.window.Element.prototype as unknown as { scrollIntoView: unknown }).scrollIntoView = function (
-          this: Element,
-          opts: unknown
-        ) {
-          scrolls.push({ el: this, opts });
-        };
-        const timers: Array<() => void> = [];
-        const cleared: unknown[] = [];
-        dom.window.setTimeout = ((fn: () => void) => {
-          timers.push(fn);
-          return timers.length;
-        }) as unknown as typeof dom.window.setTimeout;
-        dom.window.clearTimeout = ((id: unknown) => {
-          cleared.push(id);
-        }) as unknown as typeof dom.window.clearTimeout;
-        return { scrolls, timers, cleared };
-      }
-
-      const rowOf = (dom: JSDOM, col: number) => panelOf(dom)!.querySelector(`tbody tr[data-col="${col}"]`)!;
-      const headerOf = (dom: JSDOM, col: number) => doc(dom).querySelectorAll('#csv-table thead th')[col + 1];
-
-      it('scrolls the column into view and flashes its header when a row is clicked', () => {
-        const { dom } = openOverview();
-        const { scrolls, timers } = stubJump(dom);
-        rowOf(dom, 1).querySelectorAll('td')[3].dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
-
-        assert.strictEqual(scrolls.length, 1);
-        assert.strictEqual(scrolls[0].el, headerOf(dom, 1));
-        assert.deepStrictEqual(scrolls[0].opts, { inline: 'center', block: 'nearest' });
-        assert.strictEqual(headerOf(dom, 1).classList.contains('col-flash'), true);
-
-        timers[0]();
-        assert.strictEqual(headerOf(dom, 1).classList.contains('col-flash'), false);
-      });
-
-      it('also works from the column-name button (keyboard path)', () => {
-        const { dom } = openOverview();
-        const { scrolls } = stubJump(dom);
-        (rowOf(dom, 0).querySelector('.col-jump') as HTMLButtonElement).click();
-        assert.strictEqual(scrolls[0].el, headerOf(dom, 0));
-      });
-
-      it('restarts the flash when another column is jumped to', () => {
-        const { dom } = openOverview();
-        const { timers, cleared } = stubJump(dom);
-        (rowOf(dom, 0).querySelector('.col-jump') as HTMLButtonElement).click();
-        (rowOf(dom, 1).querySelector('.col-jump') as HTMLButtonElement).click();
-        assert.strictEqual(headerOf(dom, 0).classList.contains('col-flash'), false);
-        assert.strictEqual(headerOf(dom, 1).classList.contains('col-flash'), true);
-        assert.deepStrictEqual(cleared, [1], 'the first timer must be cancelled');
-        assert.strictEqual(timers.length, 2);
-      });
+    it('prefixes a capped distinct count with ≥, in the strip and the card', () => {
+      const { dom } = loadWebview();
+      send(dom, tableOf([{ type: 'text', nullCount: 0, distinctCount: 100000, distinctIsLowerBound: true }]));
+      assert.strictEqual(text(profile(dom, 0)!.querySelector('.dist-text')), '≥ 100,000 distinct');
+      profile(dom, 0)!.click();
+      const values = Array.from(cardOf(dom)!.querySelectorAll('dd')).map((dd) => dd.textContent);
+      assert.ok(values.some((v) => v!.startsWith('≥ 100,000')), `card distinct row in ${JSON.stringify(values)}`);
     });
   });
 
@@ -1472,8 +1262,8 @@ describe('webview main.js statistics', () => {
       }
     }
 
-    it('renders column names and min/max as inert text in the strip, card and overview', () => {
-      const { dom } = loadHeaders();
+    it('renders column names and min/max as inert text in the strip and the card', () => {
+      const { dom } = loadWebview();
       send(dom, evilTable());
 
       assert.strictEqual(text(doc(dom).querySelector('#csv-table thead .col-name')), evil);
@@ -1485,12 +1275,6 @@ describe('webview main.js statistics', () => {
       assert.strictEqual(text(doc(dom).getElementById('stats-card-title')), evil);
       const values = Array.from(cardOf(dom)!.querySelectorAll('dd')).map((dd) => dd.textContent);
       assert.ok(values.includes('<script>x</script>'));
-      assertInert(dom);
-
-      modeBtn(dom, 'overview')!.click();
-      const cells = Array.from(panelOf(dom)!.querySelectorAll('tbody tr')[0].querySelectorAll('td'));
-      assert.strictEqual(text(cells[0]), evil);
-      assert.strictEqual(text(cells[4]), '<script>x</script>');
       assertInert(dom);
     });
   });

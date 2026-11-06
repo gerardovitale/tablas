@@ -277,8 +277,8 @@ function computeSqliteStats(handle: SqliteHandle, tableName: string): TableStats
 /**
  * Whole-table column statistics via SQL push-down (regardless of
  * `tablas.maxRows`): one aggregate scan per chunk of columns plus one small
- * bucket query per numeric column. Computed on demand -- when the user first
- * opens the Statistics view -- and synchronous, so it holds the extension
+ * bucket query per numeric column. Computed on request -- the webview asks
+ * right after it renders each table -- and synchronous, so it holds the extension
  * host for the duration (hence `statsLimits.sqliteMaxCells`). `undefined` =
  * no stats (no columns, or a failure such as a view with duplicate column
  * names, reported through `statsHooks`); it never throws, and every outcome

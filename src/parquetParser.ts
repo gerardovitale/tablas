@@ -223,8 +223,8 @@ async function computeParquetStats(
 }
 
 /**
- * Whole-file column statistics, computed on demand (the editor re-reads the
- * file when the user first opens the Statistics view, so this takes the raw
+ * Whole-file column statistics, computed on request (the editor re-reads the
+ * file when the webview asks after rendering the table, so this takes the raw
  * bytes and re-derives the footer/schema itself -- parsing a footer is
  * cheap). `undefined` = no stats (empty input, no columns, or a failure,
  * reported through `statsHooks`); it never throws.
