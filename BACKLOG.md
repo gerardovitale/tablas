@@ -106,6 +106,26 @@ Acceptance:
 
 `.vscodeignore` has no exclusion for root markdown files, so `CLAUDE.md` and `PUBLISHING.md` look like they get packaged (`BACKLOG.md` is excluded). Verify with `vsce ls`, then exclude anything that shouldn't ship. This belongs on the existing "outstanding before `vsce publish`" list.
 
+### P-2 · `vsce package` warns: "217 files, 186 are JavaScript, you should bundle your extension" · P2 · M
+
+Warning text: `This extension consists of 217 files, out of which 186 are JavaScript files. For performance reasons, you should bundle your extension: https://aka.ms/vscode-bundle-extension. You should also exclude unnecessary files by adding them to your .vscodeignore: https://aka.ms/vscode-vscodeignore.`
+
+Where the files come from (`vsce ls`, local darwin-arm64 build):
+- `@duckdb/node-api`: ~174 files. The `!node_modules/@duckdb/node-api/lib/**/*.js` line ships its whole `lib/` tree unbundled. This is nearly all of the warning.
+- `papaparse`: ~23 files (`tests/`, `player/`, `.github/`, ...). `papaparse` is already bundled into `dist/extension.js`, so the `!node_modules/papaparse/**` line is dead weight.
+- `media/webview.js.map` and `dist/extension.js.map` ship (`*.map` in `.vscodeignore` only matches at the root).
+- `PUBLISHING.md` ships (see P-1).
+
+Acceptance:
+- Remove the `!node_modules/papaparse/**` line from `.vscodeignore`.
+- Bundle `@duckdb/node-api`'s JS into `dist/extension.js`: drop it from `external` in `esbuild.js`, keep only `@duckdb/node-bindings` external (the native `.node` must stay a separate file), and drop the `@duckdb/node-api` negate lines. Check that `@duckdb/node-bindings`' `duckdb.js` still resolves its platform package at runtime.
+- Exclude `**/*.map` and `PUBLISHING.md`.
+- `vsce ls` shows well under 20 files and `vsce package` prints no warning.
+- `npm test` passes and a DuckDB file opens in the installed extension (`npm run install:local:quick`).
+- Update the `.vscodeignore` notes and the DuckDB section of `CLAUDE.md` ("both ... are `external`") to match.
+
+Related: the per-platform `.vsix` work (see Roadmap) touches the same `@duckdb/node-bindings-*` lines.
+
 ## Roadmap items (not started)
 
 Tracked in `README.md`, listed here so nothing lives in two places:
