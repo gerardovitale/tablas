@@ -3,7 +3,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { Workbook, type Worksheet } from 'exceljs';
 import { statsHooks, statsLimits, STATS_TOO_LARGE_REASON } from '../../src/columnStats';
-import { listXlsxSheets, openXlsxWorkbook, parseXlsx, readXlsxSheet, xlsxRowsForFilter, xlsxSheetFilter, xlsxSheetStats } from '../../src/xlsxParser';
+import { formatXlsxDate, listXlsxSheets, openXlsxWorkbook, parseXlsx, readXlsxSheet, xlsxRowsForFilter, xlsxSheetFilter, xlsxSheetStats } from '../../src/xlsxParser';
 import { filterLimits, FILTER_TOO_LARGE_REASON, FILTER_UNKNOWN_COLUMN_REASON, resolveFilters } from '../../src/filter';
 import { FILTER_CASES, idsOf } from './filterCases';
 import type { TableStats } from '../../src/tableData';
@@ -158,12 +158,12 @@ describe('parseXlsx', () => {
   });
 
   describe('dates-and-formulas.xlsx', () => {
-    it('formats a Date cell and resolves a formula cell to its cached result', async () => {
+    it('formats a Date cell as ISO text and resolves a formula cell to its cached result', async () => {
       const result = await parseXlsx(await fixtureBytes('dates-and-formulas.xlsx'));
       assert.strictEqual(result.success, true);
       if (result.success) {
         const [, when, total] = result.data.data.rows[0];
-        assert.match(when, /2023/);
+        assert.strictEqual(when, '2023-11-14');
         assert.strictEqual(total, '6');
       }
     });
@@ -243,6 +243,12 @@ describe('xlsxSheetStats', () => {
       ['text', 'date', 'integer']
     );
     assert.strictEqual(stats.columns[2].min, '6');
+  });
+
+  it('reports date min/max as the same ISO text the table shows (dates-and-formulas.xlsx)', async () => {
+    const stats = (await statsOf('dates-and-formulas.xlsx'))!;
+    assert.strictEqual(stats.columns[1].min, '2023-11-14');
+    assert.strictEqual(stats.columns[1].max, '2023-11-14');
   });
 
   it('gives zero-row stats with empty-typed columns (empty.xlsx)', async () => {
@@ -458,6 +464,24 @@ describe('xlsxSheetFilter', () => {
     assert.strictEqual(outcome.matchCount, 1);
   });
 
+  it('compares dates by day on real Date cells (dates-and-formulas.xlsx)', async () => {
+    const ws = await sheet('dates-and-formulas.xlsx');
+    for (const text of ['>=2023-11-14', '<=2023-11-14', '=2023-11-14', '>2023-11-13', '<2023-11-15']) {
+      const resolved = resolveFilters([{ column: 1, text }]);
+      assert.ok(!('errors' in resolved));
+      const outcome = xlsxSheetFilter(ws, resolved.specs, 10);
+      assert.ok(!('failedReason' in outcome), text);
+      assert.strictEqual(outcome.matchCount, 1, text);
+    }
+    for (const text of ['>2023-11-14', '<2023-11-14']) {
+      const resolved = resolveFilters([{ column: 1, text }]);
+      assert.ok(!('errors' in resolved));
+      const outcome = xlsxSheetFilter(ws, resolved.specs, 10);
+      assert.ok(!('failedReason' in outcome), text);
+      assert.strictEqual(outcome.matchCount, 0, text);
+    }
+  });
+
   it('refuses a filter on a column the sheet does not have', async () => {
     const outcome = xlsxSheetFilter(await sheet(), [{ column: 99, filter: { op: 'contains', value: 'x' } }], 10);
     assert.deepStrictEqual(outcome, { failedReason: FILTER_UNKNOWN_COLUMN_REASON });
@@ -476,5 +500,182 @@ describe('xlsxSheetFilter', () => {
   it('yields no columns for an empty sheet', () => {
     const empty = new Workbook().addWorksheet('empty');
     assert.deepStrictEqual(xlsxRowsForFilter(empty), { columnCount: 0, rows: [] });
+  });
+});
+
+describe('formatXlsxDate', () => {
+  const midnight = new Date(Date.UTC(2024, 0, 1));
+  const morning = new Date(Date.UTC(2024, 0, 1, 10, 30));
+
+  it('shows only the date for a date format, even when the value has a time', () => {
+    assert.strictEqual(formatXlsxDate(morning, 'yyyy-mm-dd'), '2024-01-01');
+    assert.strictEqual(formatXlsxDate(morning, 'm/d/yyyy'), '2024-01-01');
+    assert.strictEqual(formatXlsxDate(morning, 'mmmm d, yyyy'), '2024-01-01');
+    assert.strictEqual(formatXlsxDate(morning, 'mmm'), '2024-01-01');
+  });
+
+  it('shows date and time for a datetime format, even at midnight', () => {
+    assert.strictEqual(formatXlsxDate(morning, 'yyyy-mm-dd hh:mm:ss'), '2024-01-01 10:30:00');
+    assert.strictEqual(formatXlsxDate(midnight, 'yyyy-mm-dd hh:mm:ss'), '2024-01-01 00:00:00');
+    assert.strictEqual(formatXlsxDate(morning, 'm/d/yy h:mm'), '2024-01-01 10:30:00');
+  });
+
+  it('shows only the time for a time format, with m meaning minutes', () => {
+    assert.strictEqual(formatXlsxDate(morning, 'h:mm:ss'), '10:30:00');
+    assert.strictEqual(formatXlsxDate(morning, 'h:mm AM/PM'), '10:30:00');
+    assert.strictEqual(formatXlsxDate(morning, 'mm:ss'), '10:30:00');
+  });
+
+  it('adds milliseconds only when they are not 0', () => {
+    const withMs = new Date(Date.UTC(2024, 0, 1, 10, 30, 0, 250));
+    assert.strictEqual(formatXlsxDate(withMs, 'yyyy-mm-dd hh:mm:ss.000'), '2024-01-01 10:30:00.250');
+    assert.strictEqual(formatXlsxDate(withMs, 'h:mm:ss'), '10:30:00.250');
+    assert.strictEqual(formatXlsxDate(withMs, 'yyyy-mm-dd'), '2024-01-01');
+    assert.strictEqual(formatXlsxDate(morning, 'hh:mm:ss.000'), '10:30:00');
+  });
+
+  it('ignores letters inside quotes, [..] sections and escapes', () => {
+    assert.strictEqual(formatXlsxDate(morning, '[$-409]mmmm d, yyyy'), '2024-01-01');
+    assert.strictEqual(formatXlsxDate(morning, 'yyyy-mm-dd "h"'), '2024-01-01');
+    assert.strictEqual(formatXlsxDate(morning, 'yyyy-mm-dd \\h'), '2024-01-01');
+    assert.strictEqual(formatXlsxDate(morning, '"at" h:mm'), '10:30:00');
+  });
+
+  it('treats elapsed-time sections as time tokens, not as months', () => {
+    const afternoon = new Date(Date.UTC(1899, 11, 30, 14, 5, 0));
+    for (const fmt of ['[h]:mm', '[hh]:mm', '[h]:mm:ss', '[mm]:ss', '[s]']) {
+      assert.strictEqual(formatXlsxDate(afternoon, fmt), '14:05:00', fmt);
+    }
+    // Only the unquoted section counts; a colour/locale section is not a token.
+    assert.strictEqual(formatXlsxDate(afternoon, '"[h]" yyyy'), '1899-12-30');
+    assert.strictEqual(formatXlsxDate(afternoon, '[Red]yyyy-mm-dd'), '1899-12-30');
+  });
+
+  it('lets the value decide when there is no usable format', () => {
+    for (const fmt of [undefined, '', 'General']) {
+      assert.strictEqual(formatXlsxDate(midnight, fmt), '2024-01-01', String(fmt));
+      assert.strictEqual(formatXlsxDate(morning, fmt), '2024-01-01 10:30:00', String(fmt));
+    }
+  });
+
+  it('does not throw on an invalid Date', () => {
+    assert.strictEqual(formatXlsxDate(new Date(NaN), 'yyyy-mm-dd'), 'Invalid Date');
+  });
+});
+
+describe('XLSX merged cells with a formula master', () => {
+  // Every cell of a merged range shows the master's text; exceljs's own
+  // MergeValue.toString() would print `[object Object]` for the others.
+  async function mergedFormulaSheet(): Promise<Worksheet> {
+    const wb = new Workbook();
+    const ws = wb.addWorksheet('merged');
+    ws.addRow(['n', 'n2', 's', 's2', 't', 't2', 'e', 'e2', 'd', 'd2']);
+    ws.addRow([]);
+    const set = (address: string, formula: string, result: unknown) => {
+      ws.getCell(address).value = { formula, result } as never;
+    };
+    set('A2', '1+1', 2);
+    set('C2', '"a"&"b"', 'ab');
+    set('E2', '1=1', true);
+    set('G2', '1/0', { error: '#DIV/0!' });
+    set('I2', 'DATE(2024,1,1)', new Date(Date.UTC(2024, 0, 1)));
+    ws.getCell('I2').numFmt = 'yyyy-mm-dd';
+    for (const range of ['A2:B2', 'C2:D2', 'E2:F2', 'G2:H2', 'I2:J2']) {
+      ws.mergeCells(range);
+    }
+    const opened = await openXlsxWorkbook(new Uint8Array(await wb.xlsx.writeBuffer()));
+    assert.ok('workbook' in opened);
+    return (opened as { workbook: Workbook }).workbook.worksheets[0];
+  }
+
+  it('shows the same text in every cell of the range', async () => {
+    assert.deepStrictEqual(readXlsxSheet(await mergedFormulaSheet()).rows[0], [
+      '2', '2', 'ab', 'ab', 'true', 'true', '#DIV/0!', '#DIV/0!', '2024-01-01', '2024-01-01',
+    ]);
+  });
+
+  it('filters and profiles the same text', async () => {
+    const ws = await mergedFormulaSheet();
+    const resolved = resolveFilters([{ column: 1, text: '=2' }, { column: 7, text: '=#DIV/0!' }]);
+    assert.ok(!('errors' in resolved));
+    const outcome = xlsxSheetFilter(ws, resolved.specs, 10);
+    assert.ok(!('failedReason' in outcome));
+    assert.strictEqual(outcome.matchCount, 1);
+    const stats = xlsxSheetStats(ws)!;
+    assert.strictEqual(stats.columns[1].min, '2');
+    assert.strictEqual(stats.columns[9].min, '2024-01-01');
+  });
+});
+
+describe('XLSX date cells as ISO text', () => {
+  async function workbookWithDates(): Promise<Worksheet> {
+    const wb = new Workbook();
+    const ws = wb.addWorksheet('dates');
+    ws.addRow(['date', 'datetime', 'time', 'formula', 'merged', 'merged-slave']);
+    const row = ws.addRow([
+      new Date(Date.UTC(2024, 0, 1)),
+      new Date(Date.UTC(2024, 0, 1, 10, 30)),
+      new Date(Date.UTC(1899, 11, 30, 14, 5, 9)),
+      null,
+      new Date(Date.UTC(2020, 1, 29)),
+    ]);
+    row.getCell(1).numFmt = 'yyyy-mm-dd';
+    row.getCell(2).numFmt = 'yyyy-mm-dd hh:mm:ss';
+    row.getCell(3).numFmt = 'h:mm:ss';
+    row.getCell(4).value = { formula: 'B2', result: new Date(Date.UTC(2024, 0, 1, 10, 30)) };
+    row.getCell(4).numFmt = 'yyyy-mm-dd hh:mm';
+    row.getCell(5).numFmt = 'yyyy-mm-dd';
+    ws.mergeCells('E2:F2');
+    const opened = await openXlsxWorkbook(new Uint8Array(await wb.xlsx.writeBuffer()));
+    assert.ok('workbook' in opened);
+    return (opened as { workbook: Workbook }).workbook.worksheets[0];
+  }
+
+  const EXPECTED = ['2024-01-01', '2024-01-01 10:30:00', '14:05:09', '2024-01-01 10:30:00', '2020-02-29', '2020-02-29'];
+
+  it('uses the number format that survives a save/load round trip', async () => {
+    assert.deepStrictEqual(readXlsxSheet(await workbookWithDates()).rows[0], EXPECTED);
+  });
+
+  it('gives the same text in any timezone', async () => {
+    const ws = await workbookWithDates();
+    const original = process.env.TZ;
+    try {
+      for (const tz of ['America/Los_Angeles', 'Asia/Tokyo', 'UTC']) {
+        process.env.TZ = tz;
+        assert.deepStrictEqual(readXlsxSheet(ws).rows[0], EXPECTED, tz);
+      }
+    } finally {
+      if (original === undefined) {
+        delete process.env.TZ;
+      } else {
+        process.env.TZ = original;
+      }
+    }
+  });
+
+  it('shows an elapsed-time duration as a time (round trip)', async () => {
+    const wb = new Workbook();
+    const ws = wb.addWorksheet('durations');
+    ws.addRow(['hm', 'ms']);
+    const row = ws.addRow([new Date(Date.UTC(1899, 11, 30, 14, 5)), new Date(Date.UTC(1899, 11, 30, 0, 7, 9))]);
+    row.getCell(1).numFmt = '[h]:mm';
+    row.getCell(2).numFmt = '[mm]:ss';
+    const opened = await openXlsxWorkbook(new Uint8Array(await wb.xlsx.writeBuffer()));
+    assert.ok('workbook' in opened);
+    const loaded = (opened as { workbook: Workbook }).workbook.worksheets[0];
+    assert.deepStrictEqual(readXlsxSheet(loaded).rows[0], ['14:05:00', '00:07:09']);
+  });
+
+  it('filters and profiles the same text the table shows', async () => {
+    const ws = await workbookWithDates();
+    const resolved = resolveFilters([{ column: 1, text: '>=2024-01-01' }, { column: 2, text: '=14:05:09' }]);
+    assert.ok(!('errors' in resolved));
+    const outcome = xlsxSheetFilter(ws, resolved.specs, 10);
+    assert.ok(!('failedReason' in outcome));
+    assert.strictEqual(outcome.matchCount, 1);
+    const stats = xlsxSheetStats(ws)!;
+    assert.strictEqual(stats.columns[1].min, '2024-01-01 10:30:00');
+    assert.strictEqual(stats.columns[3].max, '2024-01-01 10:30:00');
   });
 });

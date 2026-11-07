@@ -87,17 +87,25 @@ async function main() {
   // every format filters it identically).
   await write('filter.xlsx', async (workbook) => {
     const sheet = workbook.addWorksheet('items');
-    // `d`/`ts` hold ISO *strings*, not real Date cells: exceljs's cell.text
-    // renders a Date cell as Date.toString() (locale/timezone dependent), which
-    // is backlog item F-2. Switch these to Date values when F-2 lands.
+    // `d`/`ts` are real Date cells. Their number formats decide the text the
+    // table (and so a filter) sees: `yyyy-mm-dd` -> `2024-01-01`,
+    // `yyyy-mm-dd hh:mm:ss` -> `2024-01-01 10:30:00` (see formatXlsxDate).
+    const utc = (iso) => new Date(`${iso}Z`);
     sheet.addRow(['id', 'name', 'city', 'qty', 'price', 'day', 'd', 'ts']);
-    sheet.addRow([1, 'Alice', 'Rome', 10, 9.5, '2024-01-15', '2024-01-01', '2024-01-01 10:30:00']);
-    sheet.addRow([2, 'bob', 'Paris', 9, 120.25, '2023-12-31', '2023-12-31', '2023-12-31 23:59:59']);
-    sheet.addRow([3, '\u00c9mile', 'Oslo', 100, 7.75, '2024-03-01', '2024-01-02', '2024-01-02 00:00:00']);
-    sheet.addRow([4, 'CAROL', 'rome', null, 1000.5, '2024-03-01', '2024-01-01', '2024-01-01 00:00:00']);
-    sheet.addRow([5, 'Dave', null, 5, null, null, null, null]);
-    sheet.addRow([6, 'Zo\u00eb', 'Lima', 20, 45.5, '2022-07-04', '2022-07-04', '2022-07-04 12:00:00']);
-    sheet.addRow([7, 'Smith, Jo', 'New York', 1, 0.5, '2024-12-31', '2024-12-31', '2024-12-31 23:59:59']);
+    const rows = [
+      [1, 'Alice', 'Rome', 10, 9.5, '2024-01-15', utc('2024-01-01T00:00:00'), utc('2024-01-01T10:30:00')],
+      [2, 'bob', 'Paris', 9, 120.25, '2023-12-31', utc('2023-12-31T00:00:00'), utc('2023-12-31T23:59:59')],
+      [3, '\u00c9mile', 'Oslo', 100, 7.75, '2024-03-01', utc('2024-01-02T00:00:00'), utc('2024-01-02T00:00:00')],
+      [4, 'CAROL', 'rome', null, 1000.5, '2024-03-01', utc('2024-01-01T00:00:00'), utc('2024-01-01T00:00:00')],
+      [5, 'Dave', null, 5, null, null, null, null],
+      [6, 'Zo\u00eb', 'Lima', 20, 45.5, '2022-07-04', utc('2022-07-04T00:00:00'), utc('2022-07-04T12:00:00')],
+      [7, 'Smith, Jo', 'New York', 1, 0.5, '2024-12-31', utc('2024-12-31T00:00:00'), utc('2024-12-31T23:59:59')],
+    ];
+    for (const values of rows) {
+      const row = sheet.addRow(values);
+      row.getCell(7).numFmt = 'yyyy-mm-dd';
+      row.getCell(8).numFmt = 'yyyy-mm-dd hh:mm:ss';
+    }
   });
 
   // corrupt.xlsx -- not a ZIP/xlsx file at all, to exercise the magic-byte

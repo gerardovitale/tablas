@@ -19,7 +19,7 @@ const SHARED_COLUMNS = 6;
 const DISPLAYED_DATES: Record<string, [d: string, ts: string]> = {
   csv: ['2024-01-01', '2024-01-01 10:30:00'],
   parquet: ['2024-01-01T00:00:00.000Z', '2024-01-01T10:30:00.000Z'],
-  xlsx: ['2024-01-01', '2024-01-01 10:30:00'], // ISO strings until backlog F-2
+  xlsx: ['2024-01-01', '2024-01-01 10:30:00'], // real Date cells, shown as ISO text by formatXlsxDate
   sqlite: ['2024-01-01', '2024-01-01 10:30:00'],
   duckdb: ['2024-01-01', '2024-01-01 10:30:00'],
 };

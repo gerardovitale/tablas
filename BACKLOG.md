@@ -9,21 +9,6 @@ Open follow-ups for Tablas that are not done yet. When an item ships, delete it 
 
 These come from the code review of the column-filtering work. The feature itself is shipped (see `CLAUDE.md`, "Column filtering"); everything below is a gap in it.
 
-### F-2 · XLSX Date cells filter on `Date.toString()` text · P1 · M · needs a decision
-
-A real Date cell displays (and so filters) as e.g. `Mon Jan 01 2024 ...`, which depends on locale and timezone. A date compare such as `>=2024-01-01` matches nothing on these cells (only cells that start with an ISO date take part), and a text filter matches the locale text. This comes from exceljs's `cell.text`, already noted in `CLAUDE.md`. `filter.xlsx` holds its `d`/`ts` columns as ISO strings today; switch them to real Date cells when this lands, and update `DISPLAYED_DATES` in `test/unit/filterParity.test.ts`.
-
-Options:
-1. Display and filter dates as ISO (`YYYY-MM-DD`, with the time when present). This changes what the table shows, in `stringifyXlsxCell` in `src/xlsxParser.ts`.
-2. Filter on ISO text but keep the current display. This breaks the rule that a filter matches what the table shows.
-3. Leave it and document that date filters don't work on XLSX Date cells.
-
-Recommendation: option 1. It fixes the table display too, not only filtering. Needs an owner decision before work starts.
-
-### F-3 · Soften the date wording in the README · P1 · S
-
-The README example `<=2024-01-01` holds in every format except XLSX workbooks with real Date cells (see F-2), where it matches nothing. Either land F-2 first, or reword now. The CHANGELOG line already states the day-compare rule.
-
 ### F-4 · Parquet filtering decodes the whole file in one call · P2 · M
 
 `parquetRowsForFilter` goes through `parseParquet`, which holds all row objects plus the full `string[][]` at once, up to the 20M-cell cap. It also parses the footer twice. `parquetStats` avoids this by decoding one row group at a time and yielding between groups.

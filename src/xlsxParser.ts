@@ -42,15 +42,73 @@ export function emptyParsedTable(): ParsedTable {
 }
 
 /**
+ * Formats a Date cell as ISO text. exceljs builds these `Date`s so that the
+ * **UTC** fields hold Excel's wall-clock value (`utils.excelToDate`), so
+ * reading the UTC fields gives the same text in every locale and timezone --
+ * unlike `cell.text`, which is `Date.toString()`.
+ *
+ * The cell's number format decides which parts show, like a column type does
+ * in SQLite/DuckDB: date tokens only -> `YYYY-MM-DD`; time tokens only ->
+ * `HH:MM:SS`; both -> `YYYY-MM-DD HH:MM:SS` (a space, like CSV/SQLite/DuckDB).
+ * With no usable format the value decides: a midnight value is a date, any
+ * other value a datetime. `.sss` is added only when the milliseconds are not
+ * 0. Elapsed-time formats (`[h]:mm:ss`) wrap at 24 h -- a known limitation.
+ * Never throws; an invalid Date yields `Invalid Date`.
+ */
+export function formatXlsxDate(date: Date, numFmt?: string): string {
+  if (Number.isNaN(date.getTime())) {
+    return String(date);
+  }
+  const [day, time] = date.toISOString().split('T');
+  const clock = date.getUTCMilliseconds() === 0 ? time.slice(0, 8) : time.slice(0, 12);
+  // Strip quoted literals and \x escapes, then [..] sections, as exceljs's own
+  // isDateFmt does, so `yyyy-mm-dd "h"` or `[$-409]` don't count as tokens.
+  // Elapsed-time sections (`[h]`, `[mm]`, `[s]`) are the exception: they are
+  // time tokens, and stripping them would leave `[h]:mm` as a bare `:mm`,
+  // which reads as months.
+  const unquoted = (numFmt ?? '').replace(/"[^"]*"|\\./g, '');
+  const hasElapsed = /\[(?:h+|m+|s+)\]/i.test(unquoted);
+  const tokens = unquoted.replace(/\[[^\]]*\]/g, '');
+  const hasTime = hasElapsed || /[hs]/i.test(tokens);
+  // `m` alone is months; next to `h` or `s` it means minutes.
+  const hasDate = /[ydb]/i.test(tokens) || (!hasTime && /m/i.test(tokens));
+  if (hasDate && hasTime) {
+    return `${day} ${clock}`;
+  }
+  if (hasTime) {
+    return clock;
+  }
+  if (hasDate) {
+    return day;
+  }
+  const atMidnight = date.getTime() % 86_400_000 === 0;
+  return atMidnight ? day : `${day} ${clock}`;
+}
+
+/**
  * Stringify one exceljs cell into the string-only shape the webview renders.
- * Delegates to exceljs's own `cell.text`, which already formats dates per
- * the cell's number format, resolves formulas to their cached result,
- * flattens rich text, and renders error cells (#DIV/0! etc.) and hyperlinks
- * (link text) -- no manual type-switching needed, unlike parquetParser.ts's
- * stringifyCell.
+ * Date values (including formula results and merged cells) go through
+ * `formatXlsxDate`. Everything else delegates to exceljs's own `cell.text`,
+ * which resolves formulas to their cached result, flattens rich text, and
+ * renders error cells (#DIV/0! etc.) and hyperlinks (link text) -- no manual
+ * type-switching needed, unlike parquetParser.ts's stringifyCell. Note
+ * `cell.text` ignores the number format for numbers (`0%` shows `0.5`).
+ *
+ * Reads `cell.master.text` (the cell itself when unmerged): exceljs's
+ * `MergeValue.toString()` would print a formula master as `[object Object]`
+ * in every other cell of the merged range. Formula error results are read
+ * from the unwrapped value for the same reason (`FormulaValue.toString()`
+ * prints them as `[object Object]` too).
  */
 export function stringifyXlsxCell(cell: Cell): string {
-  return cell.text ?? '';
+  const value = unwrapCellValue(cell);
+  if (value instanceof Date) {
+    return formatXlsxDate(value, cell.master.numFmt);
+  }
+  if (value !== null && typeof value === 'object' && 'error' in value) {
+    return value.error;
+  }
+  return cell.master.text ?? '';
 }
 
 /**
@@ -79,8 +137,9 @@ function addXlsxCellToStats(acc: ColumnStatsAccumulator, cell: Cell | undefined)
   } else if (typeof value === 'boolean') {
     acc.addBoolean(value);
   } else if (value instanceof Date) {
-    // Format lazily so only new min/max candidates pay for cell.text.
-    acc.addDate(value.getTime(), () => cell.text);
+    // Format lazily so only new min/max candidates pay for formatting. Same
+    // text the table shows, so the card's min/max match the cells.
+    acc.addDate(value.getTime(), () => formatXlsxDate(value, cell.master.numFmt));
   } else if (typeof value === 'string') {
     if (value.trim() === '') {
       acc.addNull();
@@ -99,7 +158,7 @@ function addXlsxCellToStats(acc: ColumnStatsAccumulator, cell: Cell | undefined)
   } else if ('hyperlink' in value) {
     acc.addText(String(value.text));
   } else {
-    acc.addText(cell.text);
+    acc.addText(cell.master.text);
   }
 }
 
