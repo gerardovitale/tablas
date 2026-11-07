@@ -378,7 +378,7 @@ describe('csvFilter', () => {
   it('exposes the same rows the table shows, header excluded', () => {
     const rows = csvRowsForFilter(raw);
     assert.ok(!('failedReason' in rows));
-    assert.strictEqual(rows.columnCount, 6);
+    assert.strictEqual(rows.columnCount, 8);
     assert.strictEqual(rows.rows.length, 7);
     const parsed = parseCsv(raw);
     assert.ok(parsed.success);

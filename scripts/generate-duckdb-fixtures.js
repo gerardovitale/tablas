@@ -115,16 +115,18 @@ async function main() {
   // every format filters it identically). Also a DOUBLE column holding whole
   // numbers, whose DuckDB text form ("10.0") differs from the table cell text
   // ("10") -- the one documented difference between the SQL and JS engines.
+  // `d`/`ts` are real DATE/TIMESTAMP columns (their display differs per
+  // format; they pin the day-precision date compare).
   await write('filter.duckdb', [
-    'CREATE TABLE items (id INTEGER, name VARCHAR, city VARCHAR, qty INTEGER, price DOUBLE, day VARCHAR)',
+    'CREATE TABLE items (id INTEGER, name VARCHAR, city VARCHAR, qty INTEGER, price DOUBLE, day VARCHAR, d DATE, ts TIMESTAMP)',
     `INSERT INTO items VALUES
-       (1, 'Alice', 'Rome', 10, 9.5, '2024-01-15'),
-       (2, 'bob', 'Paris', 9, 120.25, '2023-12-31'),
-       (3, '\u00c9mile', 'Oslo', 100, 7.75, '2024-03-01'),
-       (4, 'CAROL', 'rome', NULL, 1000.5, '2024-03-01'),
-       (5, 'Dave', NULL, 5, NULL, NULL),
-       (6, 'Zo\u00eb', 'Lima', 20, 45.5, '2022-07-04'),
-       (7, 'Smith, Jo', 'New York', 1, 0.5, '2024-12-31')`,
+       (1, 'Alice', 'Rome', 10, 9.5, '2024-01-15', DATE '2024-01-01', TIMESTAMP '2024-01-01 10:30:00'),
+       (2, 'bob', 'Paris', 9, 120.25, '2023-12-31', DATE '2023-12-31', TIMESTAMP '2023-12-31 23:59:59'),
+       (3, '\u00c9mile', 'Oslo', 100, 7.75, '2024-03-01', DATE '2024-01-02', TIMESTAMP '2024-01-02 00:00:00'),
+       (4, 'CAROL', 'rome', NULL, 1000.5, '2024-03-01', DATE '2024-01-01', TIMESTAMP '2024-01-01 00:00:00'),
+       (5, 'Dave', NULL, 5, NULL, NULL, NULL, NULL),
+       (6, 'Zo\u00eb', 'Lima', 20, 45.5, '2022-07-04', DATE '2022-07-04', TIMESTAMP '2022-07-04 12:00:00'),
+       (7, 'Smith, Jo', 'New York', 1, 0.5, '2024-12-31', DATE '2024-12-31', TIMESTAMP '2024-12-31 23:59:59')`,
     'CREATE TABLE whole_numbers (n DOUBLE)',
     'INSERT INTO whole_numbers VALUES (10), (20), (NULL)',
   ]);

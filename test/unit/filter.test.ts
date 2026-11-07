@@ -169,7 +169,7 @@ describe('compileCellPredicate', () => {
   });
 
   describe('string comparison (operand is not a number)', () => {
-    it('orders ISO dates by time', () => {
+    it('orders ISO dates by time (a day operand takes the date branch, covered in more detail below)', () => {
       assert.strictEqual(matches('>=2024-01-01', '2024-03-01'), true);
       assert.strictEqual(matches('>=2024-01-01', '2023-12-31'), false);
       assert.strictEqual(matches('<2024-01-01', '2023-12-31'), true);
@@ -185,6 +185,43 @@ describe('compileCellPredicate', () => {
     it('never matches empty cells', () => {
       assert.strictEqual(matches('<z', ''), false);
       assert.strictEqual(matches('<z', '   '), false);
+    });
+  });
+
+  describe('date operand (YYYY-MM-DD)', () => {
+    const TIMESTAMP_CELLS = ['2024-01-01T00:00:00.000Z', '2024-01-01T10:30:00Z', '2024-01-01 10:30:00', '2024-01-01'];
+
+    it('compares a timestamp cell at day precision: the boundary day is <= and >=, never > or <', () => {
+      for (const cell of TIMESTAMP_CELLS) {
+        assert.strictEqual(matches('<=2024-01-01', cell), true, `<= ${cell}`);
+        assert.strictEqual(matches('>=2024-01-01', cell), true, `>= ${cell}`);
+        assert.strictEqual(matches('>2024-01-01', cell), false, `> ${cell}`);
+        assert.strictEqual(matches('<2024-01-01', cell), false, `< ${cell}`);
+      }
+    });
+
+    it('orders timestamps from different days', () => {
+      assert.strictEqual(matches('>2024-01-01', '2024-01-02 00:00:00'), true);
+      assert.strictEqual(matches('>2024-01-01', '2024-01-02T00:00:00.000Z'), true);
+      assert.strictEqual(matches('<2024-01-01', '2023-12-31 23:59:59'), true);
+      assert.strictEqual(matches('<=2024-01-01', '2024-01-02 00:00:00'), false);
+    });
+
+    it('never matches a cell that does not start with an ISO date', () => {
+      for (const cell of ['', '   ', 'N/A', 'Mon Jan 01 2024 00:00:00 GMT+0000', ' 2024-01-01', '2024-1-1', '2024-01-015', '2024-01-01x', '20240101']) {
+        for (const op of ['<', '<=', '>', '>=']) {
+          assert.strictEqual(matches(`${op}2024-06-01`, cell), false, `${op} ${JSON.stringify(cell)}`);
+        }
+      }
+    });
+
+    it('treats the operand as a day only when it is exactly YYYY-MM-DD', () => {
+      // Month and datetime operands keep the plain code-unit compare (backlog F-13).
+      assert.strictEqual(matches('>=2024-03', '2024-03-15'), true);
+      assert.strictEqual(matches('<2024-03', '2024-03-15'), false);
+      assert.strictEqual(matches('<=2024-01-01 10:30', '2024-01-01'), true);
+      assert.strictEqual(matches('>2024-1-1', '2024-1-2'), true);
+      assert.strictEqual(matches('>2024-1-1', '2024-1-1'), false);
     });
   });
 });

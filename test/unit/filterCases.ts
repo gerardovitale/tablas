@@ -4,8 +4,12 @@ import type { FilterRequest } from '../../src/filterMessage';
  * The filter-parity table: one list of filters and the `id`s of the rows each
  * must keep from the shared `filter.*` fixtures (same 7 logical rows in CSV,
  * Parquet, XLSX, SQLite and DuckDB). Columns: 0 id, 1 name, 2 city, 3 qty,
- * 4 price, 5 day. Every format's tests assert these, which is what keeps the
- * JS engine and the SQL push-downs saying the same thing.
+ * 4 price, 5 day (ISO date held as text in every format), 6 d (DATE), 7 ts
+ * (TIMESTAMP). Columns 6-7 are typed where the format has types, so their
+ * displayed text differs per format ('2024-01-01T00:00:00.000Z' in Parquet,
+ * '2024-01-01 10:30:00' in DuckDB, ...); the filters must still agree. Every
+ * format's tests assert these, which is what keeps the JS engine and the SQL
+ * push-downs saying the same thing.
  */
 export interface FilterCase {
   name: string;
@@ -35,6 +39,15 @@ export const FILTER_CASES: FilterCase[] = [
   { name: 'float greater-than', filters: [f(4, '>100')], ids: [2, 4] },
   { name: 'ISO date greater-or-equal', filters: [f(5, '>=2024-01-01')], ids: [1, 3, 4, 7] },
   { name: 'ISO date less-than', filters: [f(5, '<2024-01-01')], ids: [2, 6] },
+  { name: 'DATE column: <= keeps the boundary day', filters: [f(6, '<=2024-01-01')], ids: [1, 2, 4, 6] },
+  { name: 'DATE column: > drops the boundary day', filters: [f(6, '>2024-01-01')], ids: [3, 7] },
+  { name: 'DATE column: >= keeps the boundary day', filters: [f(6, '>=2024-01-01')], ids: [1, 3, 4, 7] },
+  { name: 'DATE column: < drops the boundary day', filters: [f(6, '<2024-01-01')], ids: [2, 6] },
+  { name: 'TIMESTAMP column: <= keeps the whole boundary day', filters: [f(7, '<=2024-01-01')], ids: [1, 2, 4, 6] },
+  { name: 'TIMESTAMP column: > drops the whole boundary day', filters: [f(7, '>2024-01-01')], ids: [3, 7] },
+  { name: 'TIMESTAMP column: >= next day', filters: [f(7, '>=2024-01-02')], ids: [3, 7] },
+  { name: 'date compare skips empty date cells', filters: [f(6, '<2030-01-01')], ids: [1, 2, 3, 4, 6, 7] },
+  { name: 'date operand on a text column matches nothing', filters: [f(1, '>=2024-01-01')], ids: [] },
   { name: 'numeric compare on a text column matches nothing', filters: [f(1, '>1')], ids: [] },
   { name: 'ANDs filters across columns', filters: [f(2, 'rome'), f(3, '>9')], ids: [1] },
   { name: 'ANDs three filters', filters: [f(5, '>=2024-01-01'), f(3, '>=10'), f(4, '<100')], ids: [1, 3] },

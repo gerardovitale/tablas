@@ -104,19 +104,20 @@ def main():
     # filter.db -- the shared "filter parity" table (same logical rows as
     # filter.csv/.parquet/.xlsx/.duckdb; test/unit/filterParity.test.ts asserts
     # every format filters it identically), plus a view with duplicate column
-    # names (the filter query must not trip on them).
+    # names (the filter query must not trip on them). `d`/`ts` are declared
+    # DATE/TIMESTAMP but hold ISO text, which is how SQLite stores dates.
     def build_filter(conn):
-        conn.execute('CREATE TABLE items (id INTEGER, name TEXT, city TEXT, qty INTEGER, price REAL, day TEXT)')
+        conn.execute('CREATE TABLE items (id INTEGER, name TEXT, city TEXT, qty INTEGER, price REAL, day TEXT, d DATE, ts TIMESTAMP)')
         conn.executemany(
-            'INSERT INTO items VALUES (?, ?, ?, ?, ?, ?)',
+            'INSERT INTO items VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
             [
-                (1, 'Alice', 'Rome', 10, 9.5, '2024-01-15'),
-                (2, 'bob', 'Paris', 9, 120.25, '2023-12-31'),
-                (3, '\u00c9mile', 'Oslo', 100, 7.75, '2024-03-01'),
-                (4, 'CAROL', 'rome', None, 1000.5, '2024-03-01'),
-                (5, 'Dave', None, 5, None, None),
-                (6, 'Zo\u00eb', 'Lima', 20, 45.5, '2022-07-04'),
-                (7, 'Smith, Jo', 'New York', 1, 0.5, '2024-12-31'),
+                (1, 'Alice', 'Rome', 10, 9.5, '2024-01-15', '2024-01-01', '2024-01-01 10:30:00'),
+                (2, 'bob', 'Paris', 9, 120.25, '2023-12-31', '2023-12-31', '2023-12-31 23:59:59'),
+                (3, '\u00c9mile', 'Oslo', 100, 7.75, '2024-03-01', '2024-01-02', '2024-01-02 00:00:00'),
+                (4, 'CAROL', 'rome', None, 1000.5, '2024-03-01', '2024-01-01', '2024-01-01 00:00:00'),
+                (5, 'Dave', None, 5, None, None, None, None),
+                (6, 'Zo\u00eb', 'Lima', 20, 45.5, '2022-07-04', '2022-07-04', '2022-07-04 12:00:00'),
+                (7, 'Smith, Jo', 'New York', 1, 0.5, '2024-12-31', '2024-12-31', '2024-12-31 23:59:59'),
             ],
         )
         conn.execute('CREATE VIEW dup_names AS SELECT id AS x, name AS x FROM items')

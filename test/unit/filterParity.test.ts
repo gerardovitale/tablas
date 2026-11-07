@@ -12,14 +12,35 @@ import { FILTER_CASES } from './filterCases';
 const fixturesDir = path.join(process.cwd(), 'test', 'fixtures');
 const MAX_ROWS = 100;
 
+/** Columns 0-5 (id..day) show identical text in every format; 6-7 (d, ts) are typed and display per format. */
+const SHARED_COLUMNS = 6;
+
+/** Row id=1's `d` and `ts` as each format displays them. Pins that the fixtures hold typed values. */
+const DISPLAYED_DATES: Record<string, [d: string, ts: string]> = {
+  csv: ['2024-01-01', '2024-01-01 10:30:00'],
+  parquet: ['2024-01-01T00:00:00.000Z', '2024-01-01T10:30:00.000Z'],
+  xlsx: ['2024-01-01', '2024-01-01 10:30:00'], // ISO strings until backlog F-2
+  sqlite: ['2024-01-01', '2024-01-01 10:30:00'],
+  duckdb: ['2024-01-01', '2024-01-01 10:30:00'],
+};
+
+/** An outcome reduced to what every format must agree on. */
+function comparable(outcome: FilterOutcome) {
+  assert.ok(!('failedReason' in outcome), 'failedReason' in outcome ? outcome.failedReason : '');
+  return { rows: outcome.rows.map((row) => row.slice(0, SHARED_COLUMNS)), matchCount: outcome.matchCount };
+}
+
 /**
  * The same 7 logical rows ship as filter.csv / .parquet / .xlsx / .db /
- * .duckdb. A filter must keep exactly the same rows -- same cell text, same
- * order, same match count -- in every format. The JS engine (CSV, Parquet,
- * XLSX), a JS callback inside SQLite, and native SQL in DuckDB are three
- * different implementations of one meaning, and this is what keeps them
- * honest. (Where the DuckDB SQL form legitimately differs from the table's
- * cell text, that is documented on `filterTextExpr` and has its own test.)
+ * .duckdb. A filter must keep exactly the same rows -- same order, same match
+ * count, same cell text in the shared columns -- in every format. The `d`/`ts`
+ * columns are real DATE/TIMESTAMP where the format has them, so their text
+ * legitimately differs (see `DISPLAYED_DATES`); the filters on them must still
+ * agree. The JS engine (CSV, Parquet, XLSX), a JS callback inside SQLite, and
+ * native SQL in DuckDB are three different implementations of one meaning, and
+ * this is what keeps them honest. (Where the DuckDB SQL form legitimately
+ * differs from the table's cell text, that is documented on `filterTextExpr`
+ * and has its own test.)
  */
 describe('filter parity across formats', () => {
   let csv: string;
@@ -60,13 +81,21 @@ describe('filter parity across formats', () => {
       const resolved = resolveFilters(c.filters);
       assert.ok(!('errors' in resolved));
       const outcomes = await runAll(resolved.specs);
-      const reference = outcomes.csv;
-      assert.ok(!('failedReason' in reference));
+      const reference = comparable(outcomes.csv);
       for (const [format, outcome] of Object.entries(outcomes)) {
-        assert.deepStrictEqual(outcome, reference, `${format} disagrees with csv`);
+        assert.deepStrictEqual(comparable(outcome), reference, `${format} disagrees with csv`);
       }
     });
   }
+
+  it('holds real DATE/TIMESTAMP values, which each format displays in its own way', async () => {
+    const resolved = resolveFilters([{ column: 0, text: '=1' }]);
+    assert.ok(!('errors' in resolved));
+    for (const [format, outcome] of Object.entries(await runAll(resolved.specs))) {
+      assert.ok(!('failedReason' in outcome));
+      assert.deepStrictEqual(outcome.rows[0].slice(SHARED_COLUMNS), DISPLAYED_DATES[format], format);
+    }
+  });
 
   it('agrees when the row cap truncates the result', async () => {
     const resolved = resolveFilters([{ column: 3, text: '>=1' }]);
@@ -81,7 +110,7 @@ describe('filter parity across formats', () => {
       assert.ok(!('failedReason' in outcome));
       assert.strictEqual(outcome.rows.length, 3);
       assert.strictEqual(outcome.matchCount, 6);
-      assert.deepStrictEqual(outcome, outcomes[0]);
+      assert.deepStrictEqual(comparable(outcome), comparable(outcomes[0]));
     }
   });
 });

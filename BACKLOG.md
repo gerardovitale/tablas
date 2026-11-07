@@ -9,22 +9,9 @@ Open follow-ups for Tablas that are not done yet. When an item ships, delete it 
 
 These come from the code review of the column-filtering work. The feature itself is shipped (see `CLAUDE.md`, "Column filtering"); everything below is a gap in it.
 
-### F-1 · Date comparisons are wrong against timestamp-like text · P1 · M
-
-`>`, `>=`, `<`, `<=` fall back to a plain string compare when the operand is not a number. That works for text like `2024-03-01`, but not when the cell is a longer ISO timestamp:
-
-- Parquet DATE displays as `2024-01-01T00:00:00.000Z`. So `<=2024-01-01` excludes that day and `>2024-01-01` includes it.
-- DuckDB DATE displays as `2024-01-01`, so the same filter gives a different answer in each format.
-
-Proposed fix: when the operand is a date-only `YYYY-MM-DD` and the cell text starts with an ISO date, compare the cell's first 10 characters. Mirror it in `filterPredicateSql` (`src/duckdbParser.ts`), which is a hand-written copy of `compileCellPredicate` (`src/filter.ts`).
-
-Acceptance:
-- `<=2024-01-01` keeps rows on that day, and `>2024-01-01` drops them, in all five formats.
-- The parity fixtures (`test/fixtures/filter.*`) gain real DATE/TIMESTAMP columns. Today they store dates as plain strings, which is why this was missed.
-
 ### F-2 · XLSX Date cells filter on `Date.toString()` text · P1 · M · needs a decision
 
-A real Date cell displays (and so filters) as e.g. `Mon Jan 01 2024 ...`, which depends on locale and timezone. `>=2024-01-01` then matches every row. This comes from exceljs's `cell.text`, already noted in `CLAUDE.md`.
+A real Date cell displays (and so filters) as e.g. `Mon Jan 01 2024 ...`, which depends on locale and timezone. A date compare such as `>=2024-01-01` matches nothing on these cells (only cells that start with an ISO date take part), and a text filter matches the locale text. This comes from exceljs's `cell.text`, already noted in `CLAUDE.md`. `filter.xlsx` holds its `d`/`ts` columns as ISO strings today; switch them to real Date cells when this lands, and update `DISPLAYED_DATES` in `test/unit/filterParity.test.ts`.
 
 Options:
 1. Display and filter dates as ISO (`YYYY-MM-DD`, with the time when present). This changes what the table shows, in `stringifyXlsxCell` in `src/xlsxParser.ts`.
@@ -33,9 +20,9 @@ Options:
 
 Recommendation: option 1. It fixes the table display too, not only filtering. Needs an owner decision before work starts.
 
-### F-3 · Soften the date wording in README and CHANGELOG · P1 · S
+### F-3 · Soften the date wording in the README · P1 · S
 
-The README example `<=2024-01-01` and the CHANGELOG line "dates compared as dates" overpromise until F-1 and F-2 land. Either land them first, or reword now.
+The README example `<=2024-01-01` holds in every format except XLSX workbooks with real Date cells (see F-2), where it matches nothing. Either land F-2 first, or reword now. The CHANGELOG line already states the day-compare rule.
 
 ### F-4 · Parquet filtering decodes the whole file in one call · P2 · M
 
@@ -98,6 +85,20 @@ Not done yet. The filter was checked with unit and integration tests and in a sc
 - Alt+click on an empty cell gives the "is empty" filter.
 - Esc, the `×` in the gutter, and the statistics card opening below the filter row.
 - A high-contrast theme.
+
+### F-13 · Month and datetime operands compare as plain strings · P3 · S
+
+Only an exact `YYYY-MM-DD` operand gets the day-precision compare. Any other operand that is not a number (`>=2024-03`, `>=2024-01-15 10:30`) still compares the whole cell text by code unit. So a time operand sees the `T` of Parquet's `2024-01-15T10:30:00.000Z` and DuckDB's space as different separators, and the `.000Z` suffix sorts after a bare time.
+
+Related gaps found in the F-1 code review, decide together with this one:
+- `=` and `!=` on a DATE/TIMESTAMP column still match the displayed text exactly, so `=2024-01-01` finds 2 rows in CSV and DuckDB but 0 in Parquet (`2024-01-01T00:00:00.000Z`), and finds nothing on a TIMESTAMP column. This follows the "a filter matches what the table shows" rule, but no `FILTER_CASES` entry covers it, and `<=d AND >=d` disagrees with `=d`.
+- The day rule reads the displayed wall-clock text, so `2024-01-01T23:30:00-05:00` compares as 2024-01-01, DuckDB TIMESTAMPTZ follows the session timezone, and Parquet uses UTC.
+- A padded cell such as ` 2024-01-15` never takes part in a date compare, while number compares trim. The prefix test is untrimmed on purpose, since SQL `trim()` strips only spaces; left-trimming spaces in both engines would fix it.
+- `filter.ts` now has its own ISO-day regexes next to the stricter `DATE_RE` in `columnStats.ts`. Consider sharing one grammar.
+
+Acceptance:
+- Truncate the cell to the operand's precision (month, day, minute, second), treating `T` and a space as the same separator, in `compileCellPredicate` and in `filterPredicateSql`.
+- Add cases to `FILTER_CASES` (including `=`/`!=` on columns 6-7) and to the DuckDB differential test.
 
 ## Packaging and marketplace
 

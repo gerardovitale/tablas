@@ -12,8 +12,13 @@ import type { FilterError, FilterMessage, FilterPayload, FilterRequest } from '.
  *   =abc     equals exactly (case-sensitive)     !=abc    does not equal
  *   =        cell is empty                       !=       cell is not empty
  *   >x >=x <x <=x   numeric compare when `x` is a number (cells that are not
- *            numbers never match), else string compare by code unit (which
- *            orders ISO dates by time). Empty cells never match.
+ *            numbers never match). When `x` is a day (exactly `YYYY-MM-DD`),
+ *            a date compare at day precision: only cells that start with an
+ *            ISO date (`2024-01-01`, `2024-01-01 10:30:00`,
+ *            `2024-01-01T00:00:00.000Z`) take part, compared by their first 10
+ *            characters -- so `<=2024-01-01` keeps every time on that day --
+ *            and any other cell never matches. Any other `x` is a string
+ *            compare by code unit. Empty cells never match.
  *   \...     a leading backslash makes the rest a literal "contains"
  *
  * There is deliberately no regex operator: user input never reaches a regex
@@ -100,6 +105,23 @@ export function isFailedFilter(outcome: FilterOutcome): outcome is { failedReaso
  */
 export const NUMBER_PATTERN = '^[+-]?([0-9]+(\\.[0-9]*)?|\\.[0-9]+)([eE][+-]?[0-9]+)?$';
 const NUMBER_RE = new RegExp(NUMBER_PATTERN);
+
+/**
+ * A cell that starts with an ISO day, followed by the end of the text or a
+ * date/time separator. Deliberately matched on the untrimmed text so the JS
+ * engine and DuckDB's RE2 agree (SQL `trim()` strips only spaces). Shared with
+ * DuckDB the way `NUMBER_PATTERN` is -- see duckdbParser.ts.
+ */
+export const ISO_DATE_PREFIX_PATTERN = '^[0-9]{4}-[0-9]{2}-[0-9]{2}([T ]|$)';
+const ISO_DATE_PREFIX_RE = new RegExp(ISO_DATE_PREFIX_PATTERN);
+const ISO_DAY_RE = /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/;
+/** How many leading characters of a cell make up its `YYYY-MM-DD` day. Also used by DuckDB's SQL mirror. */
+export const ISO_DAY_LENGTH = 10;
+
+/** True when a comparison operand is exactly a `YYYY-MM-DD` day (not calendar-validated). */
+export function isIsoDateOperand(value: string): boolean {
+  return ISO_DAY_RE.test(value);
+}
 
 /** The numeric value of `text` (surrounding whitespace ignored), or undefined if it isn't a finite number. */
 export function parseNumber(text: string): number | undefined {
@@ -208,6 +230,10 @@ export function compileCellPredicate(filter: ColumnFilter): (cell: string) => bo
           const n = parseNumber(cell);
           return n !== undefined && compareNumbers(op, n, operand);
         };
+      }
+      if (isIsoDateOperand(value)) {
+        return (cell) =>
+          ISO_DATE_PREFIX_RE.test(cell) && compareStrings(op, cell.slice(0, ISO_DAY_LENGTH), value);
       }
       return (cell) => cell.trim() !== '' && compareStrings(op, cell, value);
     }

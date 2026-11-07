@@ -25,6 +25,9 @@ import {
 import {
   hasUnknownColumn,
   filterLimits,
+  ISO_DATE_PREFIX_PATTERN,
+  ISO_DAY_LENGTH,
+  isIsoDateOperand,
   NUMBER_PATTERN,
   parseNumber,
   FILTER_FAILED_REASON,
@@ -480,7 +483,16 @@ function filterPredicateSql(
       const symbol = COMPARE_SQL[op];
       const operand = parseNumber(value);
       if (operand === undefined) {
-        // Text compare (ISO dates and the like); empty cells never match.
+        if (isIsoDateOperand(value)) {
+          // Day compare: only cells starting with an ISO day take part, compared
+          // by their first ISO_DAY_LENGTH characters (DATE prints '2024-01-01',
+          // TIMESTAMP '2024-01-01 10:30:00'). NULL is '' here, which fails the
+          // prefix test. Mirrors the date branch of `compileCellPredicate`.
+          params.push(ISO_DATE_PREFIX_PATTERN, value);
+          types.push(VARCHAR, VARCHAR);
+          return `(regexp_matches(${text}, ?) AND left(${text}, ${ISO_DAY_LENGTH}) ${symbol} ?)`;
+        }
+        // Plain string compare for any other non-number operand; empty cells never match.
         params.push(value);
         types.push(VARCHAR);
         return `(trim(${text}) <> '' AND ${text} ${symbol} ?)`;

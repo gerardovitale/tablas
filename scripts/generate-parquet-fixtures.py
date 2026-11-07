@@ -90,8 +90,10 @@ def main():
     # filter.csv/.xlsx/.db/.duckdb; test/unit/filterParity.test.ts asserts every
     # format filters it identically). Mixed-case and non-ASCII text, NULLs in
     # every column kind, non-integer floats (so every format prints the same
-    # cell text) and ISO dates held as plain strings (Parquet's DATE type would
-    # print as a full ISO timestamp here, and the other formats as dates).
+    # cell text) and ISO dates held as plain strings in `day` (columns 0-5 show
+    # identical text in every format). `d`/`ts` are real DATE/TIMESTAMP columns
+    # whose display legitimately differs per format (Parquet prints
+    # '2024-01-01T00:00:00.000Z'); they pin the day-precision date compare.
     write('filter.parquet', pa.table({
         'id': pa.array([1, 2, 3, 4, 5, 6, 7], type=pa.int64()),
         'name': pa.array(['Alice', 'bob', '\u00c9mile', 'CAROL', 'Dave', 'Zo\u00eb', 'Smith, Jo'], type=pa.string()),
@@ -99,6 +101,15 @@ def main():
         'qty': pa.array([10, 9, 100, None, 5, 20, 1], type=pa.int64()),
         'price': pa.array([9.5, 120.25, 7.75, 1000.5, None, 45.5, 0.5], type=pa.float64()),
         'day': pa.array(['2024-01-15', '2023-12-31', '2024-03-01', '2024-03-01', None, '2022-07-04', '2024-12-31'], type=pa.string()),
+        'd': pa.array([
+            datetime.date(2024, 1, 1), datetime.date(2023, 12, 31), datetime.date(2024, 1, 2),
+            datetime.date(2024, 1, 1), None, datetime.date(2022, 7, 4), datetime.date(2024, 12, 31),
+        ], type=pa.date32()),
+        'ts': pa.array([
+            datetime.datetime(2024, 1, 1, 10, 30, 0), datetime.datetime(2023, 12, 31, 23, 59, 59),
+            datetime.datetime(2024, 1, 2, 0, 0, 0), datetime.datetime(2024, 1, 1, 0, 0, 0), None,
+            datetime.datetime(2022, 7, 4, 12, 0, 0), datetime.datetime(2024, 12, 31, 23, 59, 59),
+        ], type=pa.timestamp('ms')),
     }))
 
     # unsupported-codec.parquet -- gzip-compressed, deliberately NOT written
