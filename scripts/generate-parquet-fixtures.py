@@ -86,6 +86,21 @@ def main():
         'all_null': pa.array([None, None, None, None, None], type=pa.int64()),
     }), row_group_size=2)
 
+    # filter.parquet -- the shared "filter parity" table (same logical rows as
+    # filter.csv/.xlsx/.db/.duckdb; test/unit/filterParity.test.ts asserts every
+    # format filters it identically). Mixed-case and non-ASCII text, NULLs in
+    # every column kind, non-integer floats (so every format prints the same
+    # cell text) and ISO dates held as plain strings (Parquet's DATE type would
+    # print as a full ISO timestamp here, and the other formats as dates).
+    write('filter.parquet', pa.table({
+        'id': pa.array([1, 2, 3, 4, 5, 6, 7], type=pa.int64()),
+        'name': pa.array(['Alice', 'bob', '\u00c9mile', 'CAROL', 'Dave', 'Zo\u00eb', 'Smith, Jo'], type=pa.string()),
+        'city': pa.array(['Rome', 'Paris', 'Oslo', 'rome', None, 'Lima', 'New York'], type=pa.string()),
+        'qty': pa.array([10, 9, 100, None, 5, 20, 1], type=pa.int64()),
+        'price': pa.array([9.5, 120.25, 7.75, 1000.5, None, 45.5, 0.5], type=pa.float64()),
+        'day': pa.array(['2024-01-15', '2023-12-31', '2024-03-01', '2024-03-01', None, '2022-07-04', '2024-12-31'], type=pa.string()),
+    }))
+
     # unsupported-codec.parquet -- gzip-compressed, deliberately NOT written
     # via write() (which pins snappy): hyparquet only decompresses
     # UNCOMPRESSED/Snappy, so this exercises parseParquet's error path.

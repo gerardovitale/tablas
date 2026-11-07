@@ -9,6 +9,16 @@ import {
   STATS_TOO_LARGE_REASON,
 } from './columnStats';
 import {
+  exceedsFilterCellCap,
+  filterTable,
+  FILTER_FAILED_REASON,
+  FILTER_TOO_LARGE_REASON,
+  reportFilterFailure,
+  type ColumnFilterSpec,
+  type FilterableRows,
+  type FilterOutcome,
+} from './filter';
+import {
   clampMaxRows,
   type MultiTableData,
   type MultiTableParseOutcome,
@@ -197,6 +207,38 @@ export function readXlsxSheet(worksheet: Worksheet, maxRowsInput?: number): Pars
   }
 
   return { headers, rows, rowCount: rows.length, columnCount, totalRowCount };
+}
+
+/**
+ * Every data row of one sheet as strings (regardless of `tablas.maxRows`), for
+ * filtering. Same stringification as `readXlsxSheet`, so a filter sees exactly
+ * the text the table shows. Never throws; an empty sheet yields no columns and
+ * an oversized one a `failedReason` (checked before any cell is read).
+ */
+export function xlsxRowsForFilter(worksheet: Worksheet): FilterableRows | { failedReason: string } {
+  try {
+    if (worksheet.rowCount === 0 || worksheet.columnCount === 0) {
+      return { columnCount: 0, rows: [] };
+    }
+    if (exceedsFilterCellCap(worksheet.rowCount - 1, worksheet.columnCount)) {
+      return { failedReason: FILTER_TOO_LARGE_REASON };
+    }
+    const { rows, columnCount } = readXlsxSheet(worksheet);
+    return { columnCount, rows };
+  } catch (err) {
+    reportFilterFailure(err);
+    return { failedReason: FILTER_FAILED_REASON };
+  }
+}
+
+/** Filters a whole sheet: up to `maxRows` matching rows plus the exact match count. */
+export function xlsxSheetFilter(
+  worksheet: Worksheet,
+  specs: readonly ColumnFilterSpec[],
+  maxRows: number
+): FilterOutcome {
+  const table = xlsxRowsForFilter(worksheet);
+  return 'failedReason' in table ? table : filterTable(table, specs, maxRows);
 }
 
 /**

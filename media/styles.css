@@ -358,10 +358,16 @@ body[class*='vscode-high-contrast'] .stats-card {
   position: relative;
 }
 
+/* `separate` + zero spacing, not `collapse`: with collapsed borders the table
+   owns them, so under a sticky <thead> they scroll away with the body and leave
+   a gap that body text shows through -- between the header row and the filter
+   row as well as under them. Every cell sets only its own right/bottom border,
+   so nothing doubles up and it looks the same as collapsed. */
 #csv-table {
   width: max-content;
   min-width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   table-layout: auto;
 }
 
@@ -384,7 +390,10 @@ body[class*='vscode-high-contrast'] .stats-card {
 
 /* ── Header ─────────────────────────────────────────── */
 
-thead tr {
+/* The whole header block (names + profile strips + filter row) sticks as one.
+   Making each <tr> sticky instead would pin both rows to top: 0 on top of
+   each other. */
+thead {
   position: sticky;
   top: 0;
   z-index: 10;
@@ -407,6 +416,76 @@ th {
 
 th:last-child {
   border-right: none;
+}
+
+/* ── Filter row ──────────────────────────────────────── */
+
+.filter-row th {
+  padding: 3px 6px;
+  font-weight: normal;
+  vertical-align: middle;
+}
+
+.filter-row th.row-num {
+  padding: 3px 2px;
+  text-align: center;
+}
+
+.col-filter {
+  display: block;
+  width: 100%;
+  min-width: 80px;
+  padding: 2px 6px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--vscode-input-foreground);
+  background-color: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, var(--vscode-editorGroup-border, transparent));
+  border-radius: 2px;
+  user-select: text;
+}
+
+.col-filter::placeholder {
+  color: var(--vscode-input-placeholderForeground);
+}
+
+.col-filter:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+/* The host couldn't make sense of this box's text. Colour alone isn't the only
+   cue: the box's tooltip carries the message, and aria-invalid announces it. */
+.col-filter[aria-invalid='true'] {
+  border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
+  outline-color: var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
+}
+
+.filter-clear {
+  width: 100%;
+  padding: 0;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--vscode-descriptionForeground);
+  background: none;
+  border: 0;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.filter-clear[hidden] {
+  display: none;
+}
+
+.filter-clear:hover {
+  color: var(--vscode-editor-foreground);
+  background-color: var(--vscode-list-hoverBackground);
+}
+
+.filter-clear:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
 }
 
 /* ── Rows ────────────────────────────────────────────── */

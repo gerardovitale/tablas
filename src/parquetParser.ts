@@ -14,6 +14,16 @@ import {
   STATS_TOO_LARGE_REASON,
 } from './columnStats';
 import {
+  exceedsFilterCellCap,
+  filterTable,
+  FILTER_FAILED_REASON,
+  FILTER_TOO_LARGE_REASON,
+  reportFilterFailure,
+  type ColumnFilterSpec,
+  type FilterableRows,
+  type FilterOutcome,
+} from './filter';
+import {
   bigIntToSafeNumber,
   clampMaxRows,
   type ColumnKind,
@@ -249,6 +259,47 @@ export async function parquetStats(bytes: Uint8Array): Promise<TableStats | unde
     reportStatsFailure(err);
     return undefined;
   }
+}
+
+/**
+ * Every row of the file as strings (regardless of `tablas.maxRows`), for
+ * filtering. The footer's row and column counts are checked against the filter
+ * cap *before* any row is decoded. Same stringification as `parseParquet`.
+ * Never throws: empty input yields no columns, anything else that goes wrong a
+ * `failedReason`.
+ */
+export async function parquetRowsForFilter(
+  bytes: Uint8Array
+): Promise<FilterableRows | { failedReason: string }> {
+  if (bytes.byteLength === 0) {
+    return { columnCount: 0, rows: [] };
+  }
+  try {
+    const { parquetMetadataAsync, parquetSchema } = await import('hyparquet');
+    const metadata = await parquetMetadataAsync(toArrayBuffer(bytes));
+    const columnCount = parquetSchema(metadata).children.length;
+    if (exceedsFilterCellCap(bigIntToSafeNumber(metadata.num_rows), columnCount)) {
+      return { failedReason: FILTER_TOO_LARGE_REASON };
+    }
+    const parsed = await parseParquet(bytes);
+    if (!parsed.success) {
+      return { failedReason: FILTER_FAILED_REASON };
+    }
+    return { columnCount: parsed.data.columnCount, rows: parsed.data.rows };
+  } catch (err) {
+    reportFilterFailure(err);
+    return { failedReason: FILTER_FAILED_REASON };
+  }
+}
+
+/** Filters the whole file: up to `maxRows` matching rows plus the exact match count. */
+export async function parquetFilter(
+  bytes: Uint8Array,
+  specs: readonly ColumnFilterSpec[],
+  maxRows: number
+): Promise<FilterOutcome> {
+  const table = await parquetRowsForFilter(bytes);
+  return 'failedReason' in table ? table : filterTable(table, specs, maxRows);
 }
 
 export async function parseParquet(

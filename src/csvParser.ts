@@ -7,6 +7,16 @@ import {
   STATS_TOO_LARGE_REASON,
 } from './columnStats';
 import {
+  exceedsFilterCellCap,
+  filterTable,
+  FILTER_FAILED_REASON,
+  FILTER_TOO_LARGE_REASON,
+  reportFilterFailure,
+  type ColumnFilterSpec,
+  type FilterableRows,
+  type FilterOutcome,
+} from './filter';
+import {
   clampMaxRows,
   type ParsedTable,
   type ParseError,
@@ -120,4 +130,43 @@ export function csvStats(rawContent: string): TableStats | undefined {
     reportStatsFailure(err);
     return undefined;
   }
+}
+
+/**
+ * Every row of the file as strings (regardless of `tablas.maxRows`), for
+ * filtering. Shares `parseCsvRows` with `parseCsv`, so a filter and the table
+ * can never disagree about what a row is. Never throws: a blank file yields no
+ * columns, and an unparseable or oversized one yields a `failedReason`.
+ */
+export function csvRowsForFilter(rawContent: string): FilterableRows | { failedReason: string } {
+  if (rawContent.trim() === '') {
+    return { columnCount: 0, rows: [] };
+  }
+  try {
+    const { headers, allRows, hasFatalError } = parseCsvRows(rawContent);
+    if (hasFatalError) {
+      return { failedReason: FILTER_FAILED_REASON };
+    }
+    if (exceedsFilterCellCap(allRows.length, headers.length)) {
+      return { failedReason: FILTER_TOO_LARGE_REASON };
+    }
+    return { columnCount: headers.length, rows: allRows };
+  } catch (err) {
+    reportFilterFailure(err);
+    return { failedReason: FILTER_FAILED_REASON };
+  }
+}
+
+/**
+ * Filters the whole file: up to `maxRows` matching rows plus the exact match
+ * count. Re-parses `rawContent` on every call -- the editor caches the result
+ * of `csvRowsForFilter` instead when the table is small enough.
+ */
+export function csvFilter(
+  rawContent: string,
+  specs: readonly ColumnFilterSpec[],
+  maxRows: number
+): FilterOutcome {
+  const table = csvRowsForFilter(rawContent);
+  return 'failedReason' in table ? table : filterTable(table, specs, maxRows);
 }

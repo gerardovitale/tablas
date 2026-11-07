@@ -11,6 +11,18 @@ import {
   statsLimits,
 } from './columnStats';
 import {
+  compileCellPredicate,
+  exceedsFilterCellCap,
+  filterLimits,
+  hasUnknownColumn,
+  FILTER_FAILED_REASON,
+  FILTER_TOO_LARGE_REASON,
+  FILTER_UNKNOWN_COLUMN_REASON,
+  reportFilterFailure,
+  type ColumnFilterSpec,
+  type FilterOutcome,
+} from './filter';
+import {
   clampMaxRows,
   type ColumnKind,
   type ColumnStats,
@@ -297,6 +309,106 @@ export function sqliteTableStats(handle: SqliteHandle, tableName: string): Table
   }
   statsCache.store(handle, tableName, stats);
   return stats;
+}
+
+// ── Column filtering ────────────────────────────────────────────────────
+
+const FILTER_FUNCTION = 'tablas_match';
+
+interface FilterState {
+  /** The predicates of the filter query currently running, indexed by the UDF's second argument. */
+  predicates: Array<(cell: string) => boolean>;
+}
+
+const filterStates = new WeakMap<SqliteHandle, FilterState>();
+
+/**
+ * Registers the `tablas_match(value, i)` SQL function on first use and returns
+ * the per-handle state it reads. The function stringifies the raw SQLite value
+ * exactly as the table does (`stringifySqliteCell`) and applies the same JS
+ * predicate every other format uses -- so a filter means the same thing in
+ * every format, including Unicode case folding, which SQLite's own
+ * `lower()`/`LIKE` only do for ASCII. Declared with exactly two parameters:
+ * sql.js registers a function with arity `func.length`.
+ */
+function filterStateFor(handle: SqliteHandle): FilterState {
+  let state = filterStates.get(handle);
+  if (!state) {
+    const created: FilterState = { predicates: [] };
+    handle.db.create_function(FILTER_FUNCTION, (value: SqlCellValue, i: number) =>
+      created.predicates[i](stringifySqliteCell(value)) ? 1 : 0
+    );
+    filterStates.set(handle, created);
+    state = created;
+  }
+  return state;
+}
+
+/**
+ * Filters one table/view across all of its rows (regardless of
+ * `tablas.maxRows`): up to `maxRows` matching rows plus the exact match count.
+ * One pass; only the first `maxRows` matches are read out of the statement.
+ * Synchronous and uninterruptible (sql.js), hence `filterLimits.sqliteMaxCells`.
+ * Never throws -- failures come back as a `failedReason`.
+ *
+ * The query renames the table's columns to `c0..cN` in a CTE, so views with
+ * duplicate column names work and nothing user-supplied is spliced into the
+ * SQL: the only interpolated pieces are the quoted table name and integers.
+ */
+export function sqliteTableFilter(
+  handle: SqliteHandle,
+  tableName: string,
+  specs: readonly ColumnFilterSpec[],
+  maxRows: number
+): FilterOutcome {
+  let state: FilterState | undefined;
+  try {
+    // Registering the UDF can throw (e.g. a closed database), so it lives inside the try.
+    state = filterStateFor(handle);
+    const quotedTable = quoteIdentifier(tableName);
+    // Column names come from a zero-row prepare (db.exec drops them for empty results).
+    const probe = handle.db.prepare(`SELECT * FROM ${quotedTable} LIMIT 0`);
+    let columnCount: number;
+    try {
+      columnCount = probe.getColumnNames().length;
+    } finally {
+      probe.free();
+    }
+    if (columnCount === 0 || hasUnknownColumn(specs, columnCount)) {
+      return { failedReason: FILTER_UNKNOWN_COLUMN_REASON };
+    }
+    const totalRows = Number(handle.db.exec(`SELECT COUNT(*) FROM ${quotedTable}`)[0]?.values[0]?.[0] ?? 0);
+    if (exceedsFilterCellCap(totalRows, Math.max(1, specs.length), filterLimits.sqliteMaxCells)) {
+      return { failedReason: FILTER_TOO_LARGE_REASON };
+    }
+
+    state.predicates = specs.map((spec) => compileCellPredicate(spec.filter));
+    const aliases = Array.from({ length: columnCount }, (_, i) => `c${i}`).join(', ');
+    const where = specs.map((spec, i) => `${FILTER_FUNCTION}(c${spec.column}, ${i})`).join(' AND ');
+    const stmt = handle.db.prepare(
+      `WITH s(${aliases}) AS (SELECT * FROM ${quotedTable}) SELECT * FROM s${where ? ` WHERE ${where}` : ''}`
+    );
+    const rows: string[][] = [];
+    let matchCount = 0;
+    try {
+      while (stmt.step()) {
+        matchCount++;
+        if (rows.length < maxRows) {
+          rows.push((stmt.get() as SqlCellValue[]).map(stringifySqliteCell));
+        }
+      }
+    } finally {
+      stmt.free();
+    }
+    return { rows, matchCount };
+  } catch (err) {
+    reportFilterFailure(err);
+    return { failedReason: FILTER_FAILED_REASON };
+  } finally {
+    if (state) {
+      state.predicates = [];
+    }
+  }
 }
 
 /** Reads one table/view's contents, honoring `maxRowsInput` the same way CSV/Parquet do. */

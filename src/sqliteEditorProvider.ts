@@ -6,10 +6,19 @@ import {
   listSqliteTables,
   openSqliteDatabase,
   readSelectedTable,
+  sqliteTableFilter,
   sqliteTableStats,
   type SqliteHandle,
 } from './sqliteParser';
 import { reportStatsFailure } from './columnStats';
+import {
+  filterPayload,
+  planFilter,
+  reportFilterFailure,
+  FILTER_FAILED_REASON,
+  FILTER_UNKNOWN_TABLE_REASON,
+} from './filter';
+import { filterDataMessage, isFilterMessage, type FilterMessage, type FilterPayload } from './filterMessage';
 import { isGetStatsMessage, statsDataMessage, type StatsPayload } from './statsMessage';
 import type { MultiTableParseOutcome } from './tableData';
 import { buildWebviewHtml } from './webviewHtml';
@@ -25,6 +34,8 @@ class SqliteDocument implements vscode.CustomDocument {
    * completes (or forever, if opening the file/database failed).
    */
   handle?: SqliteHandle;
+  /** `seq` of the newest `filter` request received; an older one still queued is dropped. */
+  filterSeq = 0;
   dispose(): void {
     this.handle?.close();
   }
@@ -134,6 +145,11 @@ export class SqliteEditorProvider
         if (payload) {
           await webview.postMessage(statsDataMessage(payload));
         }
+      } else if (isFilterMessage(message)) {
+        const payload = await this.handleFilter(document, message);
+        if (payload) {
+          await webview.postMessage(filterDataMessage(payload));
+        }
       }
     });
   }
@@ -218,6 +234,46 @@ export class SqliteEditorProvider
     } catch (err) {
       reportStatsFailure(err);
       return { table, stats: undefined };
+    }
+  }
+
+  /**
+   * Filters one table/view of the already-open database for the webview's
+   * filter row: up to `tablas.maxRows` matching rows plus the exact match
+   * count. Returns `undefined` (nothing to post) when the database isn't open,
+   * the filters were cleared, or a newer request superseded this one. An
+   * unknown table yields a failed filter. Public so an integration test can
+   * call it without a real webview.
+   *
+   * sql.js is synchronous, so the filter holds the extension host for its
+   * duration. Yielding once first lets a burst of keystrokes (queued
+   * messages) update `filterSeq`, so only the newest request does the work.
+   */
+  public async handleFilter(document: SqliteDocument, message: FilterMessage): Promise<FilterPayload | undefined> {
+    if (!document.handle) {
+      return undefined;
+    }
+    document.filterSeq = message.seq;
+    const plan = planFilter(message);
+    if (plan.kind === 'cleared') {
+      return undefined;
+    }
+    if (plan.kind === 'invalid') {
+      return plan.payload;
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    if (document.filterSeq !== message.seq || !document.handle) {
+      return undefined;
+    }
+    try {
+      const table = message.table;
+      if (table === undefined || !listSqliteTables(document.handle).some((t) => t.name === table)) {
+        return filterPayload(message, { failedReason: FILTER_UNKNOWN_TABLE_REASON });
+      }
+      return filterPayload(message, sqliteTableFilter(document.handle, table, plan.specs, getMaxRowsSetting()));
+    } catch (err) {
+      reportFilterFailure(err);
+      return filterPayload(message, { failedReason: FILTER_FAILED_REASON });
     }
   }
 }

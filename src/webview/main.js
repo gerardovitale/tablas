@@ -55,14 +55,36 @@
    * strips attached) | skipped (the host deliberately didn't compute them;
    * `skippedReason` says why) | failed. The table itself never waits on any
    * of it.
-   * @type {{ wrapper: HTMLElement, ths: HTMLElement[],
-   *          gutterTh: HTMLElement, statusEl: HTMLElement,
+   *
+   * Column filtering is a second, independent state machine on the same view:
+   * `filter` walks none -> pending (a `filter` request is in flight) -> active
+   * (the tbody shows the host's matches) | invalid (some box didn't parse; rows
+   * unchanged) | failed (the host couldn't run it; original rows restored). The
+   * header, the profile strips and the focused input are never re-rendered --
+   * only the tbody is swapped.
+   * @type {{ wrapper: HTMLElement, thead: HTMLElement, tbody: HTMLElement, ths: HTMLElement[],
+   *          gutterTh: HTMLElement, statusEl: HTMLElement, statsBar: HTMLElement,
    *          tableName: string | undefined, headers: string[], rowCount: number, totalRowCount?: number,
    *          coverNote: string | undefined, models: ColumnModel[] | undefined,
    *          skippedReason: string | undefined,
-   *          stats: 'idle' | 'pending' | 'ready' | 'skipped' | 'failed' } | undefined}
+   *          stats: 'idle' | 'pending' | 'ready' | 'skipped' | 'failed',
+   *          originalRows: string[][], baseStatsText: string,
+   *          filterInputs: HTMLInputElement[], clearButton: HTMLButtonElement,
+   *          filterSeq: number, filterTimer: number | undefined,
+   *          filter: 'none' | 'pending' | 'active' | 'invalid' | 'failed' } | undefined}
    */
   let currentView;
+
+  // Webview-wide `filter` request counter: every request takes the next number
+  // and only a reply carrying the newest one is applied. Never reset, so a
+  // reply for a table that has since been replaced can't collide with a new one.
+  let filterSeqCounter = 0;
+  const FILTER_DEBOUNCE_MS = 250;
+  // Mirrors filterLimits.maxTextLength in src/filter.ts: the host rejects longer text.
+  const MAX_FILTER_TEXT_LENGTH = 1000;
+  const FILTER_HELP =
+    'Filter this column. text: contains · !text: does not contain · =text: equals · =: empty · !=: not empty · ' +
+    '> >= < <=: compare numbers or dates · \\text: literal. Esc clears. Alt+click a cell to filter by its value.';
 
   /** @type {{ card: HTMLElement, trigger: HTMLElement, th: HTMLElement } | undefined} */
   let openCard;
@@ -552,7 +574,10 @@
     // Keep the card clear of the sticky row-number gutter, then inside the viewport.
     const gutterRight = currentView ? currentView.gutterTh.getBoundingClientRect().right : 0;
     const left = Math.max(8, gutterRight + 4, Math.min(anchor.left, viewportWidth - cardWidth - 8));
-    const top = anchor.bottom + 4;
+    // Under the whole sticky header (profile strips + filter row), so the
+    // card never covers the column's own filter box.
+    const headBottom = currentView ? currentView.thead.getBoundingClientRect().bottom : 0;
+    const top = Math.max(anchor.bottom, headBottom) + 4;
     card.style.left = `${left}px`;
     card.style.top = `${top}px`;
     if (viewportHeight > 0) {
@@ -585,7 +610,9 @@
     closeCard(false);
     const app = document.getElementById('app');
     if (!app || !currentView) { return; }
-    const card = buildDetailCard(model, currentView.coverNote);
+    const filterNote = currentView.filter !== 'none' ? 'Statistics ignore the active filter.' : undefined;
+    const note = [currentView.coverNote, filterNote].filter(Boolean).join(' ') || undefined;
+    const card = buildDetailCard(model, note);
     app.appendChild(card);
     openCard = { card, trigger, th };
     trigger.setAttribute('aria-expanded', 'true');
@@ -652,6 +679,195 @@
     if (document.hidden) { closeCard(false); }
   });
 
+  // ── Column filtering ──────────────────────────────────────────────────
+
+  /**
+   * Replaces the body's rows. The only thing a filter reply (or a clear)
+   * re-renders: the header, the profile strips and the focused filter input
+   * stay exactly as they are.
+   * @param {HTMLElement} tbody
+   * @param {string[][]} rows
+   */
+  function renderRows(tbody, rows) {
+    const fragment = document.createDocumentFragment();
+    for (let i = 0; i < rows.length; i++) {
+      const tr = el('tr');
+
+      // Row number cell
+      const rnCell = el('td', { class: 'row-num' });
+      rnCell.textContent = String(i + 1);
+      tr.appendChild(rnCell);
+
+      for (const cell of rows[i]) {
+        const td = el('td');
+        td.textContent = cell;
+        td.title = cell;
+        tr.appendChild(td);
+      }
+      fragment.appendChild(tr);
+    }
+    tbody.textContent = '';
+    tbody.appendChild(fragment);
+  }
+
+  /** @param {NonNullable<typeof currentView>} view @param {Record<string, unknown>} message */
+  function withTable(view, message) {
+    return view.tableName !== undefined ? { ...message, table: view.tableName } : message;
+  }
+
+  /** @param {NonNullable<typeof currentView>} view */
+  function cancelFilterTimer(view) {
+    if (view.filterTimer !== undefined) {
+      window.clearTimeout(view.filterTimer);
+      view.filterTimer = undefined;
+    }
+  }
+
+  /** The clear-all button is only there while some box holds text. @param {NonNullable<typeof currentView>} view */
+  function updateFilterChrome(view) {
+    view.clearButton.hidden = !view.filterInputs.some((input) => input.value !== '');
+  }
+
+  /** Back to the unfiltered table, without asking the host. @param {NonNullable<typeof currentView>} view */
+  function restoreOriginalRows(view) {
+    renderRows(view.tbody, view.originalRows);
+    view.statsBar.textContent = view.baseStatsText;
+    view.wrapper.scrollTop = 0;
+  }
+
+  /**
+   * Sends the boxes' current text to the host (blank boxes are dropped; the
+   * host parses what's left). With nothing left to filter the original rows
+   * are put back locally -- no round trip -- and the host is only told so it
+   * can release anything it cached for this table.
+   * @param {NonNullable<typeof currentView>} view
+   */
+  function sendFilter(view) {
+    cancelFilterTimer(view);
+    if (currentView !== view) { return; }
+    for (const input of view.filterInputs) {
+      input.removeAttribute('aria-invalid');
+      input.title = FILTER_HELP;
+    }
+    updateFilterChrome(view);
+    const filters = view.filterInputs
+      .map((input, column) => ({ column, text: input.value }))
+      .filter((f) => f.text.trim() !== '');
+    const seq = ++filterSeqCounter;
+    view.filterSeq = seq;
+    if (filters.length === 0) {
+      if (view.filter !== 'none') {
+        view.filter = 'none';
+        restoreOriginalRows(view);
+        vscode.postMessage(withTable(view, { type: 'filter', seq, filters: [] }));
+      }
+      return;
+    }
+    view.filter = 'pending';
+    vscode.postMessage(withTable(view, { type: 'filter', seq, filters }));
+  }
+
+  /** @param {NonNullable<typeof currentView>} view */
+  function scheduleFilter(view) {
+    cancelFilterTimer(view);
+    view.filterTimer = window.setTimeout(() => {
+      view.filterTimer = undefined;
+      sendFilter(view);
+    }, FILTER_DEBOUNCE_MS);
+  }
+
+  /**
+   * Applies a `filter-data` reply to the view it was requested for. Replies
+   * that were overtaken by a newer request (or belong to another table) are
+   * dropped, so a slow answer can never overwrite a newer one.
+   * @param {import('../../src/filterMessage').FilterPayload | undefined} payload
+   */
+  function handleFilterData(payload) {
+    const view = currentView;
+    if (!view || view.filter !== 'pending' || !payload || payload.seq !== view.filterSeq || payload.table !== view.tableName) {
+      return;
+    }
+    if (Array.isArray(payload.errors) && payload.errors.length > 0) {
+      // Keep whatever rows are showing; just point at the boxes that didn't parse.
+      view.filter = 'invalid';
+      for (const error of payload.errors) {
+        const input = view.filterInputs[error.column];
+        if (input) {
+          input.setAttribute('aria-invalid', 'true');
+          input.title = String(error.message);
+        }
+      }
+      return;
+    }
+    if (typeof payload.failedReason === 'string' || !Array.isArray(payload.rows) || typeof payload.matchCount !== 'number') {
+      view.filter = 'failed';
+      restoreOriginalRows(view);
+      const reason = typeof payload.failedReason === 'string' ? payload.failedReason : 'unexpected reply';
+      view.statsBar.textContent = `${view.baseStatsText} — filter unavailable: ${reason}`;
+      return;
+    }
+    view.filter = 'active';
+    renderRows(view.tbody, payload.rows);
+    view.wrapper.scrollTop = 0;
+    const total = view.totalRowCount != null ? view.totalRowCount : view.rowCount;
+    let text = `${payload.matchCount.toLocaleString()} of ${total.toLocaleString()} row${total !== 1 ? 's' : ''} match`;
+    if (payload.matchCount > payload.rows.length) {
+      text += ` (showing first ${payload.rows.length.toLocaleString()} — increase tablas.maxRows in settings to see more)`;
+    }
+    view.statsBar.textContent = text;
+  }
+
+  /**
+   * Wires the filter row's inputs, the clear-all button and Alt+click. Called
+   * once the view exists; every handler closes over that view, so a handler
+   * that outlives a re-render finds `currentView !== view` and does nothing.
+   * @param {NonNullable<typeof currentView>} view
+   */
+  function wireFilterRow(view) {
+    view.filterInputs.forEach((input) => {
+      input.addEventListener('input', () => {
+        updateFilterChrome(view);
+        scheduleFilter(view);
+      });
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          sendFilter(view);
+        } else if (event.key === 'Escape' && input.value !== '') {
+          // Clears the box, and stops here so it doesn't also close an open card.
+          event.preventDefault();
+          event.stopPropagation();
+          input.value = '';
+          sendFilter(view);
+        }
+      });
+    });
+
+    view.clearButton.addEventListener('click', () => {
+      for (const input of view.filterInputs) { input.value = ''; }
+      sendFilter(view);
+      if (view.filterInputs[0]) { view.filterInputs[0].focus(); }
+    });
+
+    // Alt+click a cell: filter its column to exactly that value.
+    view.tbody.addEventListener('click', (event) => {
+      if (!event.altKey) { return; }
+      const cell = /** @type {Element} */ (event.target).closest('td');
+      if (!cell || cell.classList.contains('row-num')) { return; }
+      const input = view.filterInputs[/** @type {HTMLTableCellElement} */ (cell).cellIndex - 1]; // minus the row-number gutter
+      const text = cell.textContent || '';
+      const value = '=' + text;
+      // A one-line box can't hold a line break, the host rejects over-long text,
+      // and it trims the box: trailing spaces would turn "=abc " into "=abc",
+      // which matches nothing. (A whitespace-only cell is fine: "=" means empty.)
+      if (!input || /[\r\n]/.test(value) || value.length > MAX_FILTER_TEXT_LENGTH
+        || (text.trim() !== '' && /\s$/.test(text))) { return; }
+      event.preventDefault();
+      input.value = value;
+      sendFilter(view);
+    });
+  }
+
   // ── Table ─────────────────────────────────────────────────────────────
 
   /**
@@ -667,6 +883,15 @@
   function renderTable(data, tableName) {
     const app = document.getElementById('app');
     if (!app) { return; }
+    // A new table replaces the old one's filters. Tell the host if there were
+    // any, so it can release what it cached (and drop a filter still running).
+    const previous = currentView;
+    if (previous) {
+      cancelFilterTimer(previous);
+      if (previous.filter !== 'none') {
+        vscode.postMessage(withTable(previous, { type: 'filter', seq: ++filterSeqCounter, filters: [] }));
+      }
+    }
     currentView = undefined;
 
     if (data.columnCount === 0) {
@@ -682,12 +907,14 @@
     // statistics themselves aren't in `data`: they're requested once the rows
     // are in the DOM (see requestStats) and drawn into the headers on arrival.
     const statsHeader = el('div', { class: 'stats-header' });
-    const statsBar = el('div', { class: 'stats-bar' });
+    // A live region: the filter's "N of M rows match" is announced as it changes.
+    const statsBar = el('div', { class: 'stats-bar', 'aria-live': 'polite' });
     let statsText = `${data.rowCount} row${data.rowCount !== 1 ? 's' : ''} × ${data.columnCount} column${data.columnCount !== 1 ? 's' : ''}`;
     if (data.totalRowCount != null && data.totalRowCount > data.rowCount) {
       statsText += ` (showing first ${data.rowCount} of ${data.totalRowCount} — increase tablas.maxRows in settings to see more)`;
     }
     statsBar.textContent = statsText;
+    const baseStatsText = statsText;
     statsHeader.appendChild(statsBar);
 
     const statusEl = renderStatsStatus();
@@ -722,6 +949,40 @@
       ths.push(th);
     });
     thead.appendChild(headerRow);
+
+    // Filter row: one box per column, under the header (and its profile strips).
+    // Same cell order as the header row, which Alt+click and the tests rely on.
+    const filterRow = el('tr', { class: 'filter-row' });
+    const filterGutter = el('th', { class: 'row-num' });
+    const clearButton = /** @type {HTMLButtonElement} */ (el('button', {
+      type: 'button',
+      class: 'filter-clear',
+      'aria-label': 'Clear all filters',
+      title: 'Clear all filters',
+    }));
+    clearButton.textContent = '×';
+    clearButton.hidden = true;
+    filterGutter.appendChild(clearButton);
+    filterRow.appendChild(filterGutter);
+    /** @type {HTMLInputElement[]} */
+    const filterInputs = [];
+    data.headers.forEach((header) => {
+      const cell = el('th', { class: 'filter-cell' });
+      const input = /** @type {HTMLInputElement} */ (el('input', {
+        type: 'search',
+        class: 'col-filter',
+        placeholder: 'Filter…',
+        maxlength: String(MAX_FILTER_TEXT_LENGTH),
+        autocomplete: 'off',
+        spellcheck: 'false',
+        'aria-label': `Filter ${header}`,
+        title: FILTER_HELP,
+      }));
+      cell.appendChild(input);
+      filterRow.appendChild(cell);
+      filterInputs.push(input);
+    });
+    thead.appendChild(filterRow);
     table.appendChild(thead);
 
     // Installed once; the strips it reacts to only exist after attachStats,
@@ -739,37 +1000,20 @@
       }
     });
 
-    // <tbody> — use DocumentFragment for performance
     const tbody = el('tbody');
-    const fragment = document.createDocumentFragment();
-
-    for (let i = 0; i < data.rows.length; i++) {
-      const tr = el('tr');
-
-      // Row number cell
-      const rnCell = el('td', { class: 'row-num' });
-      rnCell.textContent = String(i + 1);
-      tr.appendChild(rnCell);
-
-      for (const cell of data.rows[i]) {
-        const td = el('td');
-        td.textContent = cell;
-        td.title = cell;
-        tr.appendChild(td);
-      }
-      fragment.appendChild(tr);
-    }
-
-    tbody.appendChild(fragment);
+    renderRows(tbody, data.rows);
     table.appendChild(tbody);
     wrapper.appendChild(table);
     app.appendChild(wrapper);
 
     currentView = {
       wrapper,
+      thead,
+      tbody,
       ths,
       gutterTh: rnHeader,
       statusEl,
+      statsBar,
       tableName,
       headers: data.headers,
       rowCount: data.rowCount,
@@ -778,7 +1022,15 @@
       models: undefined,
       skippedReason: undefined,
       stats: 'idle',
+      originalRows: data.rows,
+      baseStatsText,
+      filterInputs,
+      clearButton,
+      filterSeq: 0,
+      filterTimer: undefined,
+      filter: 'none',
     };
+    wireFilterRow(currentView);
     requestStats();
   }
 
@@ -875,6 +1127,8 @@
       renderMultiTableOutcome(message.payload);
     } else if (message.type === 'stats-data') {
       handleStatsData(message.payload);
+    } else if (message.type === 'filter-data') {
+      handleFilterData(message.payload);
     }
   });
 

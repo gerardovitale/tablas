@@ -1,15 +1,37 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { csvStats, parseCsv, CsvParseOutcome } from './csvParser';
+import { csvRowsForFilter, csvStats, parseCsv, CsvParseOutcome } from './csvParser';
 import { reportStatsFailure } from './columnStats';
+import {
+  filterPayload,
+  filterTable,
+  fitsFilterCache,
+  planFilter,
+  reportFilterFailure,
+  FILTER_FAILED_REASON,
+  type FilterableRows,
+} from './filter';
+import { filterDataMessage, isFilterMessage, type FilterMessage, type FilterPayload } from './filterMessage';
 import { isGetStatsMessage, statsDataMessage, type StatsPayload } from './statsMessage';
 import { buildWebviewHtml } from './webviewHtml';
 import { getMaxRowsSetting } from './config';
 
 class CsvDocument implements vscode.CustomDocument {
   constructor(public readonly uri: vscode.Uri) {}
-  dispose(): void {}
+  /** `seq` of the newest `filter` request received; an older request still waiting on I/O is dropped. */
+  filterSeq = 0;
+  /**
+   * The file's rows as strings, kept only while a filter is active and only
+   * for tables small enough to hold (`fitsFilterCache`), so typing in a filter
+   * box doesn't re-read and re-parse the file per keystroke. Released when the
+   * filters are cleared and on dispose; a file edited on disk meanwhile is
+   * not noticed until then.
+   */
+  filterRows?: FilterableRows;
+  dispose(): void {
+    this.filterRows = undefined;
+  }
 }
 
 export class CsvEditorProvider
@@ -92,8 +114,53 @@ export class CsvEditorProvider
         this._onDidPostCsvData.fire(outcome);
       } else if (isGetStatsMessage(message)) {
         await webview.postMessage(statsDataMessage(await this.handleGetStats(document)));
+      } else if (isFilterMessage(message)) {
+        const payload = await this.handleFilter(document, message);
+        if (payload) {
+          await webview.postMessage(filterDataMessage(payload));
+        }
       }
     });
+  }
+
+  /**
+   * Filters the whole file for the webview's filter row: up to
+   * `tablas.maxRows` matching rows plus the exact match count. Returns
+   * `undefined` (nothing to post) when the filters were cleared or a newer
+   * request superseded this one. Public so an integration test can exercise it
+   * without a webview.
+   */
+  public async handleFilter(document: CsvDocument, message: FilterMessage): Promise<FilterPayload | undefined> {
+    document.filterSeq = message.seq;
+    const plan = planFilter(message);
+    if (plan.kind === 'cleared') {
+      document.filterRows = undefined;
+      return undefined;
+    }
+    if (plan.kind === 'invalid') {
+      return plan.payload;
+    }
+    try {
+      let table = document.filterRows;
+      if (!table) {
+        const bytes = await vscode.workspace.fs.readFile(document.uri);
+        if (document.filterSeq !== message.seq) {
+          return undefined;
+        }
+        const loaded = csvRowsForFilter(new TextDecoder('utf-8').decode(bytes));
+        if ('failedReason' in loaded) {
+          return filterPayload(message, loaded);
+        }
+        table = loaded;
+        if (fitsFilterCache(table)) {
+          document.filterRows = table;
+        }
+      }
+      return filterPayload(message, filterTable(table, plan.specs, getMaxRowsSetting()));
+    } catch (err) {
+      reportFilterFailure(err);
+      return filterPayload(message, { failedReason: FILTER_FAILED_REASON });
+    }
   }
 
   /**

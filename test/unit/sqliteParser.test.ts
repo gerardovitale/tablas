@@ -7,10 +7,20 @@ import {
   openSqliteDatabase,
   parseSqlite,
   readSqliteTable,
+  sqliteTableFilter,
   sqliteTableStats,
   stringifySqliteCell,
   type SqliteHandle,
 } from '../../src/sqliteParser';
+import {
+  filterLimits,
+  FILTER_FAILED_REASON,
+  FILTER_TOO_LARGE_REASON,
+  FILTER_UNKNOWN_COLUMN_REASON,
+  resolveFilters,
+  type ColumnFilterSpec,
+} from '../../src/filter';
+import { FILTER_CASES, idsOf } from './filterCases';
 
 // Use process.cwd() (always the project root) to locate fixtures regardless
 // of whether we're running via ts-node or compiled JS in out/.
@@ -486,4 +496,161 @@ describe('sqliteTableStats', () => {
       });
     });
   });
+});
+
+describe('sqliteTableFilter', () => {
+  async function withHandle<T>(name: string, fn: (handle: SqliteHandle) => T | Promise<T>): Promise<T> {
+    const handle = await openFixture(name);
+    try {
+      return await fn(handle);
+    } finally {
+      handle.close();
+    }
+  }
+
+  function specsOf(filters: Parameters<typeof resolveFilters>[0]): ColumnFilterSpec[] {
+    const resolved = resolveFilters(filters);
+    if ('errors' in resolved) {
+      assert.fail('unexpected filter error');
+    }
+    return resolved.specs;
+  }
+
+  async function silenced<T>(fn: () => T | Promise<T>): Promise<T> {
+    const original = statsHooks.log;
+    statsHooks.log = () => undefined;
+    try {
+      return await fn();
+    } finally {
+      statsHooks.log = original;
+    }
+  }
+
+  for (const c of FILTER_CASES) {
+    it(c.name, () =>
+      withHandle('filter.db', (handle) => {
+        const outcome = sqliteTableFilter(handle, 'items', specsOf(c.filters), 100);
+        assert.ok(!('failedReason' in outcome), 'failedReason' in outcome ? outcome.failedReason : '');
+        assert.deepStrictEqual(idsOf(outcome.rows), c.ids);
+        assert.strictEqual(outcome.matchCount, c.ids.length);
+      }));
+  }
+
+  it('caps the returned rows at maxRows but counts every match', () =>
+    withHandle('filter.db', (handle) => {
+      const outcome = sqliteTableFilter(handle, 'items', specsOf([{ column: 3, text: '>=1' }]), 2);
+      assert.ok(!('failedReason' in outcome));
+      assert.strictEqual(outcome.rows.length, 2);
+      assert.strictEqual(outcome.matchCount, 6);
+    }));
+
+  it('returns the same cell text as readSqliteTable', () =>
+    withHandle('filter.db', (handle) => {
+      const outcome = sqliteTableFilter(handle, 'items', specsOf([{ column: 1, text: 'e' }]), 100);
+      assert.ok(!('failedReason' in outcome));
+      const all = readSqliteTable(handle, 'items').rows;
+      assert.deepStrictEqual(outcome.rows, all.filter((row) => row[1].toLowerCase().includes('e')));
+    }));
+
+  it('can be run repeatedly on one handle with different filters', () =>
+    withHandle('filter.db', (handle) => {
+      const first = sqliteTableFilter(handle, 'items', specsOf([{ column: 2, text: 'rome' }]), 100);
+      const second = sqliteTableFilter(handle, 'items', specsOf([{ column: 1, text: '=bob' }]), 100);
+      const third = sqliteTableFilter(handle, 'items', specsOf([{ column: 2, text: 'rome' }]), 100);
+      assert.ok(!('failedReason' in first) && !('failedReason' in second) && !('failedReason' in third));
+      assert.deepStrictEqual(idsOf(first.rows), [1, 4]);
+      assert.deepStrictEqual(idsOf(second.rows), [2]);
+      assert.deepStrictEqual(idsOf(third.rows), [1, 4]);
+    }));
+
+  it('handles a view whose columns share a name', () =>
+    withHandle('filter.db', (handle) => {
+      const outcome = sqliteTableFilter(handle, 'dup_names', specsOf([{ column: 1, text: '=bob' }]), 100);
+      assert.ok(!('failedReason' in outcome));
+      assert.deepStrictEqual(outcome.rows, [['2', 'bob']]);
+    }));
+
+  it('treats SQL metacharacters in a filter as plain text', () =>
+    withHandle('filter.db', (handle) => {
+      const evil = `'; DROP TABLE items; --`;
+      const outcome = sqliteTableFilter(handle, 'items', specsOf([{ column: 1, text: evil }]), 100);
+      assert.ok(!('failedReason' in outcome));
+      assert.strictEqual(outcome.matchCount, 0);
+      assert.strictEqual(readSqliteTable(handle, 'items').rowCount, 7);
+    }));
+
+  it('refuses a filter on a column the table does not have', () =>
+    withHandle('filter.db', (handle) => {
+      const outcome = sqliteTableFilter(handle, 'items', specsOf([{ column: 99, text: 'x' }]), 100);
+      assert.deepStrictEqual(outcome, { failedReason: FILTER_UNKNOWN_COLUMN_REASON });
+    }));
+
+  it('reports an unknown table as a failed filter, without throwing', () =>
+    silenced(() =>
+      withHandle('filter.db', (handle) => {
+        const outcome = sqliteTableFilter(handle, 'no_such_table', specsOf([{ column: 0, text: '1' }]), 100);
+        assert.deepStrictEqual(outcome, { failedReason: FILTER_FAILED_REASON });
+      })));
+
+  it('reports a failure to register its SQL function as a failed filter, without throwing', () =>
+    withHandle('filter.db', async (real) => {
+      // A fresh handle object, so the per-handle registration really runs (and fails).
+      const broken: SqliteHandle = {
+        close: () => undefined,
+        db: new Proxy(real.db, {
+          get(target, prop) {
+            if (prop === 'create_function') {
+              return () => {
+                throw new Error('create_function failed');
+              };
+            }
+            const value = Reflect.get(target, prop);
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        }),
+      };
+      const outcome = await silenced(() => sqliteTableFilter(broken, 'items', specsOf([{ column: 1, text: 'a' }]), 100));
+      assert.deepStrictEqual(outcome, { failedReason: FILTER_FAILED_REASON });
+    }));
+
+  it('reports a closed database as a failed filter, without throwing', async () => {
+    const handle = await openFixture('filter.db');
+    handle.close();
+    const outcome = await silenced(() => sqliteTableFilter(handle, 'items', specsOf([{ column: 1, text: 'a' }]), 100));
+    assert.deepStrictEqual(outcome, { failedReason: FILTER_FAILED_REASON });
+  });
+
+  it('refuses a table over the cell cap, before running the query', () =>
+    withHandle('filter.db', (handle) => {
+      const original = filterLimits.sqliteMaxCells;
+      filterLimits.sqliteMaxCells = 5; // 7 rows x 1 filtered column
+      try {
+        const outcome = sqliteTableFilter(handle, 'items', specsOf([{ column: 1, text: 'a' }]), 100);
+        assert.deepStrictEqual(outcome, { failedReason: FILTER_TOO_LARGE_REASON });
+      } finally {
+        filterLimits.sqliteMaxCells = original;
+      }
+    }));
+
+  it('counts the cap per filtered column', () =>
+    withHandle('filter.db', (handle) => {
+      const original = filterLimits.sqliteMaxCells;
+      filterLimits.sqliteMaxCells = 10; // 7 x 1 fits, 7 x 2 does not
+      try {
+        const one = sqliteTableFilter(handle, 'items', specsOf([{ column: 1, text: 'a' }]), 100);
+        const two = sqliteTableFilter(handle, 'items', specsOf([{ column: 1, text: 'a' }, { column: 2, text: 'o' }]), 100);
+        assert.ok(!('failedReason' in one));
+        assert.deepStrictEqual(two, { failedReason: FILTER_TOO_LARGE_REASON });
+      } finally {
+        filterLimits.sqliteMaxCells = original;
+      }
+    }));
+
+  it('filters a view and a table with a zero-row result', () =>
+    withHandle('stats.db', (handle) => {
+      assert.deepStrictEqual(sqliteTableFilter(handle, 'empty_table', specsOf([{ column: 0, text: '1' }]), 10), { rows: [], matchCount: 0 });
+      const view = sqliteTableFilter(handle, 'label_counts', specsOf([{ column: 0, text: '=a' }]), 10);
+      assert.ok(!('failedReason' in view));
+      assert.deepStrictEqual(view.rows, [['a', '2']]);
+    }));
 });

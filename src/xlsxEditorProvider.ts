@@ -7,9 +7,21 @@ import {
   listXlsxSheets,
   openXlsxWorkbook,
   readSelectedSheet,
+  xlsxRowsForFilter,
   xlsxSheetStats,
 } from './xlsxParser';
 import { reportStatsFailure } from './columnStats';
+import {
+  filterPayload,
+  filterTable,
+  fitsFilterCache,
+  planFilter,
+  reportFilterFailure,
+  FILTER_FAILED_REASON,
+  FILTER_UNKNOWN_TABLE_REASON,
+  type FilterableRows,
+} from './filter';
+import { filterDataMessage, isFilterMessage, type FilterMessage, type FilterPayload } from './filterMessage';
 import { isGetStatsMessage, statsDataMessage, type StatsPayload } from './statsMessage';
 import type { MultiTableParseOutcome } from './tableData';
 import { buildWebviewHtml } from './webviewHtml';
@@ -27,7 +39,15 @@ class XlsxDocument implements vscode.CustomDocument {
    * external once `.xlsx.load()` resolves.
    */
   workbook?: Workbook;
-  dispose(): void {}
+  /**
+   * One sheet's rows as strings, kept only while a filter is active and only
+   * for sheets small enough to hold (`fitsFilterCache`). Released when the
+   * filters are cleared and on dispose; switching sheets replaces it.
+   */
+  filterRows?: { sheet: string; table: FilterableRows };
+  dispose(): void {
+    this.filterRows = undefined;
+  }
 }
 
 export class XlsxEditorProvider implements vscode.CustomReadonlyEditorProvider<XlsxDocument> {
@@ -127,6 +147,11 @@ export class XlsxEditorProvider implements vscode.CustomReadonlyEditorProvider<X
         if (payload) {
           await webview.postMessage(statsDataMessage(payload));
         }
+      } else if (isFilterMessage(message)) {
+        const payload = this.handleFilter(document, message);
+        if (payload) {
+          await webview.postMessage(filterDataMessage(payload));
+        }
       }
     });
   }
@@ -211,6 +236,48 @@ export class XlsxEditorProvider implements vscode.CustomReadonlyEditorProvider<X
     } catch (err) {
       reportStatsFailure(err);
       return { table, stats: undefined };
+    }
+  }
+
+  /**
+   * Filters one sheet of the already-parsed workbook for the webview's filter
+   * row: up to `tablas.maxRows` matching rows plus the exact match count.
+   * Returns `undefined` (nothing to post) when the workbook isn't parsed yet
+   * or the filters were cleared. An unknown or missing sheet yields a failed
+   * filter. Public so an integration test can call it without a webview.
+   * Synchronous, so unlike the other providers it can't be overtaken by a newer
+   * request and keeps no `filterSeq`.
+   */
+  public handleFilter(document: XlsxDocument, message: FilterMessage): FilterPayload | undefined {
+    if (!document.workbook) {
+      return undefined;
+    }
+    const plan = planFilter(message);
+    if (plan.kind === 'cleared') {
+      document.filterRows = undefined;
+      return undefined;
+    }
+    if (plan.kind === 'invalid') {
+      return plan.payload;
+    }
+    try {
+      const worksheet = message.table !== undefined ? document.workbook.getWorksheet(message.table) : undefined;
+      if (!worksheet || message.table === undefined) {
+        return filterPayload(message, { failedReason: FILTER_UNKNOWN_TABLE_REASON });
+      }
+      let table = document.filterRows?.sheet === message.table ? document.filterRows.table : undefined;
+      if (!table) {
+        const loaded = xlsxRowsForFilter(worksheet);
+        if ('failedReason' in loaded) {
+          return filterPayload(message, loaded);
+        }
+        table = loaded;
+        document.filterRows = fitsFilterCache(table) ? { sheet: message.table, table } : undefined;
+      }
+      return filterPayload(message, filterTable(table, plan.specs, getMaxRowsSetting()));
+    } catch (err) {
+      reportFilterFailure(err);
+      return filterPayload(message, { failedReason: FILTER_FAILED_REASON });
     }
   }
 }

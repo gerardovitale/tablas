@@ -6,6 +6,7 @@ out/**
 esbuild.js
 tsconfig.json
 *.map
+BACKLOG.md
 .gitignore
 node_modules/**
 !node_modules/papaparse/**

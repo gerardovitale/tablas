@@ -110,6 +110,25 @@ async function main() {
     'CREATE VIEW label_counts AS SELECT label, COUNT(*) AS n FROM mixed GROUP BY label',
   ]);
 
+  // filter.duckdb -- the shared "filter parity" table (same logical rows as
+  // filter.csv/.parquet/.xlsx/.db; test/unit/filterParity.test.ts asserts
+  // every format filters it identically). Also a DOUBLE column holding whole
+  // numbers, whose DuckDB text form ("10.0") differs from the table cell text
+  // ("10") -- the one documented difference between the SQL and JS engines.
+  await write('filter.duckdb', [
+    'CREATE TABLE items (id INTEGER, name VARCHAR, city VARCHAR, qty INTEGER, price DOUBLE, day VARCHAR)',
+    `INSERT INTO items VALUES
+       (1, 'Alice', 'Rome', 10, 9.5, '2024-01-15'),
+       (2, 'bob', 'Paris', 9, 120.25, '2023-12-31'),
+       (3, '\u00c9mile', 'Oslo', 100, 7.75, '2024-03-01'),
+       (4, 'CAROL', 'rome', NULL, 1000.5, '2024-03-01'),
+       (5, 'Dave', NULL, 5, NULL, NULL),
+       (6, 'Zo\u00eb', 'Lima', 20, 45.5, '2022-07-04'),
+       (7, 'Smith, Jo', 'New York', 1, 0.5, '2024-12-31')`,
+    'CREATE TABLE whole_numbers (n DOUBLE)',
+    'INSERT INTO whole_numbers VALUES (10), (20), (NULL)',
+  ]);
+
   // no-tables.duckdb -- a valid DuckDB database (openable) with zero
   // tables/views left. Distinct from a 0-byte file: this exercises
   // parseDuckdb's "opened fine, nothing to show" branch specifically.

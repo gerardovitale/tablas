@@ -1,7 +1,9 @@
 import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
-import { csvStats, parseCsv } from '../../src/csvParser';
+import { csvFilter, csvRowsForFilter, csvStats, parseCsv } from '../../src/csvParser';
+import { filterLimits, FILTER_TOO_LARGE_REASON, FILTER_UNKNOWN_COLUMN_REASON, resolveFilters } from '../../src/filter';
+import { FILTER_CASES, idsOf } from './filterCases';
 import { statsHooks, statsLimits, STATS_TOO_LARGE_REASON } from '../../src/columnStats';
 
 // Use process.cwd() (always the project root) to locate fixtures regardless
@@ -315,5 +317,71 @@ describe('parseCsv no longer carries stats', () => {
     if (result.success) {
       assert.strictEqual('stats' in result.data, false);
     }
+  });
+});
+
+describe('csvFilter', () => {
+  const raw = fixture('filter.csv');
+
+  function run(filters: Parameters<typeof resolveFilters>[0], maxRows = 100) {
+    const resolved = resolveFilters(filters);
+    if ('errors' in resolved) {
+      assert.fail('unexpected filter error');
+    }
+    return csvFilter(raw, resolved.specs, maxRows);
+  }
+
+  for (const c of FILTER_CASES) {
+    it(c.name, () => {
+      const outcome = run(c.filters);
+      assert.ok(!('failedReason' in outcome), 'failedReason' in outcome ? outcome.failedReason : '');
+      assert.deepStrictEqual(idsOf(outcome.rows), c.ids);
+      assert.strictEqual(outcome.matchCount, c.ids.length);
+    });
+  }
+
+  it('caps the returned rows at maxRows but counts every match', () => {
+    const outcome = run([{ column: 3, text: '>=1' }], 2);
+    assert.ok(!('failedReason' in outcome));
+    assert.strictEqual(outcome.rows.length, 2);
+    assert.strictEqual(outcome.matchCount, 6);
+  });
+
+  it('searches rows beyond tablas.maxRows (the whole file)', () => {
+    const body = Array.from({ length: 50 }, (_, i) => `${i},row${i}`).join('\n');
+    const outcome = csvFilter(`id,label\n${body}\n`, [{ column: 1, filter: { op: 'equals', value: 'row49' } }], 5);
+    assert.ok(!('failedReason' in outcome));
+    assert.deepStrictEqual(outcome.rows, [['49', 'row49']]);
+  });
+
+  it('refuses a filter on a column the file does not have', () => {
+    const outcome = csvFilter(raw, [{ column: 99, filter: { op: 'contains', value: 'x' } }], 10);
+    assert.deepStrictEqual(outcome, { failedReason: FILTER_UNKNOWN_COLUMN_REASON });
+  });
+
+  it('refuses any filter on a blank file', () => {
+    const outcome = csvFilter('', [{ column: 0, filter: { op: 'contains', value: 'x' } }], 10);
+    assert.deepStrictEqual(outcome, { failedReason: FILTER_UNKNOWN_COLUMN_REASON });
+  });
+
+  it('refuses a file over the cell cap, before filtering', () => {
+    const original = filterLimits.maxCells;
+    filterLimits.maxCells = 10;
+    try {
+      const rows = csvRowsForFilter(raw);
+      assert.deepStrictEqual(rows, { failedReason: FILTER_TOO_LARGE_REASON });
+    } finally {
+      filterLimits.maxCells = original;
+    }
+  });
+
+  it('exposes the same rows the table shows, header excluded', () => {
+    const rows = csvRowsForFilter(raw);
+    assert.ok(!('failedReason' in rows));
+    assert.strictEqual(rows.columnCount, 6);
+    assert.strictEqual(rows.rows.length, 7);
+    const parsed = parseCsv(raw);
+    assert.ok(parsed.success);
+    assert.deepStrictEqual(rows.rows, parsed.data.rows);
   });
 });

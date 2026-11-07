@@ -5,6 +5,8 @@ import type { TablasApi } from '../../src/extension';
 import type { MultiTableParseOutcome } from '../../src/tableData';
 import { SqliteEditorProvider } from '../../src/sqliteEditorProvider';
 import { openSqliteDatabase } from '../../src/sqliteParser';
+import { idsOf } from '../unit/filterCases';
+import { FILTER_UNKNOWN_TABLE_REASON } from '../../src/filter';
 
 const fixturesDir = path.join(process.cwd(), 'test', 'fixtures');
 
@@ -221,6 +223,95 @@ describe('SqliteEditorProvider Integration', () => {
         const document = provider.openCustomDocument(fixtureUri('multi-table.db'));
         assert.strictEqual(await provider.handleGetStats(document, 'orders'), undefined);
       });
+    });
+  });
+
+  describe('handleFilter (whole-table filtering, no webview involved)', () => {
+    async function openDocumentWithHandle(name: string) {
+      const provider = new SqliteEditorProvider({ extensionPath: process.cwd() } as vscode.ExtensionContext);
+      const uri = fixtureUri(name);
+      const document = provider.openCustomDocument(uri);
+      const opened = await openSqliteDatabase(await vscode.workspace.fs.readFile(uri));
+      assert.ok(!('error' in opened), `fixture ${name} should open cleanly`);
+      if (!('error' in opened)) {
+        document.handle = opened;
+      }
+      return { provider, document };
+    }
+
+    const request = (seq: number, table: string | undefined, ...filters: Array<{ column: number; text: string }>) => ({
+      type: 'filter' as const,
+      seq,
+      ...(table !== undefined && { table }),
+      filters,
+    });
+
+    it('filters the requested table, echoing seq and table', async () => {
+      const { provider, document } = await openDocumentWithHandle('filter.db');
+      try {
+        const payload = await provider.handleFilter(document, request(3, 'items', { column: 2, text: 'rome' }));
+        assert.ok(payload && payload.rows);
+        assert.strictEqual(payload.seq, 3);
+        assert.strictEqual(payload.table, 'items');
+        assert.strictEqual(payload.matchCount, 2);
+        assert.deepStrictEqual(idsOf(payload.rows), [1, 4]);
+      } finally {
+        document.dispose();
+      }
+    });
+
+    it('answers invalid filter text with errors and runs nothing', async () => {
+      const { provider, document } = await openDocumentWithHandle('filter.db');
+      try {
+        const payload = await provider.handleFilter(document, request(2, 'items', { column: 3, text: '<=' }));
+        assert.strictEqual(payload?.errors?.[0].column, 3);
+        assert.ok(!payload?.rows);
+      } finally {
+        document.dispose();
+      }
+    });
+
+    it('sends no reply when the filters were cleared', async () => {
+      const { provider, document } = await openDocumentWithHandle('filter.db');
+      try {
+        assert.strictEqual(await provider.handleFilter(document, request(2, 'items')), undefined);
+        assert.strictEqual(await provider.handleFilter(document, request(3, 'items', { column: 1, text: '' })), undefined);
+      } finally {
+        document.dispose();
+      }
+    });
+
+    it('fails cleanly for an unknown table, or none at all', async () => {
+      const { provider, document } = await openDocumentWithHandle('filter.db');
+      try {
+        const unknown = await provider.handleFilter(document, request(1, 'nope', { column: 0, text: '1' }));
+        assert.deepStrictEqual(unknown, { seq: 1, table: 'nope', failedReason: FILTER_UNKNOWN_TABLE_REASON });
+        const missing = await provider.handleFilter(document, request(2, undefined, { column: 0, text: '1' }));
+        assert.deepStrictEqual(missing, { seq: 2, failedReason: FILTER_UNKNOWN_TABLE_REASON });
+      } finally {
+        document.dispose();
+      }
+    });
+
+    it('drops a request that a newer one overtook while it was queued', async () => {
+      const { provider, document } = await openDocumentWithHandle('filter.db');
+      try {
+        const [stale, fresh] = await Promise.all([
+          provider.handleFilter(document, request(1, 'items', { column: 2, text: 'rome' })),
+          provider.handleFilter(document, request(2, 'items', { column: 2, text: 'oslo' })),
+        ]);
+        assert.strictEqual(stale, undefined);
+        assert.strictEqual(fresh?.seq, 2);
+        assert.deepStrictEqual(idsOf(fresh?.rows ?? []), [3]);
+      } finally {
+        document.dispose();
+      }
+    });
+
+    it('is a no-op returning undefined when the database is not open yet', async () => {
+      const provider = new SqliteEditorProvider({ extensionPath: process.cwd() } as vscode.ExtensionContext);
+      const document = provider.openCustomDocument(fixtureUri('filter.db'));
+      assert.strictEqual(await provider.handleFilter(document, request(1, 'items', { column: 0, text: '1' })), undefined);
     });
   });
 });

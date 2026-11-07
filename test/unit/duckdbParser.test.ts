@@ -6,6 +6,7 @@ import * as path from 'path';
 import { DuckDBInstance } from '@duckdb/node-api';
 import { statsHooks, statsLimits, STATS_TIMED_OUT_REASON } from '../../src/columnStats';
 import {
+  duckdbTableFilter,
   duckdbTableStats,
   listDuckdbTables,
   openDuckdbDatabase,
@@ -15,6 +16,16 @@ import {
   stringifyDuckdbCell,
   type DuckdbHandle,
 } from '../../src/duckdbParser';
+import {
+  filterLimits,
+  filterStringRows,
+  FILTER_FAILED_REASON,
+  FILTER_TIMED_OUT_REASON,
+  FILTER_UNKNOWN_COLUMN_REASON,
+  resolveFilters,
+  type ColumnFilterSpec,
+} from '../../src/filter';
+import { FILTER_CASES, idsOf } from './filterCases';
 
 // Use process.cwd() (always the project root) to locate fixtures regardless
 // of whether we're running via ts-node or compiled JS in out/.
@@ -699,5 +710,223 @@ describe('runExclusive', () => {
       a.close();
       b.close();
     }
+  });
+});
+
+describe('duckdbTableFilter', () => {
+  async function withHandle<T>(name: string, fn: (handle: DuckdbHandle) => Promise<T>): Promise<T> {
+    const handle = await openFixture(name);
+    try {
+      return await fn(handle);
+    } finally {
+      handle.close();
+    }
+  }
+
+  /** Builds a throwaway database (openDuckdbDatabase is read-only, so it needs its own writable instance). */
+  async function withInlineDb<T>(statements: string[], fn: (handle: DuckdbHandle) => Promise<T>): Promise<T> {
+    const buildPath = path.join(os.tmpdir(), `tablas-filter-test-${process.pid}-${Date.now()}.duckdb`);
+    const instance = await DuckDBInstance.create(buildPath);
+    const connection = await instance.connect();
+    try {
+      for (const sql of statements) {
+        await connection.run(sql);
+      }
+    } finally {
+      connection.closeSync();
+      instance.closeSync();
+    }
+    const bytes = new Uint8Array(fsSync.readFileSync(buildPath));
+    fsSync.unlinkSync(buildPath);
+    const opened = await openDuckdbDatabase(bytes);
+    if ('error' in opened) {
+      throw new Error(opened.error.message);
+    }
+    try {
+      return await fn(opened);
+    } finally {
+      opened.close();
+    }
+  }
+
+  function specsOf(filters: Parameters<typeof resolveFilters>[0]): ColumnFilterSpec[] {
+    const resolved = resolveFilters(filters);
+    if ('errors' in resolved) {
+      assert.fail('unexpected filter error');
+    }
+    return resolved.specs;
+  }
+
+  async function silenced<T>(fn: () => Promise<T>): Promise<T> {
+    const original = statsHooks.log;
+    statsHooks.log = () => undefined;
+    try {
+      return await fn();
+    } finally {
+      statsHooks.log = original;
+    }
+  }
+
+  for (const c of FILTER_CASES) {
+    it(c.name, () =>
+      withHandle('filter.duckdb', async (handle) => {
+        const outcome = await duckdbTableFilter(handle, 'items', specsOf(c.filters), 100);
+        assert.ok(!('failedReason' in outcome), 'failedReason' in outcome ? outcome.failedReason : '');
+        assert.deepStrictEqual(idsOf(outcome.rows), c.ids);
+        assert.strictEqual(outcome.matchCount, c.ids.length);
+      }));
+  }
+
+  it('caps the returned rows at maxRows but counts every match', () =>
+    withHandle('filter.duckdb', async (handle) => {
+      const outcome = await duckdbTableFilter(handle, 'items', specsOf([{ column: 3, text: '>=1' }]), 2);
+      assert.ok(!('failedReason' in outcome));
+      assert.strictEqual(outcome.rows.length, 2);
+      assert.strictEqual(outcome.matchCount, 6);
+    }));
+
+  it('returns the same cell text as readDuckdbTable', () =>
+    withHandle('filter.duckdb', async (handle) => {
+      const outcome = await duckdbTableFilter(handle, 'items', specsOf([{ column: 1, text: 'e' }]), 100);
+      assert.ok(!('failedReason' in outcome));
+      const all = (await readDuckdbTable(handle, 'items')).rows;
+      assert.deepStrictEqual(outcome.rows, all.filter((row) => row[1].toLowerCase().includes('e')));
+    }));
+
+  it('finds a whole-number DOUBLE by the text the table shows ("10", not "10.0")', () =>
+    withHandle('filter.duckdb', async (handle) => {
+      const shown = (await readDuckdbTable(handle, 'whole_numbers')).rows.map((r) => r[0]);
+      assert.deepStrictEqual(shown, ['10', '20', '']);
+      const equals = await duckdbTableFilter(handle, 'whole_numbers', specsOf([{ column: 0, text: '=10' }]), 10);
+      assert.ok(!('failedReason' in equals));
+      assert.deepStrictEqual(equals.rows, [['10']]);
+      const contains = await duckdbTableFilter(handle, 'whole_numbers', specsOf([{ column: 0, text: '0' }]), 10);
+      assert.ok(!('failedReason' in contains));
+      assert.strictEqual(contains.matchCount, 2);
+    }));
+
+  it('treats SQL metacharacters in a filter as plain text', () =>
+    withHandle('filter.duckdb', async (handle) => {
+      const evil = `'; DROP TABLE items; --`;
+      const outcome = await duckdbTableFilter(handle, 'items', specsOf([{ column: 1, text: evil }]), 100);
+      assert.ok(!('failedReason' in outcome));
+      assert.strictEqual(outcome.matchCount, 0);
+      assert.strictEqual((await readDuckdbTable(handle, 'items')).rowCount, 7);
+    }));
+
+  it('refuses a filter on a column the table does not have', () =>
+    withHandle('filter.duckdb', async (handle) => {
+      const outcome = await duckdbTableFilter(handle, 'items', specsOf([{ column: 99, text: 'x' }]), 100);
+      assert.deepStrictEqual(outcome, { failedReason: FILTER_UNKNOWN_COLUMN_REASON });
+    }));
+
+  it('reports an unknown table as a failed filter, without throwing', () =>
+    silenced(() =>
+      withHandle('filter.duckdb', async (handle) => {
+        const outcome = await duckdbTableFilter(handle, 'no_such_table', specsOf([{ column: 0, text: '1' }]), 100);
+        assert.deepStrictEqual(outcome, { failedReason: FILTER_FAILED_REASON });
+      })));
+
+  it('gives the same answer as the JS engine over the displayed text, for every column type', () =>
+    withInlineDb(
+      [
+        'CREATE TABLE t (label VARCHAR, dec DECIMAL(10,2), d DATE, f DOUBLE, flag BOOLEAN, ts TIMESTAMP, big BIGINT)',
+        `INSERT INTO t VALUES
+           ('10', 1234.50, DATE '2024-01-15', 'NaN', true, TIMESTAMP '2024-01-15 10:30:00', 9007199254740993),
+           (' 7 ', 5.25, DATE '2023-01-01', 'Infinity', false, TIMESTAMP '2023-01-01 00:00:00', -5),
+           ('abc', NULL, NULL, 2.5, NULL, NULL, NULL),
+           ('1e3', 0.5, DATE '2025-06-30', 10, true, TIMESTAMP '2025-06-30 23:59:59', 0),
+           ('', -3.10, DATE '2024-01-15', -0.5, false, TIMESTAMP '2024-01-15 10:30:00', 12),
+           ('ÉCOLE', 100, DATE '2022-02-02', '-Infinity', NULL, NULL, 7)`,
+      ],
+      async (handle) => {
+        const table = await readDuckdbTable(handle, 't');
+        const texts: Array<[number, string[]]> = [
+          [0, ['>5', '<=10', '<9999', '>=abc', '=10', '!=10', '=', '!=', 'é', '!1', '= 7 ', '\\1']],
+          [1, ['>1000', '<=5.25', '=1234.50', '>0', '<0', '5', '!.']],
+          [2, ['>=2024-01-01', '<2024-01-01', '>5', '=', '!=', '2024', '=2024-01-15', '<=2023-01-01']],
+          [3, ['>2', '<=10', '=10', '=2.5', 'nan', 'inf', '>-1', '=-0.5', '!5']],
+          [4, ['=true', 'false', '=', '!=', '!true']],
+          [5, ['>=2024-01-15 10:30:00', '<2024-01-01', '2024', '=', '>5']],
+          [6, ['>0', '<=7', '=9007199254740993', '9007', '=', '<-1']],
+        ];
+        for (const [column, filters] of texts) {
+          for (const text of filters) {
+            const specs = specsOf([{ column, text }]);
+            const sql = await duckdbTableFilter(handle, 't', specs, 100);
+            assert.ok(!('failedReason' in sql), `${JSON.stringify(text)}: ${'failedReason' in sql ? sql.failedReason : ''}`);
+            const js = filterStringRows(table.rows, specs, 100);
+            assert.deepStrictEqual(sql.rows, js.rows, `column ${column} ${JSON.stringify(text)}`);
+            assert.strictEqual(sql.matchCount, js.matchCount, `column ${column} ${JSON.stringify(text)}`);
+          }
+        }
+      }
+    ));
+
+  describe('time budget', () => {
+    /** A stand-in handle whose filter queries (the only ones renaming columns to c0..) hang until interrupt(). */
+    function hangingFilterHandle(handle: DuckdbHandle) {
+      let rejectPending: ((err: Error) => void) | undefined;
+      const events: string[] = [];
+      const connection = new Proxy(handle.connection, {
+        get(target, prop) {
+          if (prop === 'runAndReadAll') {
+            return (sql: string, ...rest: unknown[]) => {
+              if (sql.includes(' AS s(c0')) {
+                events.push('filter-start');
+                return new Promise((_, reject) => {
+                  rejectPending = reject;
+                });
+              }
+              events.push(sql.startsWith('SELECT COUNT(*) FROM') ? 'read-start' : 'other');
+              return (target.runAndReadAll as (...args: unknown[]) => Promise<unknown>)(sql, ...rest);
+            };
+          }
+          if (prop === 'interrupt') {
+            return () => {
+              events.push('interrupt');
+              rejectPending?.(new Error('INTERRUPT Error'));
+            };
+          }
+          const value = Reflect.get(target, prop);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const hanging: DuckdbHandle = { connection, tempFilePath: handle.tempFilePath, close: handle.close };
+      return { hanging, events };
+    }
+
+    async function withShortBudget<T>(fn: () => Promise<T>): Promise<T> {
+      const original = filterLimits.duckdbTimeoutMs;
+      filterLimits.duckdbTimeoutMs = 10;
+      try {
+        return await fn();
+      } finally {
+        filterLimits.duckdbTimeoutMs = original;
+      }
+    }
+
+    it('gives up with a reason when the filter query exceeds it', () =>
+      withShortBudget(() =>
+        withHandle('filter.duckdb', async (handle) => {
+          const { hanging, events } = hangingFilterHandle(handle);
+          const outcome = await duckdbTableFilter(hanging, 'items', specsOf([{ column: 1, text: 'a' }]), 100);
+          assert.deepStrictEqual(outcome, { failedReason: FILTER_TIMED_OUT_REASON });
+          assert.ok(events.includes('interrupt'));
+          // the table itself is unaffected
+          assert.strictEqual((await readDuckdbTable(hanging, 'items')).rowCount, 7);
+        })));
+
+    it('interrupts only the filter query: a read queued behind it waits, then completes', () =>
+      withShortBudget(() =>
+        withHandle('filter.duckdb', async (handle) => {
+          const { hanging, events } = hangingFilterHandle(handle);
+          const filtering = duckdbTableFilter(hanging, 'items', specsOf([{ column: 1, text: 'a' }]), 100);
+          const reading = readDuckdbTable(hanging, 'items'); // queued behind the hanging filter
+          const [outcome, read] = await Promise.all([filtering, reading]);
+          assert.deepStrictEqual(outcome, { failedReason: FILTER_TIMED_OUT_REASON });
+          assert.strictEqual(read.rowCount, 7, 'the queued read must not be killed by the interrupt');
+          assert.ok(events.indexOf('read-start') > events.indexOf('interrupt'), events.join(','));
+        })));
   });
 });

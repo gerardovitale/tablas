@@ -82,6 +82,21 @@ async function main() {
     row.getCell(3).value = { formula: 'SUM(1,2,3)', result: 6 };
   });
 
+  // filter.xlsx -- the shared "filter parity" table (same logical rows as
+  // filter.csv/.parquet/.db/.duckdb; test/unit/filterParity.test.ts asserts
+  // every format filters it identically).
+  await write('filter.xlsx', async (workbook) => {
+    const sheet = workbook.addWorksheet('items');
+    sheet.addRow(['id', 'name', 'city', 'qty', 'price', 'day']);
+    sheet.addRow([1, 'Alice', 'Rome', 10, 9.5, '2024-01-15']);
+    sheet.addRow([2, 'bob', 'Paris', 9, 120.25, '2023-12-31']);
+    sheet.addRow([3, '\u00c9mile', 'Oslo', 100, 7.75, '2024-03-01']);
+    sheet.addRow([4, 'CAROL', 'rome', null, 1000.5, '2024-03-01']);
+    sheet.addRow([5, 'Dave', null, 5, null, null]);
+    sheet.addRow([6, 'Zo\u00eb', 'Lima', 20, 45.5, '2022-07-04']);
+    sheet.addRow([7, 'Smith, Jo', 'New York', 1, 0.5, '2024-12-31']);
+  });
+
   // corrupt.xlsx -- not a ZIP/xlsx file at all, to exercise the magic-byte
   // sniff in openXlsxWorkbook.
   const corruptPath = path.join(FIXTURES_DIR, 'corrupt.xlsx');

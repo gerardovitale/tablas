@@ -3,7 +3,9 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { Workbook, type Worksheet } from 'exceljs';
 import { statsHooks, statsLimits, STATS_TOO_LARGE_REASON } from '../../src/columnStats';
-import { listXlsxSheets, openXlsxWorkbook, parseXlsx, readXlsxSheet, xlsxSheetStats } from '../../src/xlsxParser';
+import { listXlsxSheets, openXlsxWorkbook, parseXlsx, readXlsxSheet, xlsxRowsForFilter, xlsxSheetFilter, xlsxSheetStats } from '../../src/xlsxParser';
+import { filterLimits, FILTER_TOO_LARGE_REASON, FILTER_UNKNOWN_COLUMN_REASON, resolveFilters } from '../../src/filter';
+import { FILTER_CASES, idsOf } from './filterCases';
 import type { TableStats } from '../../src/tableData';
 
 // Use process.cwd() (always the project root) to locate fixtures regardless
@@ -416,5 +418,63 @@ describe('xlsxSheetStats', () => {
         statsHooks.onError = original;
       }
     });
+  });
+});
+
+describe('xlsxSheetFilter', () => {
+  async function sheet(name = 'filter.xlsx'): Promise<Worksheet> {
+    const opened = await openXlsxWorkbook(await fixtureBytes(name));
+    if ('error' in opened) {
+      assert.fail(opened.error.message);
+    }
+    return opened.workbook.worksheets[0];
+  }
+
+  for (const c of FILTER_CASES) {
+    it(c.name, async () => {
+      const resolved = resolveFilters(c.filters);
+      if ('errors' in resolved) {
+        assert.fail('unexpected filter error');
+      }
+      const outcome = xlsxSheetFilter(await sheet(), resolved.specs, 100);
+      assert.ok(!('failedReason' in outcome), 'failedReason' in outcome ? outcome.failedReason : '');
+      assert.deepStrictEqual(idsOf(outcome.rows), c.ids);
+      assert.strictEqual(outcome.matchCount, c.ids.length);
+    });
+  }
+
+  it('caps the returned rows at maxRows but counts every match', async () => {
+    const outcome = xlsxSheetFilter(await sheet(), [{ column: 3, filter: { op: 'gte', value: '1' } }], 2);
+    assert.ok(!('failedReason' in outcome));
+    assert.strictEqual(outcome.rows.length, 2);
+    assert.strictEqual(outcome.matchCount, 6);
+  });
+
+  it('filters the text the table shows (dates formatted, formula results resolved)', async () => {
+    const ws = await sheet('dates-and-formulas.xlsx');
+    const shown = readXlsxSheet(ws).rows[0];
+    const outcome = xlsxSheetFilter(ws, [{ column: 2, filter: { op: 'equals', value: shown[2] } }], 10);
+    assert.ok(!('failedReason' in outcome));
+    assert.strictEqual(outcome.matchCount, 1);
+  });
+
+  it('refuses a filter on a column the sheet does not have', async () => {
+    const outcome = xlsxSheetFilter(await sheet(), [{ column: 99, filter: { op: 'contains', value: 'x' } }], 10);
+    assert.deepStrictEqual(outcome, { failedReason: FILTER_UNKNOWN_COLUMN_REASON });
+  });
+
+  it('refuses a sheet over the cell cap, before reading any cell', async () => {
+    const original = filterLimits.maxCells;
+    filterLimits.maxCells = 10;
+    try {
+      assert.deepStrictEqual(xlsxRowsForFilter(await sheet()), { failedReason: FILTER_TOO_LARGE_REASON });
+    } finally {
+      filterLimits.maxCells = original;
+    }
+  });
+
+  it('yields no columns for an empty sheet', () => {
+    const empty = new Workbook().addWorksheet('empty');
+    assert.deepStrictEqual(xlsxRowsForFilter(empty), { columnCount: 0, rows: [] });
   });
 });

@@ -5,6 +5,8 @@ import type { TablasApi } from '../../src/extension';
 import type { MultiTableParseOutcome } from '../../src/tableData';
 import { XlsxEditorProvider } from '../../src/xlsxEditorProvider';
 import { openXlsxWorkbook } from '../../src/xlsxParser';
+import { filterLimits, FILTER_UNKNOWN_TABLE_REASON } from '../../src/filter';
+import { idsOf } from '../unit/filterCases';
 
 const fixturesDir = path.join(process.cwd(), 'test', 'fixtures');
 
@@ -185,6 +187,90 @@ describe('XlsxEditorProvider Integration', () => {
         const document = provider.openCustomDocument(fixtureUri('multi-sheet.xlsx'));
         assert.strictEqual(await provider.handleGetStats(document, 'orders'), undefined);
       });
+    });
+  });
+
+  describe('handleFilter (whole-sheet filtering, no webview involved)', () => {
+    async function openDocumentWithWorkbook(name: string) {
+      const provider = new XlsxEditorProvider({ extensionPath: process.cwd() } as vscode.ExtensionContext);
+      const uri = fixtureUri(name);
+      const document = provider.openCustomDocument(uri);
+      const opened = await openXlsxWorkbook(await vscode.workspace.fs.readFile(uri));
+      assert.ok(!('error' in opened), `fixture ${name} should open cleanly`);
+      if (!('error' in opened)) {
+        document.workbook = opened.workbook;
+      }
+      return { provider, document };
+    }
+
+    const request = (seq: number, table: string | undefined, ...filters: Array<{ column: number; text: string }>) => ({
+      type: 'filter' as const,
+      seq,
+      ...(table !== undefined && { table }),
+      filters,
+    });
+
+    it('filters the requested sheet, echoing seq and table', async () => {
+      const { provider, document } = await openDocumentWithWorkbook('filter.xlsx');
+      const payload = provider.handleFilter(document, request(3, 'items', { column: 2, text: 'rome' }));
+      assert.ok(payload && payload.rows);
+      assert.strictEqual(payload.seq, 3);
+      assert.strictEqual(payload.table, 'items');
+      assert.strictEqual(payload.matchCount, 2);
+      assert.deepStrictEqual(idsOf(payload.rows), [1, 4]);
+    });
+
+    it('keeps one sheet\'s rows while filtering, swaps them on a sheet switch, and releases them when cleared', async () => {
+      const { provider, document } = await openDocumentWithWorkbook('multi-sheet.xlsx');
+      provider.handleFilter(document, request(1, 'customers', { column: 1, text: 'acme' }));
+      const customers = document.filterRows;
+      assert.strictEqual(customers?.sheet, 'customers');
+      provider.handleFilter(document, request(2, 'customers', { column: 1, text: 'globex' }));
+      assert.strictEqual(document.filterRows, customers, 'the next keystroke reuses the same rows');
+      const orders = provider.handleFilter(document, request(3, 'orders', { column: 2, text: '>10' }));
+      assert.strictEqual(document.filterRows?.sheet, 'orders');
+      assert.strictEqual(orders?.matchCount, 2);
+      assert.strictEqual(provider.handleFilter(document, request(4, 'orders')), undefined);
+      assert.strictEqual(document.filterRows, undefined);
+    });
+
+    it('does not keep a sheet over the cache limit, but still filters it', async () => {
+      const { provider, document } = await openDocumentWithWorkbook('filter.xlsx');
+      const original = filterLimits.maxCachedCells;
+      filterLimits.maxCachedCells = 5;
+      try {
+        const payload = provider.handleFilter(document, request(1, 'items', { column: 2, text: 'rome' }));
+        assert.strictEqual(payload?.matchCount, 2);
+        assert.strictEqual(document.filterRows, undefined);
+      } finally {
+        filterLimits.maxCachedCells = original;
+      }
+    });
+
+    it('answers invalid filter text with errors and runs nothing', async () => {
+      const { provider, document } = await openDocumentWithWorkbook('filter.xlsx');
+      const payload = provider.handleFilter(document, request(2, 'items', { column: 3, text: '>=' }));
+      assert.strictEqual(payload?.errors?.[0].column, 3);
+      assert.ok(!payload?.rows);
+    });
+
+    it('fails cleanly for an unknown sheet, or none at all', async () => {
+      const { provider, document } = await openDocumentWithWorkbook('filter.xlsx');
+      assert.deepStrictEqual(provider.handleFilter(document, request(1, 'nope', { column: 0, text: '1' })), {
+        seq: 1,
+        table: 'nope',
+        failedReason: FILTER_UNKNOWN_TABLE_REASON,
+      });
+      assert.deepStrictEqual(provider.handleFilter(document, request(2, undefined, { column: 0, text: '1' })), {
+        seq: 2,
+        failedReason: FILTER_UNKNOWN_TABLE_REASON,
+      });
+    });
+
+    it('is a no-op returning undefined when the workbook is not parsed yet', () => {
+      const provider = new XlsxEditorProvider({ extensionPath: process.cwd() } as vscode.ExtensionContext);
+      const document = provider.openCustomDocument(fixtureUri('filter.xlsx'));
+      assert.strictEqual(provider.handleFilter(document, request(1, 'items', { column: 0, text: '1' })), undefined);
     });
   });
 });

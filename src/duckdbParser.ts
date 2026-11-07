@@ -7,7 +7,9 @@ import {
   DOUBLE,
   DuckDBInstance,
   DuckDBTypeId,
+  VARCHAR,
   type DuckDBConnection,
+  type DuckDBType,
   type Json,
 } from '@duckdb/node-api';
 import {
@@ -20,6 +22,19 @@ import {
   STATS_TIMED_OUT_REASON,
   statsLimits,
 } from './columnStats';
+import {
+  hasUnknownColumn,
+  filterLimits,
+  NUMBER_PATTERN,
+  parseNumber,
+  FILTER_FAILED_REASON,
+  FILTER_TIMED_OUT_REASON,
+  FILTER_UNKNOWN_COLUMN_REASON,
+  reportFilterFailure,
+  type ColumnFilterSpec,
+  type CompareOp,
+  type FilterOutcome,
+} from './filter';
 import {
   clampMaxRows,
   type ColumnKind,
@@ -403,6 +418,154 @@ export function duckdbTableStats(handle: DuckdbHandle, tableName: string): Promi
     }
     statsCache.store(handle, tableName, stats);
     return stats;
+  });
+}
+
+// ── Column filtering ────────────────────────────────────────────────────
+
+const COMPARE_SQL: Record<CompareOp, string> = { gt: '>', gte: '>=', lt: '<', lte: '<=' };
+
+/**
+ * SQL for a cell's text, matching what the table shows. Whole-number
+ * FLOAT/DOUBLE values are printed without ".0" (DuckDB's CAST prints "10.0",
+ * the table shows "10"), so `=10` finds them. Known remaining differences,
+ * where DuckDB's own text form is used: non-whole FLOAT (32-bit) values, and
+ * nested (LIST/STRUCT/MAP) and BLOB columns; DOUBLEs of magnitude >= 1e15 or
+ * < 1e-6 (DuckDB prints `1e+15`, JS prints `1000000000000000`). Numeric
+ * comparisons are not affected. Also unlike JS, SQL `trim()` strips only
+ * spaces, so tab/newline/NBSP padding is not treated as blank.
+ */
+function filterTextExpr(column: string, typeId: DuckDBTypeId): string {
+  if (typeId === DuckDBTypeId.FLOAT || typeId === DuckDBTypeId.DOUBLE) {
+    const x = `CAST(${column} AS DOUBLE)`;
+    return (
+      `CASE WHEN ${column} IS NULL THEN '' ` +
+      `WHEN isfinite(${x}) AND ${x} = floor(${x}) AND abs(${x}) < 1e15 THEN CAST(CAST(${x} AS BIGINT) AS VARCHAR) ` +
+      `ELSE CAST(${column} AS VARCHAR) END`
+    );
+  }
+  return `COALESCE(CAST(${column} AS VARCHAR), '')`;
+}
+
+/**
+ * One filter as a SQL boolean. Every user-supplied value is appended to
+ * `params`/`types` (positionally, in the order its `?` appears) -- none is
+ * spliced into the SQL text. Mirrors `compileCellPredicate` in filter.ts.
+ */
+function filterPredicateSql(
+  spec: ColumnFilterSpec,
+  typeId: DuckDBTypeId,
+  params: Array<string | number>,
+  types: DuckDBType[]
+): string {
+  const column = `c${spec.column}`;
+  const text = filterTextExpr(column, typeId);
+  const { op, value } = spec.filter;
+  switch (op) {
+    case 'contains':
+    case 'notContains':
+      params.push(value.toLowerCase());
+      types.push(VARCHAR);
+      return `${op === 'notContains' ? 'NOT ' : ''}contains(lower(${text}), ?)`;
+    case 'equals':
+    case 'notEquals':
+      params.push(value);
+      types.push(VARCHAR);
+      return `${text} ${op === 'equals' ? '=' : '<>'} ?`;
+    case 'empty':
+      return `trim(${text}) = ''`;
+    case 'notEmpty':
+      return `trim(${text}) <> ''`;
+    default: {
+      const symbol = COMPARE_SQL[op];
+      const operand = parseNumber(value);
+      if (operand === undefined) {
+        // Text compare (ISO dates and the like); empty cells never match.
+        params.push(value);
+        types.push(VARCHAR);
+        return `(trim(${text}) <> '' AND ${text} ${symbol} ?)`;
+      }
+      const kind = duckdbKind(typeId);
+      if (kind === 'integer' || kind === 'float') {
+        const x = `CAST(${column} AS DOUBLE)`;
+        params.push(operand);
+        types.push(DOUBLE);
+        return `(isfinite(${x}) AND ${x} ${symbol} ?)`;
+      }
+      // Any other column: only cells whose text is a number take part.
+      const trimmed = `trim(${text})`;
+      const cast = `TRY_CAST(${trimmed} AS DOUBLE)`;
+      params.push(NUMBER_PATTERN, operand);
+      types.push(VARCHAR, DOUBLE);
+      return `(regexp_full_match(${trimmed}, ?) AND isfinite(${cast}) AND ${cast} ${symbol} ?)`;
+    }
+  }
+}
+
+/**
+ * Filters one table/view across all of its rows (regardless of
+ * `tablas.maxRows`) with a native SQL `WHERE`: up to `maxRows` matching rows
+ * plus the exact match count (two queries, one `COUNT(*)` and one `LIMIT`).
+ * Runs under `runExclusive` with the same wall-clock budget mechanism as
+ * stats (`filterLimits.duckdbTimeoutMs`, enforced with `interrupt()`); hitting
+ * it yields a `failedReason`. Never throws.
+ *
+ * Columns are renamed to `c0..cN` (`FROM "t" AS s(c0, ...)`) so the SQL never
+ * depends on user-visible names. See `filterTextExpr` for where the text DuckDB
+ * filters on can differ from the table's cell text.
+ */
+export function duckdbTableFilter(
+  handle: DuckdbHandle,
+  tableName: string,
+  specs: readonly ColumnFilterSpec[],
+  maxRows: number
+): Promise<FilterOutcome> {
+  return runExclusive(handle, async (): Promise<FilterOutcome> => {
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      handle.connection.interrupt();
+    }, filterLimits.duckdbTimeoutMs);
+    try {
+      const quotedTable = quoteIdentifier(tableName);
+      const schemaReader = await handle.connection.runAndReadAll(`SELECT * FROM ${quotedTable} LIMIT 0`);
+      const headers = schemaReader.columnNames();
+      if (headers.length === 0 || hasUnknownColumn(specs, headers.length)) {
+        return { failedReason: FILTER_UNKNOWN_COLUMN_REASON };
+      }
+      const typeIds = headers.map((_, i) => schemaReader.columnTypeId(i));
+
+      const params: Array<string | number> = [];
+      const types: DuckDBType[] = [];
+      const where = specs.map((spec) => filterPredicateSql(spec, typeIds[spec.column], params, types)).join(' AND ');
+      const aliases = headers.map((_, i) => `c${i}`).join(', ');
+      const from = `${quotedTable} AS s(${aliases})${where ? ` WHERE ${where}` : ''}`;
+
+      const countReader = await handle.connection.runAndReadAll(
+        `SELECT COUNT(*) FROM ${from}`,
+        params,
+        types
+      );
+      const matchCount = Number(countReader.getRowsJson()[0]?.[0] ?? 0);
+      if (matchCount === 0) {
+        return { rows: [], matchCount };
+      }
+      const limit = clampMaxRows(maxRows);
+      const rowsReader = await handle.connection.runAndReadAll(
+        `SELECT * FROM ${from}${limit !== undefined && Number.isFinite(limit) ? ` LIMIT ${limit}` : ''}`,
+        params,
+        types
+      );
+      return { rows: rowsReader.getRowsJson().map((row) => row.map(stringifyDuckdbCell)), matchCount };
+    } catch (err) {
+      if (timedOut) {
+        return { failedReason: FILTER_TIMED_OUT_REASON };
+      }
+      reportFilterFailure(err);
+      return { failedReason: FILTER_FAILED_REASON };
+    } finally {
+      clearTimeout(timer);
+    }
   });
 }
 

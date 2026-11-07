@@ -140,7 +140,7 @@ describe('webview main.js rendering', () => {
     });
 
     const app = dom.window.document.getElementById('app')!;
-    const headerCells = Array.from(app.querySelectorAll('thead th')).map((th) => th.textContent);
+    const headerCells = Array.from(app.querySelectorAll('thead tr:first-child th')).map((th) => th.textContent);
     assert.deepStrictEqual(headerCells, ['#', 'name', 'age']);
 
     const bodyRows = app.querySelectorAll('tbody tr');
@@ -1285,5 +1285,743 @@ describe('webview main.js statistics', () => {
     const dataHeaders = Array.from(doc(dom).querySelectorAll('#csv-table thead .col-name')).map((n) => n.textContent);
     assert.deepStrictEqual(dataHeaders, ['n', 'label']);
     assert.strictEqual(doc(dom).querySelectorAll('#csv-table tbody tr').length, 2);
+  });
+});
+
+describe('webview main.js column filtering', () => {
+  afterEach(() => {
+    webviewGlobal.window = undefined;
+    webviewGlobal.document = undefined;
+    webviewGlobal.acquireVsCodeApi = undefined;
+  });
+
+  const peopleStats: TableStats = {
+    columns: [
+      { type: 'text', nullCount: 0, distinctCount: 3, min: 'Alice', max: 'Carol' },
+      { type: 'text', nullCount: 0, distinctCount: 3, min: 'Paris', max: 'rome' },
+    ],
+  };
+
+  function people(overrides: Partial<ParsedTable> = {}): ParsedTable {
+    return {
+      headers: ['name', 'city'],
+      rows: [
+        ['Alice', 'Rome'],
+        ['Bob', 'Paris'],
+        ['Carol', 'rome'],
+      ],
+      rowCount: 3,
+      columnCount: 2,
+      ...overrides,
+    };
+  }
+
+  const doc = (dom: JSDOM) => dom.window.document;
+  const inputs = (dom: JSDOM): HTMLInputElement[] =>
+    Array.from(doc(dom).querySelectorAll<HTMLInputElement>('#csv-table thead input.col-filter'));
+  const bodyRows = (dom: JSDOM): string[][] =>
+    Array.from(doc(dom).querySelectorAll('#csv-table tbody tr')).map((tr) =>
+      Array.from(tr.querySelectorAll('td:not(.row-num)')).map((td) => td.textContent ?? '')
+    );
+  const statsBarText = (dom: JSDOM) => doc(dom).querySelector('.stats-bar')?.textContent;
+  const filterMessages = (postedMessages: unknown[]) =>
+    postedMessages.filter((m) => (m as { type: string }).type === 'filter') as Array<{
+      type: 'filter';
+      seq: number;
+      table?: string;
+      filters: Array<{ column: number; text: string }>;
+    }>;
+
+  /** Loads the webview with the debounce timer under the test's control. */
+  function load() {
+    const loaded = loadWebview();
+    const timers = new Map<number, () => void>();
+    let nextId = 1;
+    const win = loaded.dom.window as unknown as {
+      setTimeout: (fn: () => void) => number;
+      clearTimeout: (id: number) => void;
+    };
+    win.setTimeout = (fn) => {
+      timers.set(nextId, fn);
+      return nextId++;
+    };
+    win.clearTimeout = (id) => {
+      timers.delete(id);
+    };
+    const runTimers = () => {
+      const pending = Array.from(timers.values());
+      timers.clear();
+      pending.forEach((fn) => fn());
+    };
+    return { ...loaded, pendingTimers: () => timers.size, runTimers };
+  }
+
+  function show(dom: JSDOM, data: ParsedTable = people()): void {
+    replyStats = peopleStats;
+    sendCsvData(dom, { success: true, errors: [], data });
+  }
+
+  function showMulti(dom: JSDOM, selectedTable: string, data: ParsedTable = people()): void {
+    replyStats = peopleStats;
+    sendSqliteData(dom, {
+      success: true,
+      errors: [],
+      data: {
+        tables: ['a', 'b'].map((name) => ({ name, type: 'table' as const })),
+        selectedTable,
+        data,
+      },
+    });
+  }
+
+  function reply(dom: JSDOM, payload: unknown): void {
+    dom.window.dispatchEvent(new dom.window.MessageEvent('message', { data: { type: 'filter-data', payload } }));
+  }
+
+  function typeInto(dom: JSDOM, column: number, value: string): HTMLInputElement {
+    const input = inputs(dom)[column];
+    input.value = value;
+    input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    return input;
+  }
+
+  function press(dom: JSDOM, target: EventTarget, key: string): KeyboardEvent {
+    const event = new dom.window.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+    target.dispatchEvent(event);
+    return event;
+  }
+
+  /** Types into a box and presses Enter, so the request goes out immediately. */
+  function filterNow(dom: JSDOM, column: number, value: string): void {
+    press(dom, typeInto(dom, column, value), 'Enter');
+  }
+
+  const lastSeq = (postedMessages: unknown[]) => filterMessages(postedMessages).at(-1)!.seq;
+
+  describe('the filter row', () => {
+    it('adds a second header row with one labelled box per column, after the header row', () => {
+      const { dom } = load();
+      show(dom);
+      const rows = doc(dom).querySelectorAll('#csv-table thead tr');
+      assert.strictEqual(rows.length, 2);
+      assert.ok(rows[1].classList.contains('filter-row'));
+      assert.deepStrictEqual(inputs(dom).map((i) => i.getAttribute('aria-label')), ['Filter name', 'Filter city']);
+      assert.ok(inputs(dom).every((i) => i.type === 'search' && i.placeholder === 'Filter…'));
+      assert.ok(inputs(dom).every((i) => i.title.includes('Esc clears')));
+    });
+
+    it('keeps the boxes in the same column order as the header cells', () => {
+      const { dom } = load();
+      show(dom);
+      const headerCells = doc(dom).querySelectorAll('#csv-table thead tr:first-child th');
+      const filterCells = doc(dom).querySelectorAll('#csv-table thead tr.filter-row th');
+      assert.strictEqual(headerCells.length, filterCells.length);
+      inputs(dom).forEach((input, i) => assert.strictEqual(input.parentElement, filterCells[i + 1]));
+    });
+
+    it('starts with the clear-all button hidden and nothing sent', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      const clear = doc(dom).querySelector<HTMLButtonElement>('.filter-clear')!;
+      assert.strictEqual(clear.hidden, true);
+      assert.strictEqual(clear.getAttribute('aria-label'), 'Clear all filters');
+      assert.deepStrictEqual(filterMessages(postedMessages), []);
+    });
+
+    it('makes the stats bar a polite live region, with its text unchanged', () => {
+      const { dom } = load();
+      show(dom);
+      const bar = doc(dom).querySelector('.stats-bar')!;
+      assert.strictEqual(bar.getAttribute('aria-live'), 'polite');
+      assert.strictEqual(bar.textContent, '3 rows × 2 columns');
+    });
+
+    it('limits the length of a box to what the host accepts', () => {
+      const { dom } = load();
+      show(dom);
+      assert.ok(inputs(dom).every((i) => i.getAttribute('maxlength') === '1000'));
+    });
+  });
+
+  describe('sending a filter', () => {
+    it('sends the boxes on Enter, omitting blank ones, with no table for CSV/Parquet', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      typeInto(dom, 1, 'rome');
+      press(dom, inputs(dom)[0], 'Enter');
+      const sent = filterMessages(postedMessages);
+      assert.strictEqual(sent.length, 1);
+      assert.deepStrictEqual(sent[0].filters, [{ column: 1, text: 'rome' }]);
+      assert.ok(!('table' in sent[0]));
+      assert.ok(Number.isInteger(sent[0].seq));
+    });
+
+    it('names the selected table for a multi-table source', () => {
+      const { dom, postedMessages } = load();
+      showMulti(dom, 'b');
+      filterNow(dom, 0, 'a');
+      assert.strictEqual(filterMessages(postedMessages)[0].table, 'b');
+    });
+
+    it('waits for a pause in typing, then sends once', () => {
+      const { dom, postedMessages, runTimers, pendingTimers } = load();
+      show(dom);
+      typeInto(dom, 0, 'a');
+      typeInto(dom, 0, 'al');
+      typeInto(dom, 0, 'ali');
+      assert.deepStrictEqual(filterMessages(postedMessages), [], 'nothing goes out while typing');
+      assert.strictEqual(pendingTimers(), 1, 'each keystroke restarts one timer');
+      runTimers();
+      const sent = filterMessages(postedMessages);
+      assert.strictEqual(sent.length, 1);
+      assert.deepStrictEqual(sent[0].filters, [{ column: 0, text: 'ali' }]);
+    });
+
+    it('sends immediately on Enter and cancels the pending timer', () => {
+      const { dom, postedMessages, pendingTimers } = load();
+      show(dom);
+      filterNow(dom, 0, 'ali');
+      assert.strictEqual(filterMessages(postedMessages).length, 1);
+      assert.strictEqual(pendingTimers(), 0);
+    });
+
+    it('gives every request a higher seq than the one before', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      filterNow(dom, 0, 'a');
+      filterNow(dom, 0, 'al');
+      const [first, second] = filterMessages(postedMessages);
+      assert.ok(second.seq > first.seq);
+    });
+
+    it('shows the clear-all button while any box has text', () => {
+      const { dom } = load();
+      show(dom);
+      const clear = doc(dom).querySelector<HTMLButtonElement>('.filter-clear')!;
+      typeInto(dom, 1, 'x');
+      assert.strictEqual(clear.hidden, false);
+      typeInto(dom, 1, '');
+      assert.strictEqual(clear.hidden, true);
+    });
+  });
+
+  describe('applying a reply', () => {
+    it('swaps in the matching rows and reports the count', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      filterNow(dom, 1, 'rome');
+      reply(dom, { seq: lastSeq(postedMessages), rows: [['Alice', 'Rome'], ['Carol', 'rome']], matchCount: 2 });
+      assert.deepStrictEqual(bodyRows(dom), [['Alice', 'Rome'], ['Carol', 'rome']]);
+      assert.strictEqual(statsBarText(dom), '2 of 3 rows match');
+      // gutter numbers restart at 1 for the rows shown
+      const gutter = Array.from(doc(dom).querySelectorAll('#csv-table tbody td.row-num')).map((td) => td.textContent);
+      assert.deepStrictEqual(gutter, ['1', '2']);
+    });
+
+    it('uses the true total when the file was truncated by tablas.maxRows', () => {
+      const { dom, postedMessages } = load();
+      show(dom, people({ totalRowCount: 50000 }));
+      filterNow(dom, 0, 'a');
+      reply(dom, { seq: lastSeq(postedMessages), rows: [['Alice', 'Rome']], matchCount: 1 });
+      assert.strictEqual(statsBarText(dom), '1 of 50,000 rows match');
+    });
+
+    it('says when there are more matches than rows shown', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      filterNow(dom, 0, 'a');
+      reply(dom, { seq: lastSeq(postedMessages), rows: [['Alice', 'Rome']], matchCount: 1234 });
+      assert.ok(statsBarText(dom)!.startsWith('1,234 of 3 rows match (showing first 1'));
+      assert.ok(statsBarText(dom)!.includes('tablas.maxRows'));
+    });
+
+    it('shows no rows, not the old ones, when nothing matches', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      filterNow(dom, 0, 'zzz');
+      reply(dom, { seq: lastSeq(postedMessages), rows: [], matchCount: 0 });
+      assert.deepStrictEqual(bodyRows(dom), []);
+      assert.strictEqual(statsBarText(dom), '0 of 3 rows match');
+    });
+
+    it('re-renders only the body: header, strips and the focused box are the same elements', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      const thead = doc(dom).querySelector('#csv-table thead')!;
+      const headerCells = Array.from(thead.querySelectorAll('th'));
+      const strips = Array.from(thead.querySelectorAll('button.col-profile'));
+      assert.strictEqual(strips.length, 2, 'stats arrived');
+      const input = typeInto(dom, 1, 'rome');
+      input.focus();
+      press(dom, input, 'Enter');
+      reply(dom, { seq: lastSeq(postedMessages), rows: [['Alice', 'Rome']], matchCount: 1 });
+      assert.strictEqual(doc(dom).querySelector('#csv-table thead'), thead);
+      assert.deepStrictEqual(Array.from(thead.querySelectorAll('th')), headerCells);
+      assert.deepStrictEqual(Array.from(thead.querySelectorAll('button.col-profile')), strips);
+      assert.strictEqual(inputs(dom)[1], input);
+      assert.strictEqual(doc(dom).activeElement, input);
+      assert.strictEqual(input.value, 'rome');
+    });
+
+    it('keeps the table layout chosen for the full table', () => {
+      const { dom, postedMessages } = load();
+      const rows = Array.from({ length: 600 }, (_, i) => [`n${i}`, `c${i}`]);
+      show(dom, { headers: ['name', 'city'], rows, rowCount: 600, columnCount: 2 });
+      const table = doc(dom).getElementById('csv-table')!;
+      assert.ok(table.classList.contains('table-fixed'));
+      filterNow(dom, 0, 'n1');
+      reply(dom, { seq: lastSeq(postedMessages), rows: [['n1', 'c1']], matchCount: 1 });
+      assert.ok(table.classList.contains('table-fixed'), 'a short result must not flip the layout');
+    });
+
+    it('renders untrusted cell text as inert text', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      const evil = '<img src=x onerror=alert(1)><script>x</script>';
+      filterNow(dom, 0, 'a');
+      reply(dom, { seq: lastSeq(postedMessages), rows: [[evil, '<b>y</b>']], matchCount: 1 });
+      assert.deepStrictEqual(bodyRows(dom), [[evil, '<b>y</b>']]);
+      for (const tag of ['img', 'script', 'b']) {
+        assert.strictEqual(doc(dom).querySelector(`#app ${tag}`), null, `no <${tag}> may be created from a cell`);
+      }
+    });
+  });
+
+  describe('replies that do not belong', () => {
+    it('drops a reply overtaken by a newer request', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      filterNow(dom, 0, 'a');
+      const stale = lastSeq(postedMessages);
+      filterNow(dom, 0, 'al');
+      reply(dom, { seq: stale, rows: [['STALE', 'x']], matchCount: 1 });
+      assert.deepStrictEqual(bodyRows(dom).map((r) => r[0]), ['Alice', 'Bob', 'Carol'], 'rows unchanged');
+      reply(dom, { seq: lastSeq(postedMessages), rows: [['Alice', 'Rome']], matchCount: 1 });
+      assert.deepStrictEqual(bodyRows(dom), [['Alice', 'Rome']]);
+    });
+
+    it('drops a reply for another table', () => {
+      const { dom, postedMessages } = load();
+      showMulti(dom, 'a');
+      filterNow(dom, 0, 'a');
+      reply(dom, { seq: lastSeq(postedMessages), table: 'b', rows: [['WRONG', 'x']], matchCount: 1 });
+      assert.deepStrictEqual(bodyRows(dom).map((r) => r[0]), ['Alice', 'Bob', 'Carol']);
+      reply(dom, { seq: lastSeq(postedMessages), table: 'a', rows: [['Alice', 'Rome']], matchCount: 1 });
+      assert.deepStrictEqual(bodyRows(dom), [['Alice', 'Rome']]);
+    });
+
+    it('drops a reply that arrives after the box was cleared', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      filterNow(dom, 0, 'a');
+      const stale = lastSeq(postedMessages);
+      filterNow(dom, 0, '');
+      reply(dom, { seq: stale, rows: [['STALE', 'x']], matchCount: 1 });
+      assert.deepStrictEqual(bodyRows(dom).map((r) => r[0]), ['Alice', 'Bob', 'Carol']);
+      assert.strictEqual(statsBarText(dom), '3 rows × 2 columns');
+    });
+
+    it('ignores a reply when nothing was asked, and an empty or malformed payload', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      reply(dom, { seq: 1, rows: [['X', 'x']], matchCount: 1 });
+      reply(dom, undefined);
+      assert.deepStrictEqual(bodyRows(dom).map((r) => r[0]), ['Alice', 'Bob', 'Carol']);
+      filterNow(dom, 0, 'a');
+      reply(dom, undefined);
+      reply(dom, { rows: [['X', 'x']], matchCount: 1 });
+      assert.deepStrictEqual(bodyRows(dom).map((r) => r[0]), ['Alice', 'Bob', 'Carol']);
+      reply(dom, { seq: lastSeq(postedMessages), rows: [['Alice', 'Rome']], matchCount: 1 });
+      assert.deepStrictEqual(bodyRows(dom), [['Alice', 'Rome']]);
+    });
+
+    it('ignores a second reply to the same request', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      filterNow(dom, 0, 'a');
+      const seq = lastSeq(postedMessages);
+      reply(dom, { seq, rows: [['Alice', 'Rome']], matchCount: 1 });
+      reply(dom, { seq, rows: [['DUP', 'x']], matchCount: 1 });
+      assert.deepStrictEqual(bodyRows(dom), [['Alice', 'Rome']]);
+    });
+  });
+
+  describe('invalid filter text', () => {
+    it('marks the offending boxes, explains why, and leaves the rows alone', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      filterNow(dom, 1, '>');
+      reply(dom, { seq: lastSeq(postedMessages), errors: [{ column: 1, message: '">" needs a value after it.' }] });
+      assert.strictEqual(inputs(dom)[1].getAttribute('aria-invalid'), 'true');
+      assert.strictEqual(inputs(dom)[1].title, '">" needs a value after it.');
+      assert.strictEqual(inputs(dom)[0].hasAttribute('aria-invalid'), false);
+      assert.deepStrictEqual(bodyRows(dom).map((r) => r[0]), ['Alice', 'Bob', 'Carol']);
+    });
+
+    it('clears the mark on the next request and restores the help text', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      filterNow(dom, 1, '>');
+      reply(dom, { seq: lastSeq(postedMessages), errors: [{ column: 1, message: 'bad' }] });
+      filterNow(dom, 1, '>1');
+      assert.strictEqual(inputs(dom)[1].hasAttribute('aria-invalid'), false);
+      assert.ok(inputs(dom)[1].title.includes('Esc clears'));
+    });
+
+    it('keeps the previous matches on screen while a typo is pending', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      filterNow(dom, 1, 'rome');
+      reply(dom, { seq: lastSeq(postedMessages), rows: [['Alice', 'Rome']], matchCount: 1 });
+      filterNow(dom, 1, '>');
+      reply(dom, { seq: lastSeq(postedMessages), errors: [{ column: 1, message: 'bad' }] });
+      assert.deepStrictEqual(bodyRows(dom), [['Alice', 'Rome']]);
+    });
+  });
+
+  describe('when the host cannot filter', () => {
+    it('puts the original rows back and says why', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      filterNow(dom, 0, 'a');
+      reply(dom, { seq: lastSeq(postedMessages), rows: [['Alice', 'Rome']], matchCount: 1 });
+      filterNow(dom, 0, 'al');
+      reply(dom, { seq: lastSeq(postedMessages), failedReason: 'Filtering timed out.' });
+      assert.deepStrictEqual(bodyRows(dom).map((r) => r[0]), ['Alice', 'Bob', 'Carol']);
+      assert.ok(statsBarText(dom)!.startsWith('3 rows × 2 columns'));
+      assert.ok(statsBarText(dom)!.includes('Filtering timed out.'));
+    });
+
+    it('treats a reply with neither rows nor a reason as a failure', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      filterNow(dom, 0, 'a');
+      reply(dom, { seq: lastSeq(postedMessages) });
+      assert.ok(statsBarText(dom)!.includes('filter unavailable'));
+      assert.deepStrictEqual(bodyRows(dom).map((r) => r[0]), ['Alice', 'Bob', 'Carol']);
+    });
+
+    it('tries again on the next request', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      filterNow(dom, 0, 'a');
+      reply(dom, { seq: lastSeq(postedMessages), failedReason: 'nope' });
+      filterNow(dom, 0, 'al');
+      reply(dom, { seq: lastSeq(postedMessages), rows: [['Alice', 'Rome']], matchCount: 1 });
+      assert.deepStrictEqual(bodyRows(dom), [['Alice', 'Rome']]);
+      assert.strictEqual(statsBarText(dom), '1 of 3 rows match');
+    });
+  });
+
+  describe('clearing', () => {
+    it('restores the original rows locally, and tells the host only to release its cache', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      filterNow(dom, 0, 'a');
+      reply(dom, { seq: lastSeq(postedMessages), rows: [['Alice', 'Rome']], matchCount: 1 });
+      const before = filterMessages(postedMessages).length;
+      filterNow(dom, 0, '');
+      assert.deepStrictEqual(bodyRows(dom).map((r) => r[0]), ['Alice', 'Bob', 'Carol']);
+      assert.strictEqual(statsBarText(dom), '3 rows × 2 columns');
+      const sent = filterMessages(postedMessages);
+      assert.strictEqual(sent.length, before + 1);
+      assert.deepStrictEqual(sent.at(-1)!.filters, []);
+    });
+
+    it('treats a box of only spaces as blank', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      filterNow(dom, 0, 'a');
+      reply(dom, { seq: lastSeq(postedMessages), rows: [['Alice', 'Rome']], matchCount: 1 });
+      filterNow(dom, 0, '   ');
+      assert.deepStrictEqual(bodyRows(dom).map((r) => r[0]), ['Alice', 'Bob', 'Carol']);
+      assert.deepStrictEqual(filterMessages(postedMessages).at(-1)!.filters, []);
+    });
+
+    it('sends nothing when there was nothing to clear', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      filterNow(dom, 0, '');
+      typeInto(dom, 1, '   ');
+      press(dom, inputs(dom)[1], 'Enter');
+      assert.deepStrictEqual(filterMessages(postedMessages), []);
+    });
+
+    it('also clears while a request is still in flight', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      filterNow(dom, 0, 'a');
+      const inFlight = lastSeq(postedMessages);
+      filterNow(dom, 0, '');
+      reply(dom, { seq: inFlight, rows: [['Alice', 'Rome']], matchCount: 1 });
+      assert.deepStrictEqual(bodyRows(dom).map((r) => r[0]), ['Alice', 'Bob', 'Carol']);
+      assert.deepStrictEqual(filterMessages(postedMessages).at(-1)!.filters, []);
+    });
+
+    it('clears every box from the clear-all button and puts focus in the first one', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      typeInto(dom, 0, 'a');
+      filterNow(dom, 1, 'rome');
+      reply(dom, { seq: lastSeq(postedMessages), rows: [['Alice', 'Rome']], matchCount: 1 });
+      const clear = doc(dom).querySelector<HTMLButtonElement>('.filter-clear')!;
+      clear.click();
+      assert.deepStrictEqual(inputs(dom).map((i) => i.value), ['', '']);
+      assert.strictEqual(clear.hidden, true);
+      assert.deepStrictEqual(bodyRows(dom).map((r) => r[0]), ['Alice', 'Bob', 'Carol']);
+      assert.deepStrictEqual(filterMessages(postedMessages).at(-1)!.filters, []);
+      assert.strictEqual(doc(dom).activeElement, inputs(dom)[0]);
+    });
+
+    it('clears a box with Escape, immediately, and consumes the key', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      const input = typeInto(dom, 0, 'ali');
+      press(dom, input, 'Enter');
+      reply(dom, { seq: lastSeq(postedMessages), rows: [['Alice', 'Rome']], matchCount: 1 });
+      const event = press(dom, input, 'Escape');
+      assert.strictEqual(input.value, '');
+      assert.strictEqual(event.defaultPrevented, true);
+      assert.deepStrictEqual(bodyRows(dom).map((r) => r[0]), ['Alice', 'Bob', 'Carol']);
+      assert.deepStrictEqual(filterMessages(postedMessages).at(-1)!.filters, []);
+    });
+
+    it('leaves Escape alone in an empty box', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      const event = press(dom, inputs(dom)[0], 'Escape');
+      assert.strictEqual(event.defaultPrevented, false);
+      assert.deepStrictEqual(filterMessages(postedMessages), []);
+    });
+  });
+
+  describe('Alt+click on a cell', () => {
+    const cellAt = (dom: JSDOM, row: number, column: number) =>
+      doc(dom).querySelectorAll('#csv-table tbody tr')[row].querySelectorAll('td')[column + 1] as HTMLElement;
+
+    function click(dom: JSDOM, target: Element, altKey: boolean): MouseEvent {
+      const event = new dom.window.MouseEvent('click', { bubbles: true, cancelable: true, altKey });
+      target.dispatchEvent(event);
+      return event;
+    }
+
+    it('filters that column to exactly the cell value, at once', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      const event = click(dom, cellAt(dom, 1, 1), true);
+      assert.strictEqual(inputs(dom)[1].value, '=Paris');
+      assert.strictEqual(event.defaultPrevented, true);
+      const sent = filterMessages(postedMessages);
+      assert.strictEqual(sent.length, 1);
+      assert.deepStrictEqual(sent[0].filters, [{ column: 1, text: '=Paris' }]);
+    });
+
+    it('turns an empty cell into the "is empty" filter', () => {
+      const { dom, postedMessages } = load();
+      show(dom, people({ rows: [['Alice', ''], ['Bob', 'Paris']] , rowCount: 2 }));
+      click(dom, cellAt(dom, 0, 1), true);
+      assert.deepStrictEqual(filterMessages(postedMessages).at(-1)!.filters, [{ column: 1, text: '=' }]);
+    });
+
+    it('adds to the filters already set on other columns', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      typeInto(dom, 0, 'a');
+      click(dom, cellAt(dom, 1, 1), true);
+      assert.deepStrictEqual(filterMessages(postedMessages).at(-1)!.filters, [
+        { column: 0, text: 'a' },
+        { column: 1, text: '=Paris' },
+      ]);
+    });
+
+    it('does nothing without Alt', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      const event = click(dom, cellAt(dom, 1, 1), false);
+      assert.strictEqual(event.defaultPrevented, false);
+      assert.strictEqual(inputs(dom)[1].value, '');
+      assert.deepStrictEqual(filterMessages(postedMessages), []);
+    });
+
+    it('ignores the row-number gutter', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      click(dom, doc(dom).querySelector('#csv-table tbody td.row-num')!, true);
+      assert.deepStrictEqual(filterMessages(postedMessages), []);
+    });
+
+    it('ignores a cell that a one-line box cannot hold', () => {
+      const { dom, postedMessages } = load();
+      show(dom, people({ rows: [['two\nlines', 'x'], [`${'z'.repeat(1000)}`, 'y']], rowCount: 2 }));
+      click(dom, cellAt(dom, 0, 0), true);
+      click(dom, cellAt(dom, 1, 0), true);
+      assert.strictEqual(inputs(dom)[0].value, '');
+      assert.deepStrictEqual(filterMessages(postedMessages), []);
+    });
+
+    it('ignores a cell with trailing spaces, which the host would trim into a filter that matches nothing', () => {
+      const { dom, postedMessages } = load();
+      show(dom, people({ rows: [['abc ', 'x'], ['  lead', 'y']], rowCount: 2 }));
+      click(dom, cellAt(dom, 0, 0), true);
+      assert.strictEqual(inputs(dom)[0].value, '');
+      assert.deepStrictEqual(filterMessages(postedMessages), []);
+      // leading spaces survive the trim, so those cells still work
+      click(dom, cellAt(dom, 1, 0), true);
+      assert.deepStrictEqual(filterMessages(postedMessages).at(-1)!.filters, [{ column: 0, text: '=  lead' }]);
+    });
+
+    it('still turns a whitespace-only cell into the "is empty" filter', () => {
+      const { dom, postedMessages } = load();
+      show(dom, people({ rows: [['   ', 'x']], rowCount: 1 }));
+      click(dom, cellAt(dom, 0, 0), true);
+      // Sent as typed; the host trims "=   " to "=", which means "is empty".
+      assert.deepStrictEqual(filterMessages(postedMessages).at(-1)!.filters, [{ column: 0, text: '=   ' }]);
+    });
+
+    it('works on the rows a filter returned', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      filterNow(dom, 1, 'rome');
+      reply(dom, { seq: lastSeq(postedMessages), rows: [['Alice', 'Rome'], ['Carol', 'rome']], matchCount: 2 });
+      click(dom, cellAt(dom, 1, 0), true);
+      assert.deepStrictEqual(filterMessages(postedMessages).at(-1)!.filters, [
+        { column: 0, text: '=Carol' },
+        { column: 1, text: 'rome' },
+      ]);
+    });
+  });
+
+  describe('switching tables', () => {
+    it('starts the new table with empty boxes', () => {
+      const { dom, postedMessages } = load();
+      showMulti(dom, 'a');
+      filterNow(dom, 0, 'a');
+      reply(dom, { seq: lastSeq(postedMessages), table: 'a', rows: [['Alice', 'Rome']], matchCount: 1 });
+      showMulti(dom, 'b');
+      assert.deepStrictEqual(inputs(dom).map((i) => i.value), ['', '']);
+      assert.strictEqual(doc(dom).querySelector<HTMLButtonElement>('.filter-clear')!.hidden, true);
+      assert.strictEqual(statsBarText(dom), '3 rows × 2 columns');
+      assert.strictEqual(bodyRows(dom).length, 3);
+    });
+
+    it('tells the host to drop the old table\'s filters, naming that table', () => {
+      const { dom, postedMessages } = load();
+      showMulti(dom, 'a');
+      filterNow(dom, 0, 'a');
+      showMulti(dom, 'b');
+      const released = filterMessages(postedMessages).at(-1)!;
+      assert.strictEqual(released.table, 'a');
+      assert.deepStrictEqual(released.filters, []);
+    });
+
+    it('sends nothing extra when the old table had no filters', () => {
+      const { dom, postedMessages } = load();
+      showMulti(dom, 'a');
+      showMulti(dom, 'b');
+      assert.deepStrictEqual(filterMessages(postedMessages), []);
+    });
+
+    it('drops the old table\'s late reply', () => {
+      const { dom, postedMessages } = load();
+      showMulti(dom, 'a');
+      filterNow(dom, 0, 'a');
+      const stale = lastSeq(postedMessages);
+      showMulti(dom, 'b');
+      reply(dom, { seq: stale, table: 'a', rows: [['STALE', 'x']], matchCount: 1 });
+      assert.deepStrictEqual(bodyRows(dom).map((r) => r[0]), ['Alice', 'Bob', 'Carol']);
+    });
+
+    it('cancels a debounce still waiting when the table is replaced', () => {
+      const { dom, postedMessages, runTimers } = load();
+      showMulti(dom, 'a');
+      typeInto(dom, 0, 'a');
+      showMulti(dom, 'b');
+      runTimers();
+      assert.deepStrictEqual(filterMessages(postedMessages).filter((m) => m.filters.length > 0), []);
+    });
+
+    it('keeps the other tables\' filters independent: boxes belong to the table they were typed in', () => {
+      const { dom, postedMessages } = load();
+      showMulti(dom, 'a');
+      filterNow(dom, 0, 'a');
+      showMulti(dom, 'b');
+      filterNow(dom, 1, 'rome');
+      const last = filterMessages(postedMessages).at(-1)!;
+      assert.strictEqual(last.table, 'b');
+      assert.deepStrictEqual(last.filters, [{ column: 1, text: 'rome' }]);
+    });
+  });
+
+  describe('with a statistics card open', () => {
+    const strip = (dom: JSDOM, col: number) =>
+      doc(dom).querySelector<HTMLButtonElement>(`#csv-table thead button.col-profile[data-col="${col}"]`)!;
+    const card = (dom: JSDOM) => doc(dom).getElementById('stats-card');
+
+    it('stays open while a filter is applied', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      strip(dom, 0).click();
+      assert.ok(card(dom));
+      filterNow(dom, 1, 'rome');
+      reply(dom, { seq: lastSeq(postedMessages), rows: [['Alice', 'Rome']], matchCount: 1 });
+      assert.ok(card(dom), 'filtering must not close the card');
+    });
+
+    it('says the statistics ignore the filter, only while one is set', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      strip(dom, 0).click();
+      assert.ok(!card(dom)!.textContent!.includes('ignore'));
+      press(dom, doc(dom), 'Escape');
+      filterNow(dom, 1, 'rome');
+      reply(dom, { seq: lastSeq(postedMessages), rows: [['Alice', 'Rome']], matchCount: 1 });
+      strip(dom, 0).click();
+      assert.ok(card(dom)!.querySelector('.card-note')!.textContent!.includes('Statistics ignore the active filter.'));
+    });
+
+    it('combines that with the truncation note', () => {
+      const { dom, postedMessages } = load();
+      show(dom, people({ totalRowCount: 9000 }));
+      filterNow(dom, 1, 'rome');
+      reply(dom, { seq: lastSeq(postedMessages), rows: [['Alice', 'Rome']], matchCount: 1 });
+      strip(dom, 0).click();
+      const note = card(dom)!.querySelector('.card-note')!.textContent!;
+      assert.ok(note.includes('9,000 rows') && note.includes('ignore the active filter'));
+    });
+
+    it('keeps Escape in a box for the box: it clears the text and leaves the card open', () => {
+      const { dom, postedMessages } = load();
+      show(dom);
+      const input = typeInto(dom, 1, 'rome');
+      press(dom, input, 'Enter');
+      reply(dom, { seq: lastSeq(postedMessages), rows: [['Alice', 'Rome']], matchCount: 1 });
+      strip(dom, 0).click();
+      press(dom, input, 'Escape');
+      assert.strictEqual(input.value, '');
+      assert.ok(card(dom), 'the first Escape belongs to the box');
+    });
+
+    it('lets Escape in an empty box close the card, as everywhere else', () => {
+      const { dom } = load();
+      show(dom);
+      strip(dom, 0).click();
+      press(dom, inputs(dom)[0], 'Escape');
+      assert.strictEqual(card(dom), null);
+    });
+
+    it('is anchored below the whole header, including the filter row', () => {
+      const { dom } = load();
+      show(dom);
+      Object.defineProperty(doc(dom).documentElement, 'clientWidth', { configurable: true, value: 1000 });
+      Object.defineProperty(doc(dom).documentElement, 'clientHeight', { configurable: true, value: 600 });
+      const rect = (bottom: number) =>
+        ({ left: 0, right: 100, top: 0, bottom, width: 100, height: bottom, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
+      const ths = doc(dom).querySelectorAll('#csv-table thead tr:first-child th');
+      ths[0].getBoundingClientRect = () => rect(50);
+      ths[1].getBoundingClientRect = () => rect(50);
+      doc(dom).querySelector('#csv-table thead')!.getBoundingClientRect = () => rect(90); // header + filter row
+      strip(dom, 0).click();
+      assert.strictEqual(card(dom)!.style.top, '94px');
+    });
   });
 });

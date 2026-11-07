@@ -1,0 +1,8 @@
+id,name,city,qty,price,day
+1,Alice,Rome,10,9.5,2024-01-15
+2,bob,Paris,9,120.25,2023-12-31
+3,Émile,Oslo,100,7.75,2024-03-01
+4,CAROL,rome,,1000.5,2024-03-01
+5,Dave,,5,,
+6,Zoë,Lima,20,45.5,2022-07-04
+7,"Smith, Jo",New York,1,0.5,2024-12-31

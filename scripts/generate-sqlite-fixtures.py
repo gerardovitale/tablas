@@ -101,6 +101,27 @@ def main():
         conn.execute('CREATE VIEW label_counts AS SELECT label, COUNT(*) AS n FROM mixed GROUP BY label')
     write('stats.db', build_stats)
 
+    # filter.db -- the shared "filter parity" table (same logical rows as
+    # filter.csv/.parquet/.xlsx/.duckdb; test/unit/filterParity.test.ts asserts
+    # every format filters it identically), plus a view with duplicate column
+    # names (the filter query must not trip on them).
+    def build_filter(conn):
+        conn.execute('CREATE TABLE items (id INTEGER, name TEXT, city TEXT, qty INTEGER, price REAL, day TEXT)')
+        conn.executemany(
+            'INSERT INTO items VALUES (?, ?, ?, ?, ?, ?)',
+            [
+                (1, 'Alice', 'Rome', 10, 9.5, '2024-01-15'),
+                (2, 'bob', 'Paris', 9, 120.25, '2023-12-31'),
+                (3, '\u00c9mile', 'Oslo', 100, 7.75, '2024-03-01'),
+                (4, 'CAROL', 'rome', None, 1000.5, '2024-03-01'),
+                (5, 'Dave', None, 5, None, None),
+                (6, 'Zo\u00eb', 'Lima', 20, 45.5, '2022-07-04'),
+                (7, 'Smith, Jo', 'New York', 1, 0.5, '2024-12-31'),
+            ],
+        )
+        conn.execute('CREATE VIEW dup_names AS SELECT id AS x, name AS x FROM items')
+    write('filter.db', build_filter)
+
     # no-tables.db -- a valid SQLite database (correct header, openable)
     # with zero tables/views. Distinct from a 0-byte file: this exercises
     # parseSqlite's "opened fine, nothing to show" branch specifically.

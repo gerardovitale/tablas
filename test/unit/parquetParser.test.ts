@@ -2,7 +2,9 @@ import * as assert from 'assert';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { statsHooks, statsLimits, STATS_TOO_LARGE_REASON } from '../../src/columnStats';
-import { declaredKind, parquetStats, parseParquet, stringifyCell } from '../../src/parquetParser';
+import { declaredKind, parquetFilter, parquetRowsForFilter, parquetStats, parseParquet, stringifyCell } from '../../src/parquetParser';
+import { filterLimits, FILTER_FAILED_REASON, FILTER_TOO_LARGE_REASON, FILTER_UNKNOWN_COLUMN_REASON, resolveFilters } from '../../src/filter';
+import { FILTER_CASES, idsOf } from './filterCases';
 import type { SchemaTree } from 'hyparquet' with { 'resolution-mode': 'import' };
 
 // Use process.cwd() (always the project root) to locate fixtures regardless
@@ -395,5 +397,63 @@ describe('declaredKind', () => {
   it('treats nested and repeated columns as other', () => {
     assert.strictEqual(declaredKind(col({}, [col({ type: 'INT32' })])), 'other');
     assert.strictEqual(declaredKind(col({ type: 'INT32', repetition_type: 'REPEATED' })), 'other');
+  });
+});
+
+describe('parquetFilter', () => {
+  for (const c of FILTER_CASES) {
+    it(c.name, async () => {
+      const resolved = resolveFilters(c.filters);
+      if ('errors' in resolved) {
+        assert.fail('unexpected filter error');
+      }
+      const outcome = await parquetFilter(await fixtureBytes('filter.parquet'), resolved.specs, 100);
+      assert.ok(!('failedReason' in outcome), 'failedReason' in outcome ? outcome.failedReason : '');
+      assert.deepStrictEqual(idsOf(outcome.rows), c.ids);
+      assert.strictEqual(outcome.matchCount, c.ids.length);
+    });
+  }
+
+  it('caps the returned rows at maxRows but counts every match', async () => {
+    const outcome = await parquetFilter(await fixtureBytes('filter.parquet'), [{ column: 3, filter: { op: 'gte', value: '1' } }], 2);
+    assert.ok(!('failedReason' in outcome));
+    assert.strictEqual(outcome.rows.length, 2);
+    assert.strictEqual(outcome.matchCount, 6);
+  });
+
+  it('filters across row groups', async () => {
+    const outcome = await parquetFilter(await fixtureBytes('stats.parquet'), [{ column: 6, filter: { op: 'equals', value: 'a' } }], 10);
+    assert.ok(!('failedReason' in outcome));
+    assert.deepStrictEqual(idsOf(outcome.rows), [2, 5]);
+  });
+
+  it('refuses a filter on a column the file does not have', async () => {
+    const outcome = await parquetFilter(await fixtureBytes('filter.parquet'), [{ column: 99, filter: { op: 'contains', value: 'x' } }], 10);
+    assert.deepStrictEqual(outcome, { failedReason: FILTER_UNKNOWN_COLUMN_REASON });
+  });
+
+  it('yields no columns for empty input', async () => {
+    assert.deepStrictEqual(await parquetRowsForFilter(new Uint8Array()), { columnCount: 0, rows: [] });
+  });
+
+  it('refuses a file over the cell cap, before decoding any row', async () => {
+    const original = filterLimits.maxCells;
+    filterLimits.maxCells = 10;
+    try {
+      assert.deepStrictEqual(await parquetRowsForFilter(await fixtureBytes('filter.parquet')), { failedReason: FILTER_TOO_LARGE_REASON });
+    } finally {
+      filterLimits.maxCells = original;
+    }
+  });
+
+  it('reports a file it cannot read as a failed filter, without throwing', async () => {
+    const original = statsHooks.log;
+    statsHooks.log = () => undefined;
+    try {
+      assert.deepStrictEqual(await parquetRowsForFilter(await fixtureBytes('corrupt.parquet')), { failedReason: FILTER_FAILED_REASON });
+      assert.deepStrictEqual(await parquetRowsForFilter(await fixtureBytes('unsupported-codec.parquet')), { failedReason: FILTER_FAILED_REASON });
+    } finally {
+      statsHooks.log = original;
+    }
   });
 });
