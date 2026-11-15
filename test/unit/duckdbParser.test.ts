@@ -6,12 +6,14 @@ import * as path from 'path';
 import { DuckDBInstance } from '@duckdb/node-api';
 import { statsHooks, statsLimits, STATS_TIMED_OUT_REASON } from '../../src/columnStats';
 import {
+  describeDuckdbOpenError,
   duckdbTableFilter,
   duckdbTableStats,
   listDuckdbTables,
   openDuckdbDatabase,
   parseDuckdb,
   readDuckdbTable,
+  readSelectedTable,
   runExclusive,
   stringifyDuckdbCell,
   type DuckdbHandle,
@@ -247,6 +249,114 @@ describe('parseDuckdb', () => {
         assert.strictEqual(result.errors[0].code, 'OpenFailed');
       }
     });
+  });
+});
+
+describe('storage-v2.duckdb (written by DuckDB 2.x)', () => {
+  it('opens a storage version 999 file, which engines before 2.0 reject', async () => {
+    const result = await parseDuckdb(await fixtureBytes('storage-v2.duckdb'));
+    assert.strictEqual(result.success, true);
+    if (result.success) {
+      assert.strictEqual(result.data.selectedTable, 'readings');
+      assert.deepStrictEqual(result.data.data.headers, ['id', 'label']);
+      assert.deepStrictEqual(result.data.data.rows, [
+        ['1', 'a'],
+        ['2', 'b'],
+      ]);
+    }
+  });
+});
+
+describe('views over files read by a relative path', () => {
+  // A view like read_parquet('../data/x.parquet') is stored with the path as
+  // written. The database is opened from a temp copy, so without a search
+  // directory DuckDB looks next to the extension host's cwd and finds nothing.
+  async function buildDb(root: string): Promise<Uint8Array> {
+    fsSync.mkdirSync(path.join(root, 'data', 'sub'), { recursive: true });
+    const dbPath = path.join(root, 'data', 'src.duckdb');
+    const instance = await DuckDBInstance.create(dbPath);
+    const connection = await instance.connect();
+    try {
+      await connection.run(
+        `COPY (SELECT 1 AS id, 'a' AS label) TO '${path.join(root, 'data', 'sub', 'x.parquet')}' (FORMAT parquet)`
+      );
+      // CREATE VIEW binds the path now, so resolve it the way the producer's cwd would.
+      await connection.run(`SET file_search_path = '${path.join(root, 'data')}'`);
+      await connection.run("CREATE VIEW v AS SELECT * FROM read_parquet('../data/sub/*.parquet')");
+    } finally {
+      connection.closeSync();
+      instance.closeSync();
+    }
+    return new Uint8Array(fsSync.readFileSync(dbPath));
+  }
+
+  let root: string;
+  beforeEach(() => {
+    root = fsSync.mkdtempSync(path.join(os.tmpdir(), 'tablas-relpath-'));
+  });
+  afterEach(() => {
+    fsSync.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('resolves the path next to the source file when given its folder', async () => {
+    const bytes = await buildDb(root);
+    const opened = await openDuckdbDatabase(bytes, { searchDir: path.join(root, 'data') });
+    if ('error' in opened) {
+      throw new Error(opened.error.message);
+    }
+    try {
+      const tables = await listDuckdbTables(opened);
+      const result = await readSelectedTable(opened, tables, 'v');
+      assert.strictEqual(result.tableError, undefined);
+      assert.deepStrictEqual(result.data.rows, [['1', 'a']]);
+    } finally {
+      opened.close();
+    }
+  });
+
+  it('keeps the table list and reports the error for just that view when the files are not found', async () => {
+    const bytes = await buildDb(root);
+    const opened = await openDuckdbDatabase(bytes);
+    if ('error' in opened) {
+      throw new Error(opened.error.message);
+    }
+    try {
+      const tables = await listDuckdbTables(opened);
+      const result = await readSelectedTable(opened, tables, 'v');
+      assert.deepStrictEqual(result.tables.map((t) => t.name), ['v']);
+      assert.strictEqual(result.selectedTable, 'v');
+      assert.strictEqual(result.data.columnCount, 0);
+      assert.ok(result.tableError && result.tableError.includes('No files found'));
+    } finally {
+      opened.close();
+    }
+  });
+
+  it('still opens when the folder has a comma (file_search_path is comma-separated)', async () => {
+    const bytes = await buildDb(root);
+    const opened = await openDuckdbDatabase(bytes, { searchDir: path.join(root, 'a,b') });
+    assert.ok(!('error' in opened));
+    if (!('error' in opened)) {
+      opened.close();
+    }
+  });
+});
+
+describe('describeDuckdbOpenError', () => {
+  const newerStorage =
+    'IO Error: Trying to read a database file with version number 999, but we can only read versions between 64 and 68.\n' +
+    'The database file was created with an newer version of DuckDB.';
+
+  it('adds an update hint naming the bundled version and keeps DuckDB\'s own text', () => {
+    const out = describeDuckdbOpenError(newerStorage, 'v1.5.5');
+    assert.ok(out.includes('newer DuckDB than the one built into Tablas'));
+    assert.ok(out.includes('DuckDB v1.5.5'));
+    assert.ok(out.endsWith(newerStorage));
+  });
+
+  it('leaves unrelated open errors unchanged', () => {
+    const msg = 'IO Error: The file is not a valid DuckDB database file!';
+    assert.strictEqual(describeDuckdbOpenError(msg, 'v2.0.0'), msg);
   });
 });
 

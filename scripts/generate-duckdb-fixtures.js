@@ -10,6 +10,12 @@
  * generation. Run from the repo root:
  *
  *     node scripts/generate-duckdb-fixtures.js
+ *
+ * Re-running rewrites every fixture. The older fixtures are storage v64
+ * (written by DuckDB 1.5) and double as the backward-compat check for the
+ * bundled engine, so to add or refresh only the v2 one run:
+ *
+ *     node scripts/generate-duckdb-fixtures.js storage-v2
  */
 
 'use strict';
@@ -38,7 +44,34 @@ async function write(name, statements) {
   console.log(`wrote ${filePath}`);
 }
 
+// storage-v2.duckdb -- explicitly storage version 999 ("v2.0.0+"), what
+// DuckDB 2.x writes. Engines before 2.0 reject it with "version number 999",
+// so this guards the bundled @duckdb/node-api against being downgraded.
+// ATTACH ... (STORAGE_VERSION) pins it regardless of the default.
+async function writeStorageV2() {
+  const filePath = path.join(FIXTURES_DIR, 'storage-v2.duckdb');
+  if (fs.existsSync(filePath)) {
+    fs.unlinkSync(filePath);
+  }
+  const instance = await DuckDBInstance.create(':memory:');
+  const connection = await instance.connect();
+  try {
+    await connection.run(`ATTACH '${filePath.replace(/'/g, "''")}' AS v2 (STORAGE_VERSION 'v2.0.0')`);
+    await connection.run('CREATE TABLE v2.readings (id INTEGER, label VARCHAR)');
+    await connection.run("INSERT INTO v2.readings VALUES (1, 'a'), (2, 'b')");
+    await connection.run('DETACH v2');
+  } finally {
+    connection.closeSync();
+    instance.closeSync();
+  }
+  console.log(`wrote ${filePath}`);
+}
+
 async function main() {
+  if (process.argv[2] === 'storage-v2') {
+    await writeStorageV2();
+    return;
+  }
   // simple.duckdb -- mixed types mirroring simple.csv/simple.parquet/
   // simple.db's shape, so readDuckdbTable/stringifyDuckdbCell get real
   // coverage of DuckDB's typed columns (INTEGER/VARCHAR/DOUBLE/BOOLEAN).
@@ -141,6 +174,8 @@ async function main() {
   const corruptPath = path.join(FIXTURES_DIR, 'corrupt.duckdb');
   fs.writeFileSync(corruptPath, 'this is not a valid duckdb database');
   console.log(`wrote ${corruptPath}`);
+
+  await writeStorageV2();
 }
 
 main().catch((err) => {

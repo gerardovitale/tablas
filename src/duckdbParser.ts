@@ -8,6 +8,7 @@ import {
   DuckDBInstance,
   DuckDBTypeId,
   VARCHAR,
+  version,
   type DuckDBConnection,
   type DuckDBType,
   type Json,
@@ -115,15 +116,67 @@ export function emptyParsedTable(): ParsedTable {
 }
 
 /**
+ * DuckDB's message when the file's storage version is newer than the bundled
+ * engine understands ("... version number 999, but we can only read versions
+ * between 64 and 68. The database file was created with an newer version of
+ * DuckDB."). Storage is backward- but not forward-compatible, so the only
+ * fixes are a newer engine (update Tablas) or re-saving the file for an older
+ * one -- neither is obvious from DuckDB's raw text, which reads like a
+ * corrupt file.
+ */
+const NEWER_STORAGE_PATTERN =
+  /database file with version number \d+|created with an? newer version of DuckDB/i;
+
+/**
+ * Turns a `DuckDBInstance.create` failure message into what the user sees.
+ * A newer-storage-version failure gets an actionable hint naming the bundled
+ * engine version, with DuckDB's own text kept underneath; anything else is
+ * returned unchanged. Pure so it can be unit-tested without a native open.
+ */
+export function describeDuckdbOpenError(message: string, bundledVersion: string): string {
+  if (!NEWER_STORAGE_PATTERN.test(message)) {
+    return message;
+  }
+  return (
+    `This file was written by a newer DuckDB than the one built into Tablas ` +
+    `(DuckDB ${bundledVersion}). Update Tablas, or re-save the file with an older ` +
+    `storage_compatibility_version.\n\n${message}`
+  );
+}
+
+/**
+ * Views often read files by a relative path (`read_parquet('../data/*.parquet')`).
+ * The database is opened from a temp copy, so DuckDB would resolve those
+ * against the extension host's working directory and find nothing. Pointing
+ * `file_search_path` at the source file's folder makes them resolve next to the
+ * original. Best effort: a failure here must not stop the file from opening.
+ * `file_search_path` is a comma-separated list, so a folder with a comma in its
+ * name is skipped rather than split.
+ */
+async function applyFileSearchPath(connection: DuckDBConnection, searchDir: string | undefined): Promise<void> {
+  if (!searchDir || searchDir.includes(',')) {
+    return;
+  }
+  try {
+    await connection.run(`SET file_search_path = '${searchDir.replace(/'/g, "''")}'`);
+  } catch {
+    // best-effort, as described above
+  }
+}
+
+/**
  * Opens a DuckDB database from raw file bytes by writing them to a temp
  * file and opening that read-only (see the module comment above). No
  * magic-byte pre-check, unlike SQLite's 16-byte sniff / XLSX's 2-byte ZIP
  * sniff -- DuckDB's own open call already rejects a non-database file with
  * a clear error, so hand-rolling a header check here would just duplicate
- * that validation.
+ * that validation. `options.searchDir` is where relative file paths inside
+ * views resolve (see `applyFileSearchPath`). The one failure it does reword is a file from a newer
+ * DuckDB than the bundled engine (see `describeDuckdbOpenError`).
  */
 export async function openDuckdbDatabase(
-  bytes: Uint8Array
+  bytes: Uint8Array,
+  options: { searchDir?: string } = {}
 ): Promise<DuckdbHandle | { error: ParseError }> {
   const tempFilePath = makeTempFilePath();
   try {
@@ -147,12 +200,14 @@ export async function openDuckdbDatabase(
     } catch {
       // best-effort cleanup -- a leaked temp file isn't worth failing the caller over
     }
-    const message = err instanceof Error ? err.message : String(err);
+    const raw = err instanceof Error ? err.message : String(err);
+    const message = describeDuckdbOpenError(raw, version());
     return { error: { type: 'DuckdbError', code: 'OpenFailed', message } };
   }
 
   try {
     const connection = await instance.connect();
+    await applyFileSearchPath(connection, options.searchDir);
     return {
       connection,
       tempFilePath,
@@ -627,8 +682,15 @@ export async function readSelectedTable(
   }
   const target =
     desiredTable && tables.some((t) => t.name === desiredTable) ? desiredTable : tables[0].name;
-  const data = await readDuckdbTable(handle, target, maxRowsInput);
-  return { tables, selectedTable: target, data };
+  try {
+    const data = await readDuckdbTable(handle, target, maxRowsInput);
+    return { tables, selectedTable: target, data };
+  } catch (err) {
+    // A view can fail on its own (e.g. `read_parquet` over files that are not
+    // there). Keep the table list so the user can pick another table.
+    const tableError = err instanceof Error ? err.message : String(err);
+    return { tables, selectedTable: target, data: emptyParsedTable(), tableError };
+  }
 }
 
 /**

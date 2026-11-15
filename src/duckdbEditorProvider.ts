@@ -163,7 +163,10 @@ export class DuckdbEditorProvider
         };
       }
 
-      const opened = await openDuckdbDatabase(bytes);
+      // Relative paths inside views resolve next to the source file, which only
+      // means something for a local file.
+      const searchDir = document.uri.scheme === 'file' ? path.dirname(document.uri.fsPath) : undefined;
+      const opened = await openDuckdbDatabase(bytes, { searchDir });
       if ('error' in opened) {
         return { success: false, errors: [opened.error] };
       }

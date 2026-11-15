@@ -140,7 +140,7 @@
     "typescript-eslint": "^8.67.0"
   },
   "dependencies": {
-    "@duckdb/node-api": "^1.5.5-r.4",
+    "@duckdb/node-api": "^2.0.0-r.1",
     "exceljs": "^4.4.0",
     "hyparquet": "^1.28.2",
     "papaparse": "^5.5.3",

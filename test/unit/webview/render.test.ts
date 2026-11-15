@@ -506,6 +506,30 @@ describe('webview main.js rendering', () => {
       assert.strictEqual(select!.value, 'customer_totals');
       assert.ok(app.querySelector('table'), 'the selected table should also be rendered');
     });
+
+    it('keeps the selector and shows the error when the selected table cannot be read', () => {
+      const { dom } = loadWebview();
+      sendDuckdbData(dom, {
+        success: true,
+        errors: [],
+        data: {
+          tables: [
+            { name: 'broken_view', type: 'view' },
+            { name: 'customers', type: 'table' },
+          ],
+          selectedTable: 'broken_view',
+          data: { headers: [], rows: [], rowCount: 0, columnCount: 0 },
+          tableError: 'IO Error: No files found',
+        },
+      });
+
+      const app = dom.window.document.getElementById('app')!;
+      assert.ok(app.querySelector('select'), 'the selector must stay so another table can be picked');
+      assert.strictEqual(app.querySelector('table'), null);
+      const message = app.querySelector('p.message.error');
+      assert.ok(message);
+      assert.strictEqual(message!.textContent, 'Could not read "broken_view":\nIO Error: No files found');
+    });
   });
 });
 

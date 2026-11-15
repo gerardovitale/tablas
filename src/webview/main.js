@@ -879,8 +879,9 @@
    * with zero columns would wipe out the selector that was just rendered.
    * @param {{ headers: string[], rows: string[][], rowCount: number, columnCount: number, totalRowCount?: number }} data
    * @param {string=} tableName the selected table/sheet of a multi-table source; undefined for CSV/Parquet
+   * @param {string=} tableError why reading `tableName` failed; shown instead of the table
    */
-  function renderTable(data, tableName) {
+  function renderTable(data, tableName, tableError) {
     const app = document.getElementById('app');
     if (!app) { return; }
     // A new table replaces the old one's filters. Tell the host if there were
@@ -894,6 +895,10 @@
     }
     currentView = undefined;
 
+    if (tableError !== undefined) {
+      appendMessage('Could not read "' + tableName + '":\n' + tableError, true);
+      return;
+    }
     if (data.columnCount === 0) {
       appendMessage('Empty file — no data to display.', false);
       return;
@@ -1111,7 +1116,7 @@
     const app = document.getElementById('app');
     if (!app) { return; }
     app.appendChild(renderTableSelector(outcome.data.tables, outcome.data.selectedTable));
-    renderTable(outcome.data.data, outcome.data.selectedTable);
+    renderTable(outcome.data.data, outcome.data.selectedTable, outcome.data.tableError);
   }
 
   window.addEventListener('message', (event) => {

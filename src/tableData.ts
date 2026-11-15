@@ -95,6 +95,13 @@ export interface MultiTableData {
   tables: TableRef[];
   selectedTable: string;
   data: ParsedTable;
+  /**
+   * Set when the table list loaded but reading `selectedTable` failed (e.g. a
+   * DuckDB view over files that cannot be found). `data` is then empty. The
+   * webview shows this under the table selector, so the user can switch to
+   * another table instead of losing the whole file to one bad table.
+   */
+  tableError?: string;
 }
 
 export type MultiTableParseOutcome =
