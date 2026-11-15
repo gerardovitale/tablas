@@ -189,7 +189,7 @@ export class DuckdbEditorProvider
    * a directly-callable, public method (rather than folded straight into
    * the message listener) specifically so a unit test can exercise the
    * table-switch logic without a real webview -- `vscode-test`/
-   * `@vscode/test-electron` has no way to drive a real webview's `<select>`
+   * `@vscode/test-electron` has no way to drive a real webview's table picker
    * from Node-side test code. See test/integration/duckdbEditorProvider.test.ts
    * (it can't live under test/unit/ -- this file imports 'vscode', which
    * only exists inside a real Extension Development Host).

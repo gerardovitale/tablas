@@ -89,6 +89,14 @@
   /** @type {{ card: HTMLElement, trigger: HTMLElement, th: HTMLElement } | undefined} */
   let openCard;
 
+  /**
+   * The table picker's open popup, if any (at most one). `root` is the whole
+   * picker (trigger + popup), so a press on the trigger is "inside".
+   * @type {{ root: HTMLElement, close: (restoreFocus: boolean) => void } | undefined}
+   */
+  let openPicker;
+  let pickerIdCounter = 0;
+
   /** @param {string} tag @param {Record<string, string>=} attrs @returns {HTMLElement} */
   function el(tag, attrs) {
     const elem = document.createElement(tag);
@@ -112,6 +120,7 @@
   }
 
   function clearApp() {
+    if (openPicker) { openPicker.close(false); }
     closeCard(false);
     const app = document.getElementById('app');
     if (app) { app.textContent = ''; }
@@ -1059,33 +1068,294 @@
   // for the first time -- the initial load's response is always accepted.
   let requestedTable;
 
+  // ── Table picker ──────────────────────────────────────────────────────
+
   /**
-   * Builds a <select> listing every table/view in a multi-table source
-   * (e.g. SQLite), with `selectedTable` pre-selected. Switching it posts a
-   * `select-table` request back to the extension host, which re-queries the
-   * already-open database and responds with a fresh payload of the same
-   * message type -- see renderMultiTableOutcome below.
+   * Small outline icon: a grid for a table, a dashed grid for a view. SVG built
+   * with setAttribute only (the CSP forbids inline style).
+   * @param {'table' | 'view'} type
+   */
+  function tableKindIcon(type) {
+    const svg = pickerSvg('picker-icon', '1.2');
+    const box = { x: '2', y: '3', width: '12', height: '10', rx: '1' };
+    svg.appendChild(svgEl('rect', type === 'view' ? { ...box, 'stroke-dasharray': '2 1.5' } : box));
+    svg.appendChild(svgEl('path', { d: 'M2 7h12M6.5 7v6' }));
+    return svg;
+  }
+
+  /** @param {string} d */
+  function pickerGlyph(d) {
+    const svg = pickerSvg('picker-glyph', '1.4');
+    svg.appendChild(svgEl('path', { d }));
+    return svg;
+  }
+
+  /** The empty 14px outline-icon canvas shared by the picker's icons. @param {string} cls @param {string} strokeWidth */
+  function pickerSvg(cls, strokeWidth) {
+    return svgEl('svg', {
+      class: cls, width: '14', height: '14', viewBox: '0 0 16 16',
+      fill: 'none', stroke: 'currentColor', 'stroke-width': strokeWidth, 'aria-hidden': 'true',
+    });
+  }
+
+  /**
+   * Appends `name` to `parent`, wrapping the case-insensitive match of `query`
+   * in <mark>. Text nodes only. Skipped when lower-casing changes the string's
+   * length (e.g. "İ"), where the match offsets would no longer line up.
+   * @param {HTMLElement} parent @param {string} name @param {string} query already lower-cased
+   */
+  function appendHighlighted(parent, name, query) {
+    const index = query === '' || name.toLocaleLowerCase().length !== name.length
+      ? -1
+      : name.toLocaleLowerCase().indexOf(query);
+    if (index < 0) {
+      parent.appendChild(document.createTextNode(name));
+      return;
+    }
+    const mark = el('mark');
+    mark.textContent = name.slice(index, index + query.length);
+    parent.appendChild(document.createTextNode(name.slice(0, index)));
+    parent.appendChild(mark);
+    parent.appendChild(document.createTextNode(name.slice(index + query.length)));
+  }
+
+  /**
+   * Builds the table/view picker for a multi-table source (SQLite, DuckDB,
+   * XLSX): a trigger button showing the current table that opens a searchable
+   * listbox (a combobox: the search input owns focus, `aria-activedescendant`
+   * names the highlighted option). Picking a different table posts
+   * `select-table` to the extension host, which re-queries the already-open
+   * source and answers with a fresh payload of the same message type -- see
+   * renderMultiTableOutcome below. Tables/Views group headers only appear when
+   * the source has both (XLSX sheets are all "tables").
    * @param {import('../../src/tableData').TableRef[]} tables
    * @param {string} selectedTable
    */
   function renderTableSelector(tables, selectedTable) {
+    const uid = 'table-picker-' + (++pickerIdCounter);
+    const hasBothKinds = tables.some((t) => t.type === 'view') && tables.some((t) => t.type !== 'view');
+    let current = selectedTable;
+    // Lower-cased once: the filter runs on every keystroke over every name.
+    const lowerNames = new Map(tables.map((t) => [t.name, t.name.toLocaleLowerCase()]));
+
     const wrapper = el('div', { class: 'table-selector' });
-    const select = el('select', { 'aria-label': 'Table' });
-    for (const table of tables) {
-      const option = el('option', { value: table.name });
-      option.textContent = table.type === 'view' ? `${table.name} (view)` : table.name;
-      if (table.name === selectedTable) {
-        option.selected = true;
-      }
-      select.appendChild(option);
-    }
-    select.addEventListener('change', () => {
-      requestedTable = select.value;
-      vscode.postMessage({ type: 'select-table', table: requestedTable });
+    const trigger = el('button', {
+      type: 'button', class: 'table-picker-trigger',
+      'aria-haspopup': 'listbox', 'aria-expanded': 'false',
     });
-    wrapper.appendChild(select);
+    wrapper.appendChild(trigger);
+
+    function renderTrigger() {
+      const ref = tables.find((t) => t.name === current);
+      const type = ref && ref.type === 'view' ? 'view' : 'table';
+      trigger.textContent = '';
+      trigger.setAttribute('aria-label', 'Table: ' + current + (type === 'view' ? ' (view)' : ''));
+      trigger.title = current;
+      trigger.appendChild(tableKindIcon(type));
+      const name = el('span', { class: 'picker-name' });
+      name.textContent = current;
+      trigger.appendChild(name);
+      if (type === 'view') {
+        const tag = el('span', { class: 'picker-tag' });
+        tag.textContent = 'view';
+        trigger.appendChild(tag);
+      }
+      trigger.appendChild(pickerGlyph('M4 6l4 4 4-4'));
+    }
+    renderTrigger();
+
+    /** @type {HTMLElement | undefined} */
+    let popup;
+
+    /** @param {boolean} restoreFocus */
+    function close(restoreFocus) {
+      if (!popup) { return; }
+      popup.remove();
+      popup = undefined;
+      openPicker = undefined;
+      trigger.setAttribute('aria-expanded', 'false');
+      if (restoreFocus) { trigger.focus(); }
+    }
+
+    /** @param {string} name */
+    function pick(name) {
+      if (name === current) {
+        close(true);
+        return;
+      }
+      current = name;
+      requestedTable = name;
+      renderTrigger();
+      // Cleared by the re-render that the host's reply triggers.
+      wrapper.setAttribute('aria-busy', 'true');
+      // Close (and refocus the trigger) before posting: a reply that lands
+      // synchronously re-renders and must find focus already on the trigger.
+      close(true);
+      vscode.postMessage({ type: 'select-table', table: name });
+    }
+
+    function open() {
+      if (popup) { return; }
+      if (openPicker) { openPicker.close(false); }
+      closeCard(false);
+
+      const popupEl = el('div', { class: 'table-picker-popup' });
+      popup = popupEl;
+      const search = /** @type {HTMLInputElement} */ (el('input', {
+        type: 'text', class: 'table-picker-search', role: 'combobox',
+        'aria-label': 'Filter tables', 'aria-controls': uid + '-list',
+        'aria-expanded': 'true', 'aria-autocomplete': 'list',
+        placeholder: `Filter ${tables.length} ${tables.length === 1 ? 'table' : 'tables'}…`,
+        spellcheck: 'false', autocomplete: 'off',
+      }));
+      const list = el('ul', { class: 'table-picker-list', role: 'listbox', id: uid + '-list', 'aria-label': 'Tables' });
+      popupEl.appendChild(search);
+      popupEl.appendChild(list);
+
+      /** @type {HTMLElement[]} */
+      let options = [];
+      /** @type {string[]} table name of each entry in `options` */
+      let optionNames = [];
+      let active = -1;
+
+      /** @param {number} index @param {boolean} scroll */
+      function setActive(index, scroll) {
+        if (options.length === 0) { return; }
+        const next = Math.max(0, Math.min(options.length - 1, index));
+        if (active >= 0 && options[active]) { options[active].classList.remove('active'); }
+        active = next;
+        const option = options[next];
+        option.classList.add('active');
+        search.setAttribute('aria-activedescendant', option.id);
+        if (scroll && typeof option.scrollIntoView === 'function') {
+          option.scrollIntoView({ block: 'nearest' });
+        }
+      }
+
+      /** @param {string} rawQuery */
+      function renderList(rawQuery) {
+        const query = rawQuery.trim().toLocaleLowerCase();
+        list.textContent = '';
+        options = [];
+        optionNames = [];
+        active = -1;
+        search.removeAttribute('aria-activedescendant');
+        const matches = tables.filter((t) => lowerNames.get(t.name).includes(query));
+        if (matches.length === 0) {
+          const empty = el('li', { class: 'table-picker-empty', role: 'presentation' });
+          empty.textContent = 'No matching tables';
+          list.appendChild(empty);
+          return;
+        }
+        const groups = hasBothKinds
+          ? [
+            { label: 'Tables', items: matches.filter((t) => t.type !== 'view') },
+            { label: 'Views', items: matches.filter((t) => t.type === 'view') },
+          ]
+          : [{ label: undefined, items: matches }];
+        for (const group of groups) {
+          if (group.items.length === 0) { continue; }
+          // Options go straight into the listbox, or into a labelled role=group
+          // so a screen reader hears "Views (2)" (the visible header is hidden
+          // from it to avoid reading the same text twice).
+          let container = list;
+          if (group.label !== undefined) {
+            const groupText = `${group.label} (${group.items.length})`;
+            const groupEl = el('li', { role: 'group', 'aria-label': groupText });
+            const header = el('div', { class: 'table-picker-group', 'aria-hidden': 'true' });
+            header.textContent = groupText;
+            container = el('ul', { role: 'presentation', class: 'table-picker-group-items' });
+            groupEl.appendChild(header);
+            groupEl.appendChild(container);
+            list.appendChild(groupEl);
+          }
+          for (const table of group.items) {
+            const selected = table.name === current;
+            const option = el('li', {
+              class: 'table-picker-option', role: 'option',
+              id: `${uid}-opt-${options.length}`, 'aria-selected': selected ? 'true' : 'false',
+            });
+            option.title = table.name;
+            option.appendChild(tableKindIcon(table.type === 'view' ? 'view' : 'table'));
+            const name = el('span', { class: 'picker-name' });
+            appendHighlighted(name, table.name, query);
+            option.appendChild(name);
+            if (table.type === 'view') {
+              const tag = el('span', { class: 'picker-tag' });
+              tag.textContent = 'view';
+              option.appendChild(tag);
+            }
+            if (selected) { option.appendChild(pickerGlyph('M3.5 8.5l3 3 6-7')); }
+            const tableName = table.name;
+            const optionIndex = options.length;
+            option.addEventListener('mousemove', () => {
+              if (optionIndex !== active) { setActive(optionIndex, false); }
+            });
+            option.addEventListener('click', () => pick(tableName));
+            options.push(option);
+            optionNames.push(tableName);
+            container.appendChild(option);
+          }
+        }
+        const currentIndex = options.findIndex((o) => o.getAttribute('aria-selected') === 'true');
+        setActive(currentIndex >= 0 ? currentIndex : 0, true);
+      }
+
+      search.addEventListener('input', () => renderList(search.value));
+      search.addEventListener('keydown', (event) => {
+        // Enter/arrows while an IME composition is open belong to the IME.
+        if (event.isComposing) { return; }
+        switch (event.key) {
+          case 'ArrowDown': event.preventDefault(); setActive(active + 1, true); break;
+          case 'ArrowUp': event.preventDefault(); setActive(active - 1, true); break;
+          case 'PageDown': event.preventDefault(); setActive(active + 10, true); break;
+          case 'PageUp': event.preventDefault(); setActive(active - 10, true); break;
+          case 'Enter':
+            event.preventDefault();
+            if (active >= 0) { pick(optionNames[active]); }
+            break;
+          case 'Escape':
+            // Must not also reach the card's document-level Escape handling.
+            event.preventDefault();
+            event.stopPropagation();
+            close(true);
+            break;
+          case 'Tab':
+            // Focus goes back to the trigger first, so Tab continues from there.
+            close(true);
+            break;
+          default: break;
+        }
+      });
+
+      wrapper.appendChild(popupEl);
+      trigger.setAttribute('aria-expanded', 'true');
+      openPicker = { root: wrapper, close };
+      renderList('');
+      search.focus();
+    }
+
+    trigger.addEventListener('click', () => {
+      if (popup) { close(true); } else { open(); }
+    });
+    trigger.addEventListener('keydown', (event) => {
+      if (event.key === 'ArrowDown' && !popup) {
+        event.preventDefault();
+        open();
+      }
+    });
     return wrapper;
   }
+
+  // Registered once, a no-op while no picker is open (like the card's below).
+  document.addEventListener('pointerdown', (event) => {
+    if (openPicker && !openPicker.root.contains(/** @type {Node} */ (event.target))) {
+      openPicker.close(false);
+    }
+  }, true);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && openPicker) { openPicker.close(false); }
+  });
 
   /**
    * @param {import('../../src/tableData').MultiTableParseOutcome} outcome
@@ -1101,6 +1371,10 @@
       // table the user already moved away from.
       return;
     }
+    // A keyboard user who just picked a table has focus on the picker's
+    // trigger; the re-render below replaces it, so hand focus to the new one.
+    const active = document.activeElement;
+    const pickerHadFocus = !!active && active.closest('.table-selector') !== null;
     clearApp();
     if (!outcome.success) {
       const msgs = outcome.errors.map((e) => e.message).join('\n');
@@ -1115,7 +1389,12 @@
     }
     const app = document.getElementById('app');
     if (!app) { return; }
-    app.appendChild(renderTableSelector(outcome.data.tables, outcome.data.selectedTable));
+    const selector = renderTableSelector(outcome.data.tables, outcome.data.selectedTable);
+    app.appendChild(selector);
+    if (pickerHadFocus) {
+      const newTrigger = selector.querySelector('button');
+      if (newTrigger) { newTrigger.focus(); }
+    }
     renderTable(outcome.data.data, outcome.data.selectedTable, outcome.data.tableError);
   }
 

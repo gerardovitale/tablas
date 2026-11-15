@@ -85,6 +85,17 @@ Acceptance:
 - Truncate the cell to the operand's precision (month, day, minute, second), treating `T` and a space as the same separator, in `compileCellPredicate` and in `filterPredicateSql`.
 - Add cases to `FILTER_CASES` (including `=`/`!=` on columns 6-7) and to the DuckDB differential test.
 
+## Multi-table sources
+
+### T-1 · DuckDB only lists tables in the `main` schema · P2 · M
+
+`listDuckdbTables` filters `information_schema.tables` on `table_schema = 'main'`, so tables and views in any other schema (common in dbt warehouses, which put models in `staging`, `marts`, etc.) are invisible in the table picker.
+
+Acceptance:
+- List every non-system schema (skip `information_schema`, `pg_catalog`), group by schema in the picker, and qualify names as `schema.table` end to end.
+- `TableRef` gains a schema; `select-table`, `readDuckdbTable`, `duckdbTableStats` and the filter SQL quote it (see `quoteIdentifier`).
+- Fixture with tables in two schemas, plus a name that exists in both.
+
 ## Packaging and marketplace
 
 ### P-1 · Internal docs probably ship in the `.vsix` · P2 · S

@@ -116,7 +116,7 @@ describe('DuckdbEditorProvider Integration', () => {
   });
 
   /**
-   * The table-switch round trip (webview `<select>` change -> `select-table`
+   * The table-switch round trip (webview table picker choice -> `select-table`
    * message -> host response) can't be driven end-to-end from test code --
    * see sqliteEditorProvider.test.ts's identical comment. The host-side
    * switch logic is exercised directly here instead, via

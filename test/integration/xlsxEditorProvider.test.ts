@@ -107,7 +107,7 @@ describe('XlsxEditorProvider Integration', () => {
   });
 
   /**
-   * The sheet-switch round trip (webview `<select>` change -> `select-table`
+   * The sheet-switch round trip (webview table picker choice -> `select-table`
    * message -> host response) can't be driven end-to-end from test code:
    * `vscode-test`/`@vscode/test-electron` exposes `Webview.postMessage` for
    * the *host* to send messages, and `onDidReceiveMessage` for the host to

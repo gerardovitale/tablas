@@ -111,6 +111,57 @@ function sendDuckdbData(dom: JSDOM, payload: MultiTableParseOutcome): void {
   );
 }
 
+// ── Table picker helpers ────────────────────────────────────────────────
+
+function pickerTrigger(app: HTMLElement): HTMLButtonElement | null {
+  return app.querySelector('button.table-picker-trigger');
+}
+
+/** The name shown on the trigger button (the currently selected table). */
+function pickerCurrent(app: HTMLElement): string | null | undefined {
+  return pickerTrigger(app)?.querySelector('.picker-name')?.textContent;
+}
+
+function openPickerPopup(app: HTMLElement): HTMLElement {
+  pickerTrigger(app)!.click();
+  const popup = app.querySelector('.table-picker-popup');
+  assert.ok(popup, 'the picker popup should be open');
+  return popup as HTMLElement;
+}
+
+/** Names of the options currently listed in the open popup, in order. */
+function listedNames(app: HTMLElement): (string | null | undefined)[] {
+  return Array.from(app.querySelectorAll('.table-picker-option')).map(
+    (o) => o.querySelector('.picker-name')?.textContent
+  );
+}
+
+function pickerKey(dom: JSDOM, target: Element, key: string): KeyboardEvent {
+  const event = new dom.window.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+  target.dispatchEvent(event);
+  return event;
+}
+
+function pickerSearch(popup: HTMLElement): HTMLInputElement {
+  return popup.querySelector('input.table-picker-search') as HTMLInputElement;
+}
+
+function typeInPicker(dom: JSDOM, popup: HTMLElement, text: string): void {
+  const search = pickerSearch(popup);
+  search.value = text;
+  search.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+}
+
+/** Opens the picker and clicks the option for `name`. */
+function pickTable(app: HTMLElement, name: string): void {
+  const popup = openPickerPopup(app);
+  const option = Array.from(popup.querySelectorAll('.table-picker-option')).find(
+    (o) => o.querySelector('.picker-name')?.textContent === name
+  ) as HTMLElement;
+  assert.ok(option, `option "${name}" should be listed`);
+  option.click();
+}
+
 describe('webview main.js rendering', () => {
   afterEach(() => {
     webviewGlobal.window = undefined;
@@ -277,7 +328,7 @@ describe('webview main.js rendering', () => {
   });
 
   describe('sqlite-data (multi-table sources)', () => {
-    it('renders a table selector with the right option pre-selected, plus the table', () => {
+    it('renders a table picker showing the selected table, plus the table', () => {
       const { dom } = loadWebview();
       sendSqliteData(dom, {
         success: true,
@@ -298,17 +349,15 @@ describe('webview main.js rendering', () => {
       });
 
       const app = dom.window.document.getElementById('app')!;
-      const select = app.querySelector('select') as HTMLSelectElement | null;
-      assert.ok(select, 'a table selector should be rendered');
-      const options = Array.from(select!.querySelectorAll('option'));
-      assert.deepStrictEqual(
-        options.map((o) => [o.getAttribute('value'), o.textContent]),
-        [
-          ['customers', 'customers'],
-          ['customer_totals', 'customer_totals (view)'],
-        ]
-      );
-      assert.strictEqual(select!.value, 'customer_totals');
+      assert.ok(pickerTrigger(app), 'a table picker should be rendered');
+      assert.strictEqual(app.querySelector('select'), null, 'no native <select> any more');
+      assert.strictEqual(pickerCurrent(app), 'customer_totals');
+      assert.ok(pickerTrigger(app)!.querySelector('.picker-tag'), 'a view is tagged on the trigger');
+
+      const popup = openPickerPopup(app);
+      assert.deepStrictEqual(listedNames(app), ['customers', 'customer_totals']);
+      const selected = popup.querySelector('[aria-selected="true"]');
+      assert.strictEqual(selected?.querySelector('.picker-name')?.textContent, 'customer_totals');
 
       const table = app.querySelector('table');
       assert.ok(table, 'the selected table should also be rendered');
@@ -330,9 +379,8 @@ describe('webview main.js rendering', () => {
       });
 
       const app = dom.window.document.getElementById('app')!;
-      const select = app.querySelector('select') as HTMLSelectElement | null;
-      assert.ok(select, 'the table selector should survive a zero-column selection');
-      assert.strictEqual(select!.value, 'empty_table');
+      assert.ok(pickerTrigger(app), 'the table picker should survive a zero-column selection');
+      assert.strictEqual(pickerCurrent(app), 'empty_table');
       assert.match(app.textContent ?? '', /empty file/i);
     });
 
@@ -352,10 +400,8 @@ describe('webview main.js rendering', () => {
       });
 
       const app = dom.window.document.getElementById('app')!;
-      const select = app.querySelector('select') as HTMLSelectElement;
-      // Simulate the user switching twice before either response arrives.
-      select.value = 'b';
-      select.dispatchEvent(new dom.window.Event('change'));
+      // The user switches to 'b' before the host has answered.
+      pickTable(app, 'b');
 
       // A late response for the first (now-superseded) request for 'a'
       // should be dropped, not flash 'a' back onto the screen.
@@ -372,8 +418,7 @@ describe('webview main.js rendering', () => {
         },
       });
 
-      const selectAfterStale = app.querySelector('select') as HTMLSelectElement;
-      assert.strictEqual(selectAfterStale.value, 'b', 'a stale response for "a" must not override "b"');
+      assert.strictEqual(pickerCurrent(app), 'b', 'a stale response for "a" must not override "b"');
 
       // The real response for 'b' should still be accepted normally.
       sendSqliteData(dom, {
@@ -389,8 +434,7 @@ describe('webview main.js rendering', () => {
         },
       });
 
-      const selectAfterFresh = app.querySelector('select') as HTMLSelectElement;
-      assert.strictEqual(selectAfterFresh.value, 'b');
+      assert.strictEqual(pickerCurrent(app), 'b');
       const bodyRow = app.querySelector('tbody tr');
       assert.deepStrictEqual(
         Array.from(bodyRow!.querySelectorAll('td')).map((td) => td.textContent),
@@ -398,7 +442,7 @@ describe('webview main.js rendering', () => {
       );
     });
 
-    it('posts a select-table message when the dropdown changes', () => {
+    it('posts a select-table message when another table is picked', () => {
       const { dom, postedMessages } = loadWebview();
       sendSqliteData(dom, {
         success: true,
@@ -414,9 +458,7 @@ describe('webview main.js rendering', () => {
       });
 
       const app = dom.window.document.getElementById('app')!;
-      const select = app.querySelector('select') as HTMLSelectElement;
-      select.value = 'orders';
-      select.dispatchEvent(new dom.window.Event('change'));
+      pickTable(app, 'orders');
 
       assert.deepStrictEqual(postedMessages[postedMessages.length - 1], {
         type: 'select-table',
@@ -437,7 +479,7 @@ describe('webview main.js rendering', () => {
       });
 
       const app = dom.window.document.getElementById('app')!;
-      assert.strictEqual(app.querySelector('select'), null);
+      assert.strictEqual(pickerTrigger(app), null);
       assert.strictEqual(app.querySelector('table'), null);
       assert.match(app.textContent ?? '', /no tables found/i);
     });
@@ -470,8 +512,10 @@ describe('webview main.js rendering', () => {
 
       const app = dom.window.document.getElementById('app')!;
       assert.strictEqual(app.querySelector('img'), null);
-      const option = app.querySelector('option');
-      assert.strictEqual(option?.textContent, payload);
+      assert.strictEqual(pickerCurrent(app), payload);
+      openPickerPopup(app);
+      assert.strictEqual(app.querySelector('img'), null);
+      assert.deepStrictEqual(listedNames(app), [payload]);
     });
   });
 
@@ -501,9 +545,8 @@ describe('webview main.js rendering', () => {
       });
 
       const app = dom.window.document.getElementById('app')!;
-      const select = app.querySelector('select') as HTMLSelectElement | null;
-      assert.ok(select, 'a table selector should be rendered');
-      assert.strictEqual(select!.value, 'customer_totals');
+      assert.ok(pickerTrigger(app), 'a table picker should be rendered');
+      assert.strictEqual(pickerCurrent(app), 'customer_totals');
       assert.ok(app.querySelector('table'), 'the selected table should also be rendered');
     });
 
@@ -524,11 +567,239 @@ describe('webview main.js rendering', () => {
       });
 
       const app = dom.window.document.getElementById('app')!;
-      assert.ok(app.querySelector('select'), 'the selector must stay so another table can be picked');
+      assert.ok(pickerTrigger(app), 'the picker must stay so another table can be picked');
       assert.strictEqual(app.querySelector('table'), null);
       const message = app.querySelector('p.message.error');
       assert.ok(message);
       assert.strictEqual(message!.textContent, 'Could not read "broken_view":\nIO Error: No files found');
+    });
+  });
+
+  describe('table picker', () => {
+    const tableData = { headers: ['id'], rows: [['1']], rowCount: 1, columnCount: 1 };
+
+    function sendTables(
+      dom: JSDOM,
+      tables: { name: string; type: 'table' | 'view' }[],
+      selectedTable = tables[0].name
+    ): HTMLElement {
+      sendDuckdbData(dom, { success: true, errors: [], data: { tables, selectedTable, data: tableData } });
+      return dom.window.document.getElementById('app')!;
+    }
+
+    const mixed: { name: string; type: 'table' | 'view' }[] = [
+      { name: 'raw_invoices', type: 'table' },
+      { name: 'stg_invoice', type: 'view' },
+      { name: 'stg_payment', type: 'view' },
+    ];
+
+    it('toggles aria-expanded and the popup when the trigger is clicked', () => {
+      const { dom } = loadWebview();
+      const app = sendTables(dom, mixed);
+      const trigger = pickerTrigger(app)!;
+      assert.strictEqual(trigger.getAttribute('aria-expanded'), 'false');
+      assert.strictEqual(app.querySelector('.table-picker-popup'), null);
+
+      trigger.click();
+      assert.strictEqual(trigger.getAttribute('aria-expanded'), 'true');
+      assert.ok(app.querySelector('.table-picker-popup'));
+
+      trigger.click();
+      assert.strictEqual(trigger.getAttribute('aria-expanded'), 'false');
+      assert.strictEqual(app.querySelector('.table-picker-popup'), null);
+    });
+
+    it('groups tables and views with counts only when both kinds exist', () => {
+      const { dom } = loadWebview();
+      const app = sendTables(dom, mixed);
+      openPickerPopup(app);
+      assert.deepStrictEqual(
+        Array.from(app.querySelectorAll('.table-picker-group')).map((g) => g.textContent),
+        ['Tables (1)', 'Views (2)']
+      );
+      assert.deepStrictEqual(listedNames(app), ['raw_invoices', 'stg_invoice', 'stg_payment']);
+    });
+
+    it('lists a source with only tables (e.g. XLSX sheets) flat, without group headers', () => {
+      const { dom } = loadWebview();
+      const app = sendTables(dom, [
+        { name: 'Sheet1', type: 'table' },
+        { name: 'Sheet2', type: 'table' },
+      ]);
+      openPickerPopup(app);
+      assert.strictEqual(app.querySelector('.table-picker-group'), null);
+      assert.deepStrictEqual(listedNames(app), ['Sheet1', 'Sheet2']);
+    });
+
+    it('filters case-insensitively, updates group counts and highlights the match', () => {
+      const { dom } = loadWebview();
+      const app = sendTables(dom, mixed);
+      const popup = openPickerPopup(app);
+
+      typeInPicker(dom, popup, 'STG_');
+      assert.deepStrictEqual(listedNames(app), ['stg_invoice', 'stg_payment']);
+      assert.deepStrictEqual(
+        Array.from(app.querySelectorAll('.table-picker-group')).map((g) => g.textContent),
+        ['Views (2)']
+      );
+      assert.strictEqual(app.querySelector('.table-picker-option mark')?.textContent, 'stg_');
+
+      typeInPicker(dom, popup, 'nothing like this');
+      assert.deepStrictEqual(listedNames(app), []);
+      assert.match(app.querySelector('.table-picker-empty')?.textContent ?? '', /no matching tables/i);
+    });
+
+    it('filters non-ASCII names case-insensitively', () => {
+      const { dom } = loadWebview();
+      const app = sendTables(dom, [
+        { name: 'Überweisung', type: 'table' },
+        { name: 'orders', type: 'table' },
+      ]);
+      const popup = openPickerPopup(app);
+      typeInPicker(dom, popup, 'ü');
+      assert.deepStrictEqual(listedNames(app), ['Überweisung']);
+    });
+
+    it('moves with ArrowDown and picks with Enter, posting select-table', () => {
+      const { dom, postedMessages } = loadWebview();
+      const app = sendTables(dom, mixed);
+      const popup = openPickerPopup(app);
+      const search = pickerSearch(popup);
+
+      // Opens on the current table (raw_invoices); one ArrowDown lands on stg_invoice.
+      pickerKey(dom, search, 'ArrowDown');
+      const activeId = search.getAttribute('aria-activedescendant');
+      assert.strictEqual(
+        popup.querySelector('.table-picker-option.active')?.id,
+        activeId
+      );
+      pickerKey(dom, search, 'Enter');
+
+      assert.deepStrictEqual(postedMessages[postedMessages.length - 1], {
+        type: 'select-table',
+        table: 'stg_invoice',
+      });
+      assert.strictEqual(app.querySelector('.table-picker-popup'), null, 'picking closes the popup');
+      assert.strictEqual(pickerCurrent(app), 'stg_invoice');
+    });
+
+    it('posts nothing when the already-selected table is picked', () => {
+      const { dom, postedMessages } = loadWebview();
+      const app = sendTables(dom, mixed);
+      const before = postedMessages.length;
+      pickTable(app, 'raw_invoices');
+      assert.strictEqual(postedMessages.length, before);
+      assert.strictEqual(app.querySelector('.table-picker-popup'), null);
+    });
+
+    it('closes on Escape without posting, returning focus to the trigger', () => {
+      const { dom, postedMessages } = loadWebview();
+      const app = sendTables(dom, mixed);
+      const before = postedMessages.length;
+      const popup = openPickerPopup(app);
+      const event = pickerKey(dom, pickerSearch(popup), 'Escape');
+
+      assert.ok(event.defaultPrevented);
+      assert.strictEqual(app.querySelector('.table-picker-popup'), null);
+      assert.strictEqual(postedMessages.length, before);
+      assert.strictEqual(dom.window.document.activeElement, pickerTrigger(app));
+    });
+
+    it('closes when the user presses outside the picker', () => {
+      const { dom } = loadWebview();
+      const app = sendTables(dom, mixed);
+      openPickerPopup(app);
+      app.querySelector('table')!.dispatchEvent(new dom.window.Event('pointerdown', { bubbles: true }));
+      assert.strictEqual(app.querySelector('.table-picker-popup'), null);
+    });
+
+    it('opens with ArrowDown on the trigger', () => {
+      const { dom } = loadWebview();
+      const app = sendTables(dom, mixed);
+      pickerKey(dom, pickerTrigger(app)!, 'ArrowDown');
+      assert.ok(app.querySelector('.table-picker-popup'));
+    });
+
+    it('exposes each group to assistive tech as a labelled role=group', () => {
+      const { dom } = loadWebview();
+      const app = sendTables(dom, mixed);
+      openPickerPopup(app);
+      const groups = Array.from(app.querySelectorAll('[role="group"]'));
+      assert.deepStrictEqual(groups.map((g) => g.getAttribute('aria-label')), ['Tables (1)', 'Views (2)']);
+      assert.deepStrictEqual(
+        groups.map((g) => g.querySelectorAll('[role="option"]').length),
+        [1, 2]
+      );
+    });
+
+    it('ignores Enter while an IME composition is open', () => {
+      const { dom, postedMessages } = loadWebview();
+      const app = sendTables(dom, mixed);
+      const popup = openPickerPopup(app);
+      const before = postedMessages.length;
+      pickerSearch(popup).dispatchEvent(
+        new dom.window.KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true, cancelable: true })
+      );
+      assert.strictEqual(postedMessages.length, before);
+      assert.ok(app.querySelector('.table-picker-popup'), 'the popup stays open');
+    });
+
+    it('closes on Tab and leaves focus on the trigger', () => {
+      const { dom } = loadWebview();
+      const app = sendTables(dom, mixed);
+      const popup = openPickerPopup(app);
+      pickerKey(dom, pickerSearch(popup), 'Tab');
+      assert.strictEqual(app.querySelector('.table-picker-popup'), null);
+      assert.strictEqual(dom.window.document.activeElement, pickerTrigger(app));
+    });
+
+    it('moves focus to the new trigger when the reply re-renders while focus is in the picker', () => {
+      const { dom } = loadWebview();
+      const app = sendTables(dom, mixed);
+      pickTable(app, 'stg_invoice');
+      assert.strictEqual(dom.window.document.activeElement, pickerTrigger(app));
+
+      // The host's reply replaces the whole picker; focus must follow it.
+      const oldTrigger = pickerTrigger(app);
+      sendDuckdbData(dom, {
+        success: true,
+        errors: [],
+        data: { tables: mixed, selectedTable: 'stg_invoice', data: tableData },
+      });
+      assert.notStrictEqual(pickerTrigger(app), oldTrigger, 'the picker was re-rendered');
+      assert.strictEqual(dom.window.document.activeElement, pickerTrigger(app));
+
+      // Same when the user has already reopened it and is typing in the search box.
+      openPickerPopup(app);
+      pickerSearch(app.querySelector('.table-picker-popup') as HTMLElement).focus();
+      sendDuckdbData(dom, {
+        success: true,
+        errors: [],
+        data: { tables: mixed, selectedTable: 'stg_invoice', data: tableData },
+      });
+      assert.strictEqual(app.querySelector('.table-picker-popup'), null);
+      assert.strictEqual(dom.window.document.activeElement, pickerTrigger(app));
+    });
+
+    it('is not rendered for single-table sources', () => {
+      const { dom } = loadWebview();
+      sendCsvData(dom, {
+        success: true,
+        errors: [],
+        data: { headers: ['a'], rows: [['1']], rowCount: 1, columnCount: 1 },
+      });
+      assert.strictEqual(pickerTrigger(dom.window.document.getElementById('app')!), null);
+    });
+
+    it('renders hostile names as inert text, including the match highlight', () => {
+      const { dom } = loadWebview();
+      const payload = '<img src=x onerror=alert(1)>';
+      const app = sendTables(dom, [{ name: payload, type: 'view' }]);
+      const popup = openPickerPopup(app);
+      typeInPicker(dom, popup, 'img');
+      assert.strictEqual(app.querySelector('img'), null);
+      assert.strictEqual(app.querySelector('.table-picker-option mark')?.textContent, 'img');
+      assert.deepStrictEqual(listedNames(app), [payload]);
     });
   });
 });
