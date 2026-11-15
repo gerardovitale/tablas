@@ -332,11 +332,17 @@ describe('views over files read by a relative path', () => {
     }
   });
 
-  it('still opens when the folder has a comma (file_search_path is comma-separated)', async () => {
+  it('skips a folder with a comma (file_search_path is comma-separated): opens, but the view stays unresolved', async () => {
     const bytes = await buildDb(root);
-    const opened = await openDuckdbDatabase(bytes, { searchDir: path.join(root, 'a,b') });
-    assert.ok(!('error' in opened));
-    if (!('error' in opened)) {
+    // Without the guard this would set two bogus search folders, `<root>/data,x` split in two.
+    const opened = await openDuckdbDatabase(bytes, { searchDir: path.join(root, 'data') + ',x' });
+    if ('error' in opened) {
+      throw new Error(opened.error.message);
+    }
+    try {
+      const result = await readSelectedTable(opened, await listDuckdbTables(opened), 'v');
+      assert.ok(result.tableError && result.tableError.includes('No files found'));
+    } finally {
       opened.close();
     }
   });
@@ -352,6 +358,13 @@ describe('describeDuckdbOpenError', () => {
     assert.ok(out.includes('newer DuckDB than the one built into Tablas'));
     assert.ok(out.includes('DuckDB v1.5.5'));
     assert.ok(out.endsWith(newerStorage));
+  });
+
+  it('does not claim a too-old file is newer', () => {
+    const older =
+      'IO Error: Trying to read a database file with version number 12, but we can only read versions between 64 and 68.\n' +
+      'The database file was created with an older version of DuckDB.';
+    assert.strictEqual(describeDuckdbOpenError(older, 'v2.0.0'), older);
   });
 
   it('leaves unrelated open errors unchanged', () => {

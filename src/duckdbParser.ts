@@ -117,15 +117,16 @@ export function emptyParsedTable(): ParsedTable {
 
 /**
  * DuckDB's message when the file's storage version is newer than the bundled
- * engine understands ("... version number 999, but we can only read versions
+ * engine understands. Only the closing sentence tells newer from older: the
+ * "version number N, but we can only read ..." line is the same for a file too
+ * old to read, which an update would not help. ("... version number 999, but we can only read versions
  * between 64 and 68. The database file was created with an newer version of
  * DuckDB."). Storage is backward- but not forward-compatible, so the only
  * fixes are a newer engine (update Tablas) or re-saving the file for an older
  * one -- neither is obvious from DuckDB's raw text, which reads like a
  * corrupt file.
  */
-const NEWER_STORAGE_PATTERN =
-  /database file with version number \d+|created with an? newer version of DuckDB/i;
+const NEWER_STORAGE_PATTERN = /created with an? newer version of DuckDB/i;
 
 /**
  * Turns a `DuckDBInstance.create` failure message into what the user sees.
