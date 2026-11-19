@@ -7,9 +7,11 @@ import {
   DOUBLE,
   DuckDBInstance,
   DuckDBTypeId,
+  StatementType,
   VARCHAR,
   version,
   type DuckDBConnection,
+  type DuckDBResultReader,
   type DuckDBType,
   type Json,
 } from '@duckdb/node-api';
@@ -39,6 +41,7 @@ import {
   type CompareOp,
   type FilterOutcome,
 } from './filter';
+import type { QueryOutcome } from './queryMessage';
 import {
   clampMaxRows,
   type ColumnKind,
@@ -269,16 +272,63 @@ export function runExclusive<T>(handle: DuckdbHandle, fn: () => Promise<T>): Pro
   return run;
 }
 
-/** Lists user tables and views in the database's main schema. */
+// The table list of each handle, by `TableRef.name`. A handle is a snapshot of
+// one file's bytes, so its list never changes; the SQL builders below look a
+// name up here to know which schema it lives in. A name that was never listed
+// (a caller that skipped `listDuckdbTables`) is a bare `main` table.
+const tableRefs = new WeakMap<DuckdbHandle, Map<string, TableRef>>();
+// And the list itself: stats and filter requests list the tables just to check
+// a name is known, which must not re-run the catalog join every time.
+const tableLists = new WeakMap<DuckdbHandle, TableRef[]>();
+
+/** `"schema"."table"` for a table outside `main`, else `"table"`; see `tableRefs`. */
+function quotedTableName(handle: DuckdbHandle, name: string): string {
+  const ref = tableRefs.get(handle)?.get(name);
+  return ref?.schema !== undefined
+    ? `${quoteIdentifier(ref.schema)}.${quoteIdentifier(ref.table ?? name)}`
+    : quoteIdentifier(name);
+}
+
+const MAIN_SCHEMA = 'main';
+
+/**
+ * Lists the user tables and views of every schema in the database (not
+ * `information_schema` / `pg_catalog`; dbt keeps models in schemas such as
+ * `staging` or `main_marts`), `main` first, then by schema and name. Tables
+ * in `main` keep their bare name, so a name stays valid however many other
+ * schemas the file gains; the rest are `schema.table`. `approxRows` comes from
+ * `duckdb_tables()` (no scan) and is left out for views.
+ */
 export function listDuckdbTables(handle: DuckdbHandle): Promise<TableRef[]> {
+  // Still through the queue when cached: a caller that lists first and checks
+  // whether it was overtaken (the filter's `seq` check) relies on that wait.
   return runExclusive(handle, async () => {
+    const cached = tableLists.get(handle);
+    if (cached) {
+      return cached;
+    }
     const reader = await handle.connection.runAndReadAll(
-      `SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = 'main' ORDER BY table_name ASC`
+      `SELECT t.table_schema, t.table_name, t.table_type, d.estimated_size
+       FROM information_schema.tables t
+       LEFT JOIN duckdb_tables() d
+         ON d.database_name = t.table_catalog AND d.schema_name = t.table_schema AND d.table_name = t.table_name
+       WHERE t.table_catalog = current_database() AND t.table_schema NOT IN ('information_schema', 'pg_catalog')
+       ORDER BY (t.table_schema = '${MAIN_SCHEMA}') DESC, t.table_schema ASC, t.table_name ASC`
     );
-    return reader.getRowsJson().map((row) => ({
-      name: String(row[0]),
-      type: row[1] === 'VIEW' ? ('view' as const) : ('table' as const),
-    }));
+    const refs = reader.getRowsJson().map((row): TableRef => {
+      const schema = String(row[0]);
+      const table = String(row[1]);
+      const size = row[3] === null || row[3] === undefined ? NaN : Number(row[3]);
+      return {
+        name: schema === MAIN_SCHEMA ? table : `${schema}.${table}`,
+        type: row[2] === 'VIEW' ? 'view' : 'table',
+        ...(schema !== MAIN_SCHEMA && { schema, table }),
+        ...(Number.isFinite(size) && size >= 0 && { approxRows: size }),
+      };
+    });
+    tableRefs.set(handle, new Map(refs.map((ref) => [ref.name, ref])));
+    tableLists.set(handle, refs);
+    return refs;
   });
 }
 
@@ -402,7 +452,7 @@ async function buildDuckdbColumn(
 
 /** The uncached work behind `duckdbTableStats`; may throw (including on interrupt). */
 async function computeDuckdbStats(handle: DuckdbHandle, tableName: string): Promise<TableStats | undefined> {
-  const quotedTable = quoteIdentifier(tableName);
+  const quotedTable = quotedTableName(handle, tableName);
   // Column names and types come from a zero-row read, which still carries
   // the full result schema.
   const schemaReader = await handle.connection.runAndReadAll(`SELECT * FROM ${quotedTable} LIMIT 0`);
@@ -595,7 +645,7 @@ export function duckdbTableFilter(
       handle.connection.interrupt();
     }, filterLimits.duckdbTimeoutMs);
     try {
-      const quotedTable = quoteIdentifier(tableName);
+      const quotedTable = quotedTableName(handle, tableName);
       const schemaReader = await handle.connection.runAndReadAll(`SELECT * FROM ${quotedTable} LIMIT 0`);
       const headers = schemaReader.columnNames();
       if (headers.length === 0 || hasUnknownColumn(specs, headers.length)) {
@@ -637,6 +687,135 @@ export function duckdbTableFilter(
   });
 }
 
+/** Limits for the read-only SQL box (mutable so tests can drive the timeout and length paths). */
+export const queryLimits = {
+  /** Wall-clock budget per query, enforced with `connection.interrupt()`. */
+  duckdbTimeoutMs: 30_000,
+  /** Longest query text accepted; the webview's textarea carries the same `maxlength`. */
+  maxSqlLength: 100_000,
+};
+
+// What the SQL box will run: reads. `SELECT` covers WITH, FROM-first, SHOW,
+// DESCRIBE, SUMMARIZE and the read-style pragmas (`PRAGMA table_info(..)`,
+// `PRAGMA database_size`); MULTI is what PIVOT expands to; EXPLAIN is allowed
+// only without ANALYZE (below). Everything else is refused *before* it runs,
+// because the database being read-only does not make a statement harmless:
+// `COPY .. TO` writes a file, `INSTALL`/`LOAD` fetch and load extension code,
+// `ATTACH` opens other files, `PRAGMA profiling_output = ..` redirects a file
+// every later query writes to, `CALL` runs functions with side effects (a plain
+// `SELECT * FROM fn()` covers the read-only ones), and the box re-runs its query
+// after every refresh. This is a guard against slips on the user's own machine,
+// not a sandbox.
+const READ_STATEMENT_TYPES: ReadonlySet<StatementType> = new Set([
+  StatementType.SELECT,
+  StatementType.EXPLAIN,
+  StatementType.MULTI,
+]);
+
+// `EXPLAIN ANALYZE <statement>` *executes* the statement (it is typed EXPLAIN, so
+// the allow-list cannot tell it apart): `EXPLAIN ANALYZE COPY .. TO 'f'` writes
+// the file. Matched anywhere in the text, so `EXPLAIN (ANALYZE) ..` and
+// `EXPLAIN /* */ ANALYSE ..` are caught too; a stray hit only costs the user a
+// clear message and a plain EXPLAIN.
+const EXPLAIN_ANALYZE_PATTERN = /\banaly[sz]e\b/i;
+const EXPLAIN_ANALYZE_REFUSAL = 'EXPLAIN ANALYZE runs the statement it explains, so it is not available here. Use EXPLAIN instead.';
+
+function refusal(statementType: StatementType): string {
+  const label = statementType === StatementType.LOAD ? 'INSTALL or LOAD' : (StatementType[statementType] ?? 'different');
+  const article = /^[AEIOU]/.test(label) ? 'an' : 'a';
+  return (
+    'Only read queries can be run here (SELECT/WITH, FROM, SHOW, DESCRIBE, SUMMARIZE, PIVOT, EXPLAIN). ' +
+    `This is ${article} ${label} statement.`
+  );
+}
+
+/** `SELECT * FROM <table> LIMIT 100`, with the table qualified as the file needs it. */
+export function suggestQuery(handle: DuckdbHandle, tableName: string): string {
+  return `SELECT * FROM ${quotedTableName(handle, tableName)} LIMIT 100`;
+}
+
+/**
+ * Runs one SQL text from the query box and reads at most `maxRows` rows (it asks
+ * DuckDB for one more, to know whether the result was cut). Several statements
+ * run in order and the last one's result is returned, like the DuckDB CLI.
+ *
+ * Only read statements run (see `READ_STATEMENT_TYPES`): every statement is
+ * prepared first, which binds but does not execute it, and anything else is
+ * answered with an error before the first one runs. The result is streamed, so
+ * `SELECT * FROM huge_table` never materializes the table; the stream is closed
+ * after reading, which also frees the connection for the next request. Runs
+ * under `runExclusive` with a wall-clock budget (`queryLimits.duckdbTimeoutMs`)
+ * enforced with `interrupt()`. Never throws: problems come back as `{ error }`
+ * with DuckDB's own message. `shouldRun` is asked once the request reaches the
+ * front of the queue; `false` means a newer request overtook it, and nothing
+ * runs (`undefined` is returned).
+ */
+export function duckdbRunQuery(
+  handle: DuckdbHandle,
+  sql: string,
+  maxRowsInput: number,
+  options: { shouldRun?: () => boolean } = {}
+): Promise<QueryOutcome | undefined> {
+  // Comments and semicolons alone are no query either (DuckDB answers them with
+  // "Error in native callback"). Only used for this check, so a `--` inside a
+  // string literal being stripped too is harmless.
+  if (/^[\s;]*$/.test(sql.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--[^\n]*/g, ''))) {
+    return Promise.resolve({ error: 'Type a query to run.' });
+  }
+  if (sql.length > queryLimits.maxSqlLength) {
+    return Promise.resolve({
+      error: `The query is too long (${sql.length.toLocaleString()} characters; the limit is ${queryLimits.maxSqlLength.toLocaleString()}).`,
+    });
+  }
+  return runExclusive(handle, async (): Promise<QueryOutcome | undefined> => {
+    if (options.shouldRun && !options.shouldRun()) {
+      return undefined;
+    }
+    const started = Date.now();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      handle.connection.interrupt();
+    }, queryLimits.duckdbTimeoutMs);
+    let reader: DuckDBResultReader | undefined;
+    try {
+      const statements = await handle.connection.extractStatements(sql);
+      for (let i = 0; i < statements.count; i++) {
+        const { statementType } = await statements.prepare(i);
+        if (!READ_STATEMENT_TYPES.has(statementType)) {
+          return { error: refusal(statementType) };
+        }
+        if (statementType === StatementType.EXPLAIN && EXPLAIN_ANALYZE_PATTERN.test(sql)) {
+          return { error: EXPLAIN_ANALYZE_REFUSAL };
+        }
+      }
+      const maxRows = clampMaxRows(maxRowsInput) ?? 1;
+      reader = await handle.connection.streamAndReadUntil(sql, maxRows + 1);
+      const headers = reader.columnNames();
+      const read = reader.getRowsJson();
+      const rows = read.slice(0, maxRows).map((row) => row.map(stringifyDuckdbCell));
+      return {
+        data: { headers, rows, rowCount: rows.length, columnCount: headers.length },
+        truncated: read.length > maxRows,
+        elapsedMs: Date.now() - started,
+      };
+    } catch (err) {
+      if (timedOut) {
+        return { error: `The query was stopped after ${queryLimits.duckdbTimeoutMs / 1000} s (the limit for queries run from Tablas).` };
+      }
+      const raw = err instanceof Error ? err.message : String(err);
+      return { error: raw.replace(/^Failed to extract statements: /, '') };
+    } finally {
+      clearTimeout(timer);
+      try {
+        reader?.closeSync();
+      } catch {
+        // best effort: the connection is only blocked if the result stays open
+      }
+    }
+  });
+}
+
 /** Reads one table/view's contents, honoring `maxRowsInput` the same way CSV/Parquet/SQLite/XLSX do. */
 export function readDuckdbTable(
   handle: DuckdbHandle,
@@ -645,7 +824,7 @@ export function readDuckdbTable(
 ): Promise<ParsedTable> {
   return runExclusive(handle, async () => {
     const maxRows = clampMaxRows(maxRowsInput);
-    const quoted = quoteIdentifier(tableName);
+    const quoted = quotedTableName(handle, tableName);
 
     const countReader = await handle.connection.runAndReadAll(`SELECT COUNT(*) FROM ${quoted}`);
     const totalRowCount = Number(countReader.getRowsJson()[0]?.[0] ?? 0);

@@ -80,8 +80,22 @@ export type TableParseOutcome =
  * such table/view once selected.
  */
 export interface TableRef {
+  /**
+   * Unique id of the table within the source: what `select-table`, stats and
+   * filter requests carry. For a DuckDB table outside the `main` schema it is
+   * `schema.table`; everything else keeps its bare name.
+   */
   name: string;
   type: 'table' | 'view';
+  /** Schema, only for a table outside `main` (DuckDB); a ref without one is in `main`. */
+  schema?: string;
+  /** The unqualified table name; set together with `schema`. */
+  table?: string;
+  /**
+   * Approximate row count from the engine's own table statistics, without
+   * scanning (DuckDB tables only; views and other sources omit it).
+   */
+  approxRows?: number;
 }
 
 /**
@@ -114,6 +128,10 @@ export interface MultiTableData {
    * these flags, never on the file format, so it stays format-agnostic.
    */
   capabilities?: SourceCapabilities;
+  /** The SQL last run from the query box for this file; prefills it. */
+  lastQuery?: string;
+  /** A starter query for the selected table, when the source can run queries. */
+  querySuggestion?: string;
 }
 
 export interface ReloadInfo {
@@ -126,6 +144,8 @@ export interface ReloadInfo {
 export interface SourceCapabilities {
   /** The host answers `{type:'refresh'}` by re-reading the file. */
   refresh?: boolean;
+  /** The host answers `{type:'run-query'}` (read-only SQL, see queryMessage.ts). */
+  query?: boolean;
 }
 
 export type MultiTableParseOutcome =

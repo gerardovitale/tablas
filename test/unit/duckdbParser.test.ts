@@ -7,15 +7,18 @@ import { DuckDBInstance } from '@duckdb/node-api';
 import { statsHooks, statsLimits, STATS_TIMED_OUT_REASON } from '../../src/columnStats';
 import {
   describeDuckdbOpenError,
+  duckdbRunQuery,
   duckdbTableFilter,
   duckdbTableStats,
   listDuckdbTables,
   openDuckdbDatabase,
   parseDuckdb,
+  queryLimits,
   readDuckdbTable,
   readSelectedTable,
   runExclusive,
   stringifyDuckdbCell,
+  suggestQuery,
   type DuckdbHandle,
 } from '../../src/duckdbParser';
 import {
@@ -65,7 +68,7 @@ describe('parseDuckdb', () => {
       const result = await parseDuckdb(await fixtureBytes('simple.duckdb'));
       assert.strictEqual(result.success, true);
       if (result.success) {
-        assert.deepStrictEqual(result.data.tables, [{ name: 'people', type: 'table' }]);
+        assert.deepStrictEqual(result.data.tables, [{ name: 'people', type: 'table', approxRows: 3 }]);
         assert.strictEqual(result.data.selectedTable, 'people');
       }
     });
@@ -148,8 +151,8 @@ describe('parseDuckdb', () => {
       if (result.success) {
         assert.deepStrictEqual(result.data.tables, [
           { name: 'customer_totals', type: 'view' },
-          { name: 'customers', type: 'table' },
-          { name: 'orders', type: 'table' },
+          { name: 'customers', type: 'table', approxRows: 2 },
+          { name: 'orders', type: 'table', approxRows: 3 },
         ]);
       }
     });
@@ -263,6 +266,87 @@ describe('storage-v2.duckdb (written by DuckDB 2.x)', () => {
         ['1', 'a'],
         ['2', 'b'],
       ]);
+    }
+  });
+});
+
+describe('tables in several schemas (dbt-shaped warehouse)', () => {
+  it('lists every schema, main first, naming only tables outside main as schema.table', async () => {
+    const handle = await openFixture('schemas.duckdb');
+    try {
+      assert.deepStrictEqual(await listDuckdbTables(handle), [
+        { name: 'raw_events', type: 'table', approxRows: 2 },
+        { name: 'main_marts.orders', type: 'table', schema: 'main_marts', table: 'orders', approxRows: 2 },
+        { name: 'main_staging.orders', type: 'table', schema: 'main_staging', table: 'orders', approxRows: 3 },
+        { name: 'main_staging.stg_events', type: 'view', schema: 'main_staging', table: 'stg_events' },
+        { name: 'my schema.odd "name"', type: 'table', schema: 'my schema', table: 'odd "name"', approxRows: 1 },
+      ]);
+    } finally {
+      handle.close();
+    }
+  });
+
+  it('selects the first table (main first) when none is asked for', async () => {
+    const result = await parseDuckdb(await fixtureBytes('schemas.duckdb'));
+    assert.strictEqual(result.success && result.data.selectedTable, 'raw_events');
+  });
+
+  it('reads the right table when two schemas share a table name', async () => {
+    const marts = await parseDuckdb(await fixtureBytes('schemas.duckdb'), undefined, 'main_marts.orders');
+    const staging = await parseDuckdb(await fixtureBytes('schemas.duckdb'), undefined, 'main_staging.orders');
+    assert.ok(marts.success && staging.success);
+    if (marts.success && staging.success) {
+      assert.deepStrictEqual(marts.data.data.headers, ['id', 'total']);
+      assert.deepStrictEqual(marts.data.data.rows, [['1', '19.99'], ['2', '5.5']]);
+      assert.deepStrictEqual(staging.data.data.headers, ['id', 'status']);
+      assert.strictEqual(staging.data.data.rowCount, 3);
+    }
+  });
+
+  it('reads a view outside main and a table whose schema and name need quoting', async () => {
+    const view = await parseDuckdb(await fixtureBytes('schemas.duckdb'), undefined, 'main_staging.stg_events');
+    const odd = await parseDuckdb(await fixtureBytes('schemas.duckdb'), undefined, 'my schema.odd "name"');
+    assert.ok(view.success && odd.success);
+    if (view.success && odd.success) {
+      assert.deepStrictEqual(view.data.data.rows, [['1', 'click'], ['2', 'view']]);
+      assert.deepStrictEqual(odd.data.data.rows, [['7']]);
+      assert.strictEqual(odd.data.tableError, undefined);
+    }
+  });
+
+  it('falls back to the first table for a name that is not listed (bare name of a non-main table)', async () => {
+    const result = await parseDuckdb(await fixtureBytes('schemas.duckdb'), undefined, 'orders');
+    assert.strictEqual(result.success && result.data.selectedTable, 'raw_events');
+  });
+
+  it('computes statistics for a table outside main', async () => {
+    const handle = await openFixture('schemas.duckdb');
+    try {
+      await listDuckdbTables(handle);
+      const stats = await duckdbTableStats(handle, 'main_marts.orders');
+      assert.strictEqual(stats?.columns.length, 2);
+      assert.strictEqual(stats?.columns[1].type, 'float');
+      assert.strictEqual(stats?.columns[1].max, '19.99');
+    } finally {
+      handle.close();
+    }
+  });
+
+  it('filters a table outside main, and not the same-named table in another schema', async () => {
+    const handle = await openFixture('schemas.duckdb');
+    try {
+      await listDuckdbTables(handle);
+      const resolved = resolveFilters([{ column: 1, text: '=paid' }]);
+      assert.ok('specs' in resolved);
+      if ('specs' in resolved) {
+        const outcome = await duckdbTableFilter(handle, 'main_staging.orders', resolved.specs, 100);
+        assert.deepStrictEqual(outcome, {
+          rows: [['2', 'paid'], ['3', 'paid']],
+          matchCount: 2,
+        });
+      }
+    } finally {
+      handle.close();
     }
   });
 });
@@ -1053,5 +1137,259 @@ describe('duckdbTableFilter', () => {
           assert.strictEqual(read.rowCount, 7, 'the queued read must not be killed by the interrupt');
           assert.ok(events.indexOf('read-start') > events.indexOf('interrupt'), events.join(','));
         })));
+  });
+});
+
+describe('duckdbRunQuery (the read-only SQL box)', () => {
+  async function withQueryHandle<T>(name: string, fn: (handle: DuckdbHandle) => Promise<T>): Promise<T> {
+    const handle = await openFixture(name);
+    try {
+      await listDuckdbTables(handle);
+      return await fn(handle);
+    } finally {
+      handle.close();
+    }
+  }
+  const run = (name: string, sql: string, maxRows = 100) =>
+    withQueryHandle(name, (handle) => duckdbRunQuery(handle, sql, maxRows));
+
+  it('returns the rows of a select as display text', async () => {
+    const outcome = await run('multi-table.duckdb', 'SELECT name, id FROM customers ORDER BY id');
+    assert.ok(outcome && 'data' in outcome);
+    if (outcome && 'data' in outcome) {
+      assert.deepStrictEqual(outcome.data.headers, ['name', 'id']);
+      assert.deepStrictEqual(outcome.data.rows, [['Acme', '1'], ['Globex', '2']]);
+      assert.strictEqual(outcome.data.rowCount, 2);
+      assert.strictEqual(outcome.truncated, false);
+      assert.ok(outcome.elapsedMs >= 0);
+    }
+  });
+
+  it('cuts the result at maxRows and says so, without reading the whole table', async () => {
+    const outcome = await run('multi-table.duckdb', 'SELECT range AS n FROM range(1000000)', 3);
+    assert.ok(outcome && 'data' in outcome);
+    if (outcome && 'data' in outcome) {
+      assert.deepStrictEqual(outcome.data.rows, [['0'], ['1'], ['2']]);
+      assert.strictEqual(outcome.truncated, true);
+    }
+  });
+
+  it('is not truncated when the result is exactly maxRows', async () => {
+    const outcome = await run('multi-table.duckdb', 'SELECT range AS n FROM range(3)', 3);
+    assert.ok(outcome && 'data' in outcome);
+    if (outcome && 'data' in outcome) {
+      assert.strictEqual(outcome.data.rowCount, 3);
+      assert.strictEqual(outcome.truncated, false);
+    }
+  });
+
+  it('leaves the connection usable after a result that was cut short', async () => {
+    await withQueryHandle('multi-table.duckdb', async (handle) => {
+      await duckdbRunQuery(handle, 'SELECT range FROM range(1000000)', 2);
+      // A stream left open would make each of these fail with "connection has an open result".
+      assert.ok('data' in ((await duckdbRunQuery(handle, 'SELECT 1', 5)) ?? {}));
+      assert.strictEqual((await readDuckdbTable(handle, 'orders')).rowCount, 3);
+      assert.ok((await duckdbTableStats(handle, 'orders'))?.columns.length);
+    });
+  });
+
+  it('runs SHOW, DESCRIBE, SUMMARIZE, WITH, FROM-first, read pragmas, EXPLAIN, table functions and PIVOT', async () => {
+    const statements = [
+      'SHOW TABLES',
+      'DESCRIBE orders',
+      'SUMMARIZE orders',
+      'WITH a AS (SELECT 1 AS x) SELECT * FROM a',
+      'FROM orders',
+      'PRAGMA table_info(orders)',
+      'PRAGMA database_size',
+      'EXPLAIN SELECT 1',
+      'SELECT * FROM duckdb_tables()',
+      'PIVOT orders ON customer_id USING sum(total)',
+    ];
+    await withQueryHandle('multi-table.duckdb', async (handle) => {
+      for (const sql of statements) {
+        const outcome = await duckdbRunQuery(handle, sql, 10);
+        assert.ok(outcome && 'data' in outcome, `${sql} should run: ${JSON.stringify(outcome)}`);
+      }
+    });
+  });
+
+  it('returns the last result of several statements', async () => {
+    const outcome = await run('multi-table.duckdb', 'SELECT 1 AS a; SELECT 2 AS b');
+    assert.ok(outcome && 'data' in outcome);
+    if (outcome && 'data' in outcome) {
+      assert.deepStrictEqual(outcome.data.headers, ['b']);
+    }
+  });
+
+  it('refuses anything that is not a read, before running any of it', async () => {
+    const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'tablas-query-'));
+    const target = path.join(dir, 'out.csv');
+    try {
+      await withQueryHandle('multi-table.duckdb', async (handle) => {
+        const refused: Array<[string, RegExp]> = [
+          [`COPY (SELECT 1) TO '${target}'`, /a COPY statement/],
+          ['INSTALL httpfs', /an INSTALL or LOAD statement/],
+          ['LOAD httpfs', /an INSTALL or LOAD statement/],
+          ["ATTACH ':memory:' AS m", /an ATTACH statement/],
+          ['SET threads = 1', /a SET statement/],
+          // Pragmas that assign are SETs; CALL runs functions with side effects.
+          ["PRAGMA profiling_output = '/tmp/tablas-never.json'", /a SET statement/],
+          ['CALL duckdb_tables()', /a CALL statement/],
+          [`EXPORT DATABASE '${path.join(dir, 'exp')}'`, /an EXPORT statement/],
+          ['CREATE TABLE t AS SELECT 1', /a CREATE statement/],
+          ['INSERT INTO orders VALUES (9, 9, 9)', /an INSERT statement/],
+          ['DROP TABLE orders', /a DROP statement/],
+          // A read first must not let a later write through.
+          [`SELECT 1; COPY (SELECT 1) TO '${target}'`, /a COPY statement/],
+        ];
+        for (const [sql, kind] of refused) {
+          const outcome = await duckdbRunQuery(handle, sql, 10);
+          assert.ok(outcome && 'error' in outcome, `${sql} must be refused`);
+          if (outcome && 'error' in outcome) {
+            assert.match(outcome.error, /^Only read queries can be run here/);
+            assert.match(outcome.error, kind);
+          }
+        }
+        assert.strictEqual(fsSync.existsSync(target), false, 'a refused COPY must not write its file');
+        assert.strictEqual((await readDuckdbTable(handle, 'orders')).rowCount, 3);
+      });
+    } finally {
+      fsSync.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses EXPLAIN ANALYZE, which would run the statement it explains', async () => {
+    const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'tablas-explain-'));
+    const target = path.join(dir, 'out.csv');
+    try {
+      await withQueryHandle('multi-table.duckdb', async (handle) => {
+        const attempts = [
+          `EXPLAIN ANALYZE COPY (SELECT 1 AS a) TO '${target}'`,
+          `explain analyse copy (select 1 as a) to '${target}'`,
+          `EXPLAIN (ANALYZE) COPY (SELECT 1 AS a) TO '${target}'`,
+          `EXPLAIN /* hidden */ ANALYZE COPY (SELECT 1 AS a) TO '${target}'`,
+          'EXPLAIN ANALYZE SELECT 1', // harmless, but indistinguishable by type: the same rule
+        ];
+        for (const sql of attempts) {
+          const outcome = await duckdbRunQuery(handle, sql, 10);
+          assert.ok(outcome && 'error' in outcome, `${sql} must be refused`);
+          if (outcome && 'error' in outcome) {
+            assert.match(outcome.error, /^EXPLAIN ANALYZE runs the statement it explains/);
+          }
+        }
+        assert.strictEqual(fsSync.existsSync(target), false, 'the write inside EXPLAIN ANALYZE must not happen');
+        // Plain EXPLAIN is still fine.
+        assert.ok('data' in ((await duckdbRunQuery(handle, 'EXPLAIN SELECT * FROM orders', 10)) ?? {}));
+      });
+    } finally {
+      fsSync.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports DuckDB's own message for an invalid query, without the internal prefix", async () => {
+    const syntax = await run('multi-table.duckdb', 'SELEC 1');
+    assert.ok(syntax && 'error' in syntax);
+    if (syntax && 'error' in syntax) {
+      assert.match(syntax.error, /^Parser Error: syntax error at or near "SELEC"/);
+    }
+    const missing = await run('multi-table.duckdb', 'SELECT * FROM nope');
+    assert.ok(missing && 'error' in missing);
+    if (missing && 'error' in missing) {
+      assert.match(missing.error, /nope/);
+    }
+  });
+
+  it('asks for a query when the text is empty, or only semicolons, whitespace and comments', async () => {
+    for (const sql of ['', '   \n', ' ; ;', '-- just a note', '/* nothing */ ;', '-- a\n/* b */\n;']) {
+      assert.deepStrictEqual(await run('multi-table.duckdb', sql), { error: 'Type a query to run.' });
+    }
+  });
+
+  it('refuses a query over the length limit', async () => {
+    const original = queryLimits.maxSqlLength;
+    queryLimits.maxSqlLength = 20;
+    try {
+      const outcome = await run('multi-table.duckdb', 'SELECT 1 FROM orders WHERE 1 = 1');
+      assert.ok(outcome && 'error' in outcome);
+      if (outcome && 'error' in outcome) {
+        assert.match(outcome.error, /too long/);
+      }
+    } finally {
+      queryLimits.maxSqlLength = original;
+    }
+  });
+
+  it('stops a query that runs past the time budget, and the connection survives', async () => {
+    const original = queryLimits.duckdbTimeoutMs;
+    queryLimits.duckdbTimeoutMs = 100;
+    try {
+      await withQueryHandle('multi-table.duckdb', async (handle) => {
+        const outcome = await duckdbRunQuery(
+          handle,
+          'SELECT sum(a.range * b.range) FROM range(100000) a, range(100000) b',
+          10
+        );
+        assert.ok(outcome && 'error' in outcome);
+        if (outcome && 'error' in outcome) {
+          assert.match(outcome.error, /stopped after/);
+        }
+        assert.strictEqual((await readDuckdbTable(handle, 'orders')).rowCount, 3);
+      });
+    } finally {
+      queryLimits.duckdbTimeoutMs = original;
+    }
+  });
+
+  it('does not run a request that a newer one overtook while it waited in the queue', async () => {
+    await withQueryHandle('multi-table.duckdb', async (handle) => {
+      let current = 1;
+      const first = duckdbRunQuery(handle, 'SELECT 1', 5, { shouldRun: () => current === 1 });
+      current = 2; // the second request arrives before the first reached the front
+      const second = duckdbRunQuery(handle, 'SELECT 2 AS two', 5, { shouldRun: () => current === 2 });
+      assert.strictEqual(await first, undefined);
+      const outcome = await second;
+      assert.ok(outcome && 'data' in outcome);
+    });
+  });
+
+  it('queries tables outside main by their schema', async () => {
+    const outcome = await run('schemas.duckdb', 'SELECT count(*) AS n FROM main_staging.orders');
+    assert.ok(outcome && 'data' in outcome);
+    if (outcome && 'data' in outcome) {
+      assert.deepStrictEqual(outcome.data.rows, [['3']]);
+    }
+  });
+
+  it('lists the tables once per handle, not on every stats or filter request', async () => {
+    await withQueryHandle('multi-table.duckdb', async (handle) => {
+      const connection = handle.connection;
+      const original = connection.runAndReadAll.bind(connection);
+      let queries = 0;
+      connection.runAndReadAll = ((...args: Parameters<typeof original>) => {
+        queries++;
+        return original(...args);
+      }) as typeof connection.runAndReadAll;
+      const first = await listDuckdbTables(handle); // withQueryHandle already listed: served from memory
+      const second = await listDuckdbTables(handle);
+      assert.strictEqual(queries, 0, 'no catalog query for an already listed handle');
+      assert.strictEqual(second, first);
+    });
+  });
+
+  describe('suggestQuery', () => {
+    it('selects from the table as the file needs it written', async () => {
+      await withQueryHandle('schemas.duckdb', async (handle) => {
+        assert.strictEqual(suggestQuery(handle, 'raw_events'), 'SELECT * FROM "raw_events" LIMIT 100');
+        assert.strictEqual(
+          suggestQuery(handle, 'main_marts.orders'),
+          'SELECT * FROM "main_marts"."orders" LIMIT 100'
+        );
+        assert.strictEqual(
+          suggestQuery(handle, 'my schema.odd "name"'),
+          'SELECT * FROM "my schema"."odd ""name""" LIMIT 100'
+        );
+      });
+    });
   });
 });

@@ -725,6 +725,22 @@
     return view.tableName !== undefined ? { ...message, table: view.tableName } : message;
   }
 
+  /**
+   * Forgets the rendered table. A new table replaces the old one's filters: tell
+   * the host if there were any, so it can release what it cached (and drop a
+   * filter still running).
+   */
+  function releaseCurrentView() {
+    const previous = currentView;
+    if (previous) {
+      cancelFilterTimer(previous);
+      if (previous.filter !== 'none') {
+        vscode.postMessage(withTable(previous, { type: 'filter', seq: ++filterSeqCounter, filters: [] }));
+      }
+    }
+    currentView = undefined;
+  }
+
   /** @param {NonNullable<typeof currentView>} view */
   function cancelFilterTimer(view) {
     if (view.filterTimer !== undefined) {
@@ -911,20 +927,15 @@
    * @param {{ headers: string[], rows: string[][], rowCount: number, columnCount: number, totalRowCount?: number }} data
    * @param {string=} tableName the selected table/sheet of a multi-table source; undefined for CSV/Parquet
    * @param {string=} tableError why reading `tableName` failed; shown instead of the table
+   * @param {{ host?: HTMLElement, result?: { truncated: boolean } }=} opts `host` is where to render
+   *   instead of #app; `result` marks the rows of a query: no filter row, no statistics (both are
+   *   keyed by a table the host knows, which a query result is not), and a note when it was cut.
    */
-  function renderTable(data, tableName, tableError) {
-    const app = document.getElementById('app');
+  function renderTable(data, tableName, tableError, opts) {
+    const app = opts && opts.host ? opts.host : document.getElementById('app');
     if (!app) { return; }
-    // A new table replaces the old one's filters. Tell the host if there were
-    // any, so it can release what it cached (and drop a filter still running).
-    const previous = currentView;
-    if (previous) {
-      cancelFilterTimer(previous);
-      if (previous.filter !== 'none') {
-        vscode.postMessage(withTable(previous, { type: 'filter', seq: ++filterSeqCounter, filters: [] }));
-      }
-    }
-    currentView = undefined;
+    const result = opts && opts.result;
+    releaseCurrentView();
 
     if (tableError !== undefined) {
       appendMessage('Could not read "' + tableName + '":\n' + tableError, true);
@@ -948,6 +959,9 @@
     let statsText = `${data.rowCount} row${data.rowCount !== 1 ? 's' : ''} × ${data.columnCount} column${data.columnCount !== 1 ? 's' : ''}`;
     if (data.totalRowCount != null && data.totalRowCount > data.rowCount) {
       statsText += ` (showing first ${data.rowCount} of ${data.totalRowCount} — increase tablas.maxRows in settings to see more)`;
+    }
+    if (result && result.truncated) {
+      statsText += ` (the query returned more — showing the first ${data.rowCount} rows; increase tablas.maxRows in settings to see more)`;
     }
     statsBar.textContent = statsText;
     const baseStatsText = statsText;
@@ -988,6 +1002,7 @@
 
     // Filter row: one box per column, under the header (and its profile strips).
     // Same cell order as the header row, which Alt+click and the tests rely on.
+    // A query result has none: the host filters tables, not result sets.
     const filterRow = el('tr', { class: 'filter-row' });
     const filterGutter = el('th', { class: 'row-num' });
     const clearButton = /** @type {HTMLButtonElement} */ (el('button', {
@@ -1002,7 +1017,7 @@
     filterRow.appendChild(filterGutter);
     /** @type {HTMLInputElement[]} */
     const filterInputs = [];
-    data.headers.forEach((header) => {
+    (result ? [] : data.headers).forEach((header) => {
       const cell = el('th', { class: 'filter-cell' });
       const input = /** @type {HTMLInputElement} */ (el('input', {
         type: 'search',
@@ -1018,7 +1033,7 @@
       filterRow.appendChild(cell);
       filterInputs.push(input);
     });
-    thead.appendChild(filterRow);
+    if (!result) { thead.appendChild(filterRow); }
     table.appendChild(thead);
 
     // Installed once; the strips it reacts to only exist after attachStats,
@@ -1057,7 +1072,8 @@
       coverNote,
       models: undefined,
       skippedReason: undefined,
-      stats: 'idle',
+      // A query result is never profiled: the host's statistics are per table.
+      stats: result ? 'skipped' : 'idle',
       originalRows: data.rows,
       baseStatsText,
       filterInputs,
@@ -1066,8 +1082,10 @@
       filterTimer: undefined,
       filter: 'none',
     };
-    wireFilterRow(currentView);
-    requestStats();
+    if (!result) {
+      wireFilterRow(currentView);
+      requestStats();
+    }
   }
 
   /**
@@ -1095,6 +1113,35 @@
    * @type {HTMLElement | undefined}
    */
   let reloadStatusEl;
+
+  // ── SQL mode (sources whose host advertises `capabilities.query`) ─────
+  // Mode, text and the last result are module state, not DOM: every payload
+  // (reload, table switch) rebuilds the page, and they must survive that.
+  const MAX_QUERY_LENGTH = 100000; // mirrors queryLimits.maxSqlLength in src/duckdbParser.ts
+  let queryMode = false;
+  let queryText = '';
+  /** The SQL that produced `queryResult`; what a refresh re-runs (not half-typed edits). */
+  let queryRunSql;
+  /** Webview-wide `run-query` counter; only a reply carrying the newest number is applied. */
+  let querySeqCounter = 0;
+  let queryRunning = false;
+  /** @type {{ kind: 'data', data: import('../../src/tableData').ParsedTable, truncated: boolean, elapsedMs: number } | { kind: 'error', message: string } | undefined} */
+  let queryResult;
+  /** The last successful multi-table payload, to re-render when the mode is toggled. */
+  let lastMultiOutcome;
+  /** Table-mode filters and scroll, kept while the SQL box is showing. */
+  let savedTableState;
+  let focusQueryInput = false;
+  /** @type {HTMLElement | undefined} */
+  let queryResultHost;
+  /** @type {HTMLTextAreaElement | undefined} */
+  let queryInputEl;
+  /** A refresh landed while a query was still running: re-run once it has answered. */
+  let queryRerun;
+  /** Result scroll position to put back once the re-run's answer is drawn. */
+  let queryScrollToRestore;
+  /** @type {HTMLElement | undefined} */
+  let queryStatusEl;
 
   // ── Table picker ──────────────────────────────────────────────────────
 
@@ -1148,23 +1195,43 @@
   }
 
   /**
+   * "1,204" -> "1.2K": the row-count hint beside a table in the picker.
+   * @param {number} n
+   */
+  const compactFormat = new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 });
+  function compactCount(n) {
+    return compactFormat.format(n);
+  }
+
+  /**
    * Builds the table/view picker for a multi-table source (SQLite, DuckDB,
    * XLSX): a trigger button showing the current table that opens a searchable
    * listbox (a combobox: the search input owns focus, `aria-activedescendant`
    * names the highlighted option). Picking a different table posts
    * `select-table` to the extension host, which re-queries the already-open
    * source and answers with a fresh payload of the same message type -- see
-   * renderMultiTableOutcome below. Tables/Views group headers only appear when
-   * the source has both (XLSX sheets are all "tables").
+   * renderMultiTableOutcome below. A source with tables in several schemas
+   * (DuckDB, e.g. dbt's `staging`/`marts`) is grouped by schema, the group
+   * header carrying the schema so the rows show the short table name; otherwise
+   * Tables/Views group headers only appear when the source has both (XLSX sheets
+   * are all "tables"). A table with a row-count estimate shows it as "~1.2K".
    * @param {import('../../src/tableData').TableRef[]} tables
    * @param {string} selectedTable
    */
   function renderTableSelector(tables, selectedTable) {
     const uid = 'table-picker-' + (++pickerIdCounter);
     const hasBothKinds = tables.some((t) => t.type === 'view') && tables.some((t) => t.type !== 'view');
+    // A ref without a schema is in DuckDB's `main` (and other sources have none at all).
+    const schemaOf = (/** @type {import('../../src/tableData').TableRef} */ t) => t.schema !== undefined ? t.schema : 'main';
+    const bySchema = new Set(tables.map(schemaOf)).size > 1;
     let current = selectedTable;
-    // Lower-cased once: the filter runs on every keystroke over every name.
-    const lowerNames = new Map(tables.map((t) => [t.name, t.name.toLocaleLowerCase()]));
+    // Lower-cased once: the filter runs on every keystroke over every name. With
+    // schema groups a `main` table is searched as `main.<name>` too, so typing
+    // the header's name ("main", "main.raw") finds what is listed under it.
+    const lowerNames = new Map(tables.map((t) => [
+      t.name,
+      (bySchema && t.schema === undefined ? `main.${t.name}` : t.name).toLocaleLowerCase(),
+    ]));
 
     const wrapper = el('div', { class: 'table-selector' });
     const trigger = el('button', {
@@ -1275,12 +1342,25 @@
           list.appendChild(empty);
           return;
         }
-        const groups = hasBothKinds
-          ? [
-            { label: 'Tables', items: matches.filter((t) => t.type !== 'view') },
-            { label: 'Views', items: matches.filter((t) => t.type === 'view') },
-          ]
-          : [{ label: undefined, items: matches }];
+        /** @type {Array<{ label: string | undefined, items: import('../../src/tableData').TableRef[] }>} */
+        let groups;
+        if (bySchema) {
+          // The host lists `main` first, then schemas alphabetically; keep that order.
+          const bySchemaName = new Map();
+          for (const t of matches) {
+            const key = schemaOf(t);
+            if (!bySchemaName.has(key)) { bySchemaName.set(key, []); }
+            bySchemaName.get(key).push(t);
+          }
+          groups = Array.from(bySchemaName, ([label, items]) => ({ label, items }));
+        } else {
+          groups = hasBothKinds
+            ? [
+              { label: 'Tables', items: matches.filter((t) => t.type !== 'view') },
+              { label: 'Views', items: matches.filter((t) => t.type === 'view') },
+            ]
+            : [{ label: undefined, items: matches }];
+        }
         for (const group of groups) {
           if (group.items.length === 0) { continue; }
           // Options go straight into the listbox, or into a labelled role=group
@@ -1303,15 +1383,23 @@
               class: 'table-picker-option', role: 'option',
               id: `${uid}-opt-${options.length}`, 'aria-selected': selected ? 'true' : 'false',
             });
-            option.title = table.name;
+            option.title = table.approxRows !== undefined
+              ? `${table.name} · about ${table.approxRows.toLocaleString()} row${table.approxRows === 1 ? '' : 's'}`
+              : table.name;
             option.appendChild(tableKindIcon(table.type === 'view' ? 'view' : 'table'));
             const name = el('span', { class: 'picker-name' });
-            appendHighlighted(name, table.name, query);
+            // Under a schema header the short name is enough; the full one is the tooltip.
+            appendHighlighted(name, bySchema && table.table !== undefined ? table.table : table.name, query);
             option.appendChild(name);
             if (table.type === 'view') {
               const tag = el('span', { class: 'picker-tag' });
               tag.textContent = 'view';
               option.appendChild(tag);
+            }
+            if (table.approxRows !== undefined) {
+              const meta = el('span', { class: 'picker-meta' });
+              meta.textContent = '~' + compactCount(table.approxRows);
+              option.appendChild(meta);
             }
             if (selected) { option.appendChild(pickerGlyph('M3.5 8.5l3 3 6-7')); }
             const tableName = table.name;
@@ -1388,9 +1476,12 @@
   /**
    * @param {import('../../src/tableData').MultiTableParseOutcome} outcome
    */
-  function renderMultiTableOutcome(outcome) {
-    const isReload = outcome.success && outcome.data.reload !== undefined;
-    if (outcome.success) {
+  function renderMultiTableOutcome(outcome, options) {
+    // `rerender`: the same payload drawn again (the SQL/Table toggle) -- not news
+    // from the host, so no stale-reply check and none of the reload handling.
+    const rerender = !!(options && options.rerender);
+    const isReload = !rerender && outcome.success && outcome.data.reload !== undefined;
+    if (outcome.success && !rerender) {
       const selected = outcome.data.selectedTable;
       if (requestedTable !== undefined && selected !== requestedTable) {
         // A response to an older select-table request, superseded by a newer
@@ -1404,13 +1495,16 @@
         requestedTable = selected;
       }
     }
+    if (outcome.success && outcome.data.tables.length > 0) { lastMultiOutcome = outcome; }
     // A reload re-renders everything; remember what the user was doing.
-    const carried = isReload ? captureReloadState() : undefined;
+    const carried = isReload && !queryMode ? captureReloadState() : undefined;
+    const carriedQuery = isReload && queryMode ? captureQueryUiState() : undefined;
     // A keyboard user who just picked a table has focus on the picker's
     // trigger; the re-render below replaces it, so hand focus to the new one.
     const active = document.activeElement;
     const pickerHadFocus = !!active && active.closest('.table-selector') !== null;
     const refreshHadFocus = !!active && active.classList.contains('toolbar-button');
+    const modeHadFocus = active && active.classList.contains('mode-button') ? active.getAttribute('data-mode') : null;
     clearApp();
     if (!outcome.success) {
       const msgs = outcome.errors.map((e) => e.message).join('\n');
@@ -1425,9 +1519,13 @@
     }
     const app = document.getElementById('app');
     if (!app) { return; }
+    const canQuery = !!(outcome.data.capabilities && outcome.data.capabilities.query);
+    if (!canQuery) { queryMode = false; }
     const selector = renderTableSelector(outcome.data.tables, outcome.data.selectedTable);
     const toolbar = el('div', { class: 'table-toolbar' });
-    toolbar.appendChild(selector);
+    if (canQuery) { toolbar.appendChild(renderModeToggle()); }
+    // The picker chooses a table to look at; the SQL box names its tables itself.
+    if (!queryMode) { toolbar.appendChild(selector); }
     reloadStatusEl = undefined;
     /** @type {HTMLElement | undefined} */
     let refreshButton;
@@ -1452,12 +1550,241 @@
     // The reload a click on the refresh button causes replaces that button; focus
     // can only move once the new one is in the document.
     if (refreshHadFocus && refreshButton) { refreshButton.focus(); }
-    if (pickerHadFocus) {
+    if (pickerHadFocus && !queryMode) {
       const newTrigger = selector.querySelector('button');
       if (newTrigger) { newTrigger.focus(); }
     }
+    if (modeHadFocus) {
+      const button = toolbar.querySelector(`.mode-button[data-mode="${modeHadFocus}"]`);
+      if (button) { /** @type {HTMLElement} */ (button).focus(); }
+    }
+    if (queryMode) {
+      renderQueryPanel(app);
+      if (carriedQuery) { restoreQueryUiState(carriedQuery); }
+      // A refresh re-runs what produced the result on screen, so the result follows the data.
+      if (isReload && queryRunSql !== undefined) {
+        const scroll = carriedQuery ? { top: carriedQuery.resultTop, left: carriedQuery.resultLeft } : undefined;
+        if (queryRunning) {
+          // Not a second run on top of a running one: it follows the running one's answer.
+          queryRerun = { scroll };
+        } else {
+          runQuery(queryRunSql, scroll);
+        }
+      }
+      return;
+    }
     renderTable(outcome.data.data, outcome.data.selectedTable, outcome.data.tableError);
-    if (carried) { restoreReloadState(carried); }
+    if (carried) {
+      restoreReloadState(carried);
+    } else if (rerender && savedTableState) {
+      // Back from the SQL box: the filters and scroll the table had.
+      restoreReloadState(savedTableState);
+    }
+    if (rerender) { savedTableState = undefined; }
+  }
+
+  // ── SQL box ───────────────────────────────────────────────────────────
+
+  /** The Table | SQL switch at the toolbar's left. */
+  function renderModeToggle() {
+    const group = el('div', { class: 'mode-toggle', role: 'group', 'aria-label': 'View' });
+    for (const [mode, label] of [['table', 'Table'], ['sql', 'SQL']]) {
+      const button = el('button', {
+        type: 'button',
+        class: 'mode-button',
+        'data-mode': mode,
+        'aria-pressed': String((mode === 'sql') === queryMode),
+      });
+      button.textContent = label;
+      button.addEventListener('click', () => setQueryMode(mode === 'sql'));
+      group.appendChild(button);
+    }
+    return group;
+  }
+
+  /** @param {boolean} on */
+  function setQueryMode(on) {
+    if (queryMode === on || !lastMultiOutcome || !lastMultiOutcome.success) { return; }
+    if (on) {
+      savedTableState = captureReloadState();
+      if (queryText === '') {
+        queryText = lastMultiOutcome.data.lastQuery || lastMultiOutcome.data.querySuggestion || '';
+      }
+      focusQueryInput = true;
+    }
+    queryMode = on;
+    renderMultiTableOutcome(lastMultiOutcome, { rerender: true });
+  }
+
+  /** The result's scroll wrapper, if a result table is showing. */
+  function queryResultWrapper() {
+    return queryResultHost ? /** @type {HTMLElement | null} */ (queryResultHost.querySelector('.scroll-wrapper')) : null;
+  }
+
+  /**
+   * What an auto-refresh must not take from someone typing a query: the box's
+   * focus, caret and scroll, and where they had scrolled the result to.
+   */
+  function captureQueryUiState() {
+    const input = queryInputEl;
+    if (!input || !input.isConnected) { return undefined; }
+    const wrapper = queryResultWrapper();
+    return {
+      focused: document.activeElement === input,
+      start: input.selectionStart,
+      end: input.selectionEnd,
+      inputTop: input.scrollTop,
+      resultTop: wrapper ? wrapper.scrollTop : 0,
+      resultLeft: wrapper ? wrapper.scrollLeft : 0,
+    };
+  }
+
+  /** @param {NonNullable<ReturnType<typeof captureQueryUiState>>} state */
+  function restoreQueryUiState(state) {
+    const input = queryInputEl;
+    if (!input) { return; }
+    input.scrollTop = state.inputTop;
+    if (state.focused) {
+      input.focus();
+      if (state.start !== null && state.end !== null) { input.setSelectionRange(state.start, state.end); }
+    }
+    putResultScroll({ top: state.resultTop, left: state.resultLeft });
+  }
+
+  /** @param {{ top: number, left: number } | undefined} scroll */
+  function putResultScroll(scroll) {
+    const wrapper = queryResultWrapper();
+    if (!scroll || !wrapper) { return; }
+    wrapper.scrollTop = scroll.top;
+    wrapper.scrollLeft = scroll.left;
+  }
+
+  /** @param {HTMLElement} app */
+  function renderQueryPanel(app) {
+    releaseCurrentView();
+    const panel = el('div', { class: 'query-panel' });
+    const input = /** @type {HTMLTextAreaElement} */ (el('textarea', {
+      class: 'query-input',
+      'aria-label': 'SQL query',
+      rows: '6',
+      maxlength: String(MAX_QUERY_LENGTH),
+      spellcheck: 'false',
+      autocomplete: 'off',
+      placeholder: 'SELECT … (read-only: SELECT, WITH, FROM, SHOW, DESCRIBE, SUMMARIZE, PIVOT, EXPLAIN)',
+    }));
+    input.value = queryText;
+    queryInputEl = input;
+    const bar = el('div', { class: 'query-bar' });
+    const run = /** @type {HTMLButtonElement} */ (el('button', { type: 'button', class: 'query-run' }));
+    run.textContent = 'Run';
+    const modifier = /mac/i.test(window.navigator.platform || '') ? '⌘' : 'Ctrl';
+    run.title = `Run the query (${modifier}+Enter)`;
+    const hint = el('span', { class: 'query-hint' });
+    hint.textContent = `${modifier}+Enter to run · read-only`;
+    const status = el('span', { class: 'query-status', role: 'status' });
+    const sync = () => { run.disabled = input.value.trim() === ''; };
+    sync();
+    input.addEventListener('input', () => { queryText = input.value; sync(); });
+    input.addEventListener('keydown', (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+        event.preventDefault();
+        runQuery(input.value);
+      }
+    });
+    run.addEventListener('click', () => runQuery(input.value));
+    bar.appendChild(run);
+    bar.appendChild(hint);
+    bar.appendChild(status);
+    panel.appendChild(input);
+    panel.appendChild(bar);
+    app.appendChild(panel);
+    const host = el('div', { class: 'query-result' });
+    app.appendChild(host);
+    queryResultHost = host;
+    queryStatusEl = status;
+    paintQueryResult();
+    if (queryRunning) { setQueryStatus('Running…', false); }
+    if (focusQueryInput) {
+      focusQueryInput = false;
+      input.focus();
+    }
+  }
+
+  /** @param {string} text @param {boolean} isError */
+  function setQueryStatus(text, isError) {
+    if (!queryStatusEl) { return; }
+    queryStatusEl.textContent = text;
+    queryStatusEl.classList.toggle('error', isError);
+  }
+
+  /**
+   * Sends `sql` to the host. The previous result stays on screen until the answer replaces it.
+   * @param {string} sql
+   * @param {{ top: number, left: number }=} scroll result scroll to put back when the answer is drawn (a refresh's re-run)
+   */
+  function runQuery(sql, scroll) {
+    if (sql.trim() === '') { return; }
+    queryRunSql = sql;
+    queryRunning = true;
+    queryRerun = undefined;
+    queryScrollToRestore = scroll;
+    setQueryStatus('Running…', false);
+    vscode.postMessage({ type: 'run-query', seq: ++querySeqCounter, sql });
+  }
+
+  /** Draws `queryResult` into the result area (and the status line beside the Run button). */
+  function paintQueryResult() {
+    const host = queryResultHost;
+    if (!host || !host.isConnected) { return; }
+    host.textContent = '';
+    releaseCurrentView();
+    const note = (/** @type {string} */ text, /** @type {boolean} */ isError) => {
+      const p = el('p', { class: isError ? 'message error' : 'message' });
+      p.textContent = text;
+      host.appendChild(p);
+    };
+    if (!queryResult) {
+      note('Run a query to see its result here.', false);
+      setQueryStatus('', false);
+    } else if (queryResult.kind === 'error') {
+      note(queryResult.message, true);
+      setQueryStatus('Failed', true);
+    } else if (queryResult.data.columnCount === 0) {
+      note('The statement ran and returned no columns.', false);
+      setQueryStatus(`Done · ${queryResult.elapsedMs.toLocaleString()} ms`, false);
+    } else {
+      const { data, truncated, elapsedMs } = queryResult;
+      renderTable(data, undefined, undefined, { host, result: { truncated } });
+      setQueryStatus(
+        `${data.rowCount.toLocaleString()}${truncated ? '+' : ''} row${data.rowCount !== 1 ? 's' : ''} · ${elapsedMs.toLocaleString()} ms`,
+        false
+      );
+    }
+  }
+
+  /** `query-data` from the host; a reply that a newer run overtook is dropped. @param {import('../../src/queryMessage').QueryPayload | undefined} payload */
+  function handleQueryData(payload) {
+    if (!payload || payload.seq !== querySeqCounter) { return; }
+    queryRunning = false;
+    if (typeof payload.error === 'string') {
+      queryResult = { kind: 'error', message: payload.error };
+    } else if (payload.data && Array.isArray(payload.data.headers) && Array.isArray(payload.data.rows)) {
+      queryResult = {
+        kind: 'data',
+        data: payload.data,
+        truncated: payload.truncated === true,
+        elapsedMs: typeof payload.elapsedMs === 'number' ? payload.elapsedMs : 0,
+      };
+    } else {
+      queryResult = { kind: 'error', message: 'The host sent an unexpected reply.' };
+    }
+    paintQueryResult();
+    putResultScroll(queryScrollToRestore);
+    queryScrollToRestore = undefined;
+    // A refresh landed while this ran: the data changed under it, so run it again.
+    const again = queryRerun;
+    queryRerun = undefined;
+    if (again && queryRunSql !== undefined) { runQuery(queryRunSql, again.scroll); }
   }
 
   /** @param {string} text @param {boolean} isError @param {string=} title */
@@ -1570,6 +1897,8 @@
       handleFilterData(message.payload);
     } else if (message.type === 'reload-status') {
       handleReloadStatus(message);
+    } else if (message.type === 'query-data') {
+      handleQueryData(message.payload);
     }
   });
 

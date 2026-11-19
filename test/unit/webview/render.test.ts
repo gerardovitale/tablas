@@ -10,6 +10,7 @@ import type {
   MultiTableData,
   MultiTableParseOutcome,
   ParsedTable,
+  TableRef,
   TableStats,
 } from '../../../src/tableData';
 
@@ -839,19 +840,290 @@ describe('webview main.js rendering', () => {
     });
   });
 
+  describe('sql mode', () => {
+    function warehouse(extra: Partial<MultiTableData> = {}): MultiTableParseOutcome {
+      return {
+        success: true,
+        errors: [],
+        data: {
+          tables: [
+            { name: 'a', type: 'table' },
+            { name: 'b', type: 'table' },
+          ],
+          selectedTable: 'a',
+          data: {
+            headers: ['id', 'city'],
+            rows: [['1', 'Rome'], ['2', 'Paris']],
+            rowCount: 2,
+            columnCount: 2,
+          },
+          capabilities: { refresh: true, query: true },
+          querySuggestion: 'SELECT * FROM "a" LIMIT 100',
+          ...extra,
+        },
+      };
+    }
+    const doc = (dom: JSDOM) => dom.window.document;
+    const toggle = (dom: JSDOM, mode: 'table' | 'sql') =>
+      doc(dom).querySelector<HTMLButtonElement>(`.mode-button[data-mode="${mode}"]`)!;
+    const queryInput = (dom: JSDOM) => doc(dom).querySelector<HTMLTextAreaElement>('.query-input')!;
+    const runButton = (dom: JSDOM) => doc(dom).querySelector<HTMLButtonElement>('.query-run')!;
+    const queryStatus = (dom: JSDOM) => doc(dom).querySelector('.query-status')?.textContent;
+    const runQueries = (posted: unknown[]) =>
+      posted.filter((m) => (m as { type: string }).type === 'run-query') as Array<{ seq: number; sql: string }>;
+    const countOf = (posted: unknown[], type: string) =>
+      posted.filter((m) => (m as { type: string }).type === type).length;
+    const sendQueryData = (dom: JSDOM, payload: Record<string, unknown>) =>
+      dom.window.dispatchEvent(new dom.window.MessageEvent('message', { data: { type: 'query-data', payload } }));
+    const resultOk = (seq: number, data: Partial<ParsedTable> = {}, rest: Record<string, unknown> = {}) => ({
+      seq,
+      data: { headers: ['n'], rows: [['1'], ['2'], ['3']], rowCount: 3, columnCount: 1, ...data },
+      truncated: false,
+      elapsedMs: 42,
+      ...rest,
+    });
+    const ctrlEnter = (dom: JSDOM, target: Element) =>
+      target.dispatchEvent(
+        new dom.window.KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true, cancelable: true })
+      );
+    const reloadMeta = { reload: { at: '2026-11-19T10:00:00.000Z', previousRowCount: 2 } };
+
+    function inSqlMode(extra: Partial<MultiTableData> = {}) {
+      const loaded = loadWebview();
+      sendDuckdbData(loaded.dom, warehouse(extra));
+      toggle(loaded.dom, 'sql').click();
+      return loaded;
+    }
+
+    it('offers the switch only when the host can run queries', () => {
+      const { dom } = loadWebview();
+      sendDuckdbData(dom, warehouse({ capabilities: { refresh: true } }));
+      assert.strictEqual(doc(dom).querySelector('.mode-toggle'), null);
+      sendDuckdbData(dom, warehouse());
+      assert.ok(toggle(dom, 'table') && toggle(dom, 'sql'));
+      assert.strictEqual(toggle(dom, 'table').getAttribute('aria-pressed'), 'true');
+      assert.strictEqual(toggle(dom, 'sql').getAttribute('aria-pressed'), 'false');
+    });
+
+    it('switches to a query box prefilled with the host suggestion, without running anything', () => {
+      const { dom, postedMessages } = inSqlMode();
+      assert.strictEqual(toggle(dom, 'sql').getAttribute('aria-pressed'), 'true');
+      assert.strictEqual(queryInput(dom).value, 'SELECT * FROM "a" LIMIT 100');
+      assert.strictEqual(doc(dom).activeElement, queryInput(dom), 'the box is ready to type in');
+      assert.strictEqual(doc(dom).querySelector('#csv-table'), null);
+      assert.strictEqual(doc(dom).querySelector('.table-picker-trigger'), null, 'the table picker does not apply to SQL');
+      assert.strictEqual(runQueries(postedMessages).length, 0);
+    });
+
+    it('prefers the last query the user ran over the suggestion', () => {
+      const { dom } = inSqlMode({ lastQuery: 'SELECT count(*) FROM a' });
+      assert.strictEqual(queryInput(dom).value, 'SELECT count(*) FROM a');
+    });
+
+    it('runs the text with the Run button and with Ctrl+Enter, numbering each request', () => {
+      const { dom, postedMessages } = inSqlMode();
+      runButton(dom).click();
+      queryInput(dom).value = 'SELECT 2';
+      queryInput(dom).dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+      ctrlEnter(dom, queryInput(dom));
+      const sent = runQueries(postedMessages);
+      assert.deepStrictEqual(sent.map((q) => q.sql), ['SELECT * FROM "a" LIMIT 100', 'SELECT 2']);
+      assert.ok(sent[1].seq > sent[0].seq);
+      assert.strictEqual(queryStatus(dom), 'Running…');
+    });
+
+    it('does not run an empty query', () => {
+      const { dom, postedMessages } = inSqlMode({ querySuggestion: undefined });
+      assert.strictEqual(queryInput(dom).value, '');
+      assert.strictEqual(runButton(dom).disabled, true);
+      ctrlEnter(dom, queryInput(dom));
+      assert.strictEqual(runQueries(postedMessages).length, 0);
+    });
+
+    it('shows the result as a table without filter boxes, and asks for no statistics', () => {
+      const { dom, postedMessages } = inSqlMode();
+      const statsBefore = countOf(postedMessages, 'get-stats');
+      runButton(dom).click();
+      sendQueryData(dom, resultOk(runQueries(postedMessages)[0].seq));
+      const result = doc(dom).querySelector('.query-result')!;
+      assert.ok(result.querySelector('#csv-table'));
+      assert.strictEqual(result.querySelectorAll('input.col-filter').length, 0);
+      assert.strictEqual(result.querySelectorAll('thead tr').length, 1);
+      assert.strictEqual(result.querySelectorAll('tbody tr').length, 3);
+      assert.strictEqual(result.querySelector('.stats-bar')?.textContent, '3 rows × 1 column');
+      assert.strictEqual(queryStatus(dom), '3 rows · 42 ms');
+      assert.strictEqual(countOf(postedMessages, 'get-stats'), statsBefore);
+    });
+
+    it('says when the query returned more rows than are shown', () => {
+      const { dom, postedMessages } = inSqlMode();
+      runButton(dom).click();
+      sendQueryData(dom, resultOk(runQueries(postedMessages)[0].seq, {}, { truncated: true }));
+      assert.match(doc(dom).querySelector('.stats-bar')?.textContent ?? '', /returned more — showing the first 3 rows/);
+      assert.strictEqual(queryStatus(dom), '3+ rows · 42 ms');
+    });
+
+    it('shows the error text and keeps the query', () => {
+      const { dom, postedMessages } = inSqlMode();
+      runButton(dom).click();
+      sendQueryData(dom, { seq: runQueries(postedMessages)[0].seq, error: 'Catalog Error: Table "x" does not exist' });
+      const message = doc(dom).querySelector('.query-result p.message.error');
+      assert.strictEqual(message?.textContent, 'Catalog Error: Table "x" does not exist');
+      assert.strictEqual(queryStatus(dom), 'Failed');
+      assert.strictEqual(queryInput(dom).value, 'SELECT * FROM "a" LIMIT 100');
+    });
+
+    it('ignores a reply that a newer run overtook', () => {
+      const { dom, postedMessages } = inSqlMode();
+      runButton(dom).click();
+      runButton(dom).click();
+      const [first, second] = runQueries(postedMessages);
+      sendQueryData(dom, resultOk(first.seq, { rows: [['old']], rowCount: 1 }));
+      assert.strictEqual(doc(dom).querySelector('#csv-table'), null, 'the older answer is not shown');
+      assert.strictEqual(queryStatus(dom), 'Running…');
+      sendQueryData(dom, resultOk(second.seq, { rows: [['new']], rowCount: 1 }));
+      assert.strictEqual(doc(dom).querySelector('#csv-table tbody td:not(.row-num)')?.textContent, 'new');
+    });
+
+    it('explains a statement that returned no columns', () => {
+      const { dom, postedMessages } = inSqlMode();
+      runButton(dom).click();
+      sendQueryData(dom, resultOk(runQueries(postedMessages)[0].seq, { headers: [], rows: [], rowCount: 0, columnCount: 0 }));
+      assert.strictEqual(doc(dom).querySelector('.query-result p.message')?.textContent, 'The statement ran and returned no columns.');
+    });
+
+    it('treats cell text as text, never markup', () => {
+      const { dom, postedMessages } = inSqlMode();
+      runButton(dom).click();
+      sendQueryData(dom, resultOk(runQueries(postedMessages)[0].seq, { rows: [['<img src=x onerror=alert(1)>']], rowCount: 1 }));
+      assert.strictEqual(doc(dom).querySelector('.query-result img'), null);
+      assert.strictEqual(doc(dom).querySelector('#csv-table tbody td:not(.row-num)')?.textContent, '<img src=x onerror=alert(1)>');
+    });
+
+    it('keeps the text across the switch, and brings the table back with its filter', () => {
+      const { dom, postedMessages } = loadWebview();
+      sendDuckdbData(dom, warehouse());
+      const box = doc(dom).querySelectorAll<HTMLInputElement>('input.col-filter')[1];
+      box.value = 'Rome';
+      box.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      toggle(dom, 'sql').click();
+      queryInput(dom).value = 'SELECT 1';
+      queryInput(dom).dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+      const filters = () => postedMessages.filter((m) => (m as { type: string }).type === 'filter') as Array<{ filters: unknown[] }>;
+      assert.deepStrictEqual(filters().at(-1)!.filters, [], 'leaving the table releases its filter on the host');
+
+      toggle(dom, 'table').click();
+      assert.ok(doc(dom).querySelector('#csv-table'));
+      assert.strictEqual(doc(dom).querySelectorAll<HTMLInputElement>('input.col-filter')[1].value, 'Rome');
+      assert.deepStrictEqual(filters().at(-1)!.filters, [{ column: 1, text: 'Rome' }]);
+
+      toggle(dom, 'sql').click();
+      assert.strictEqual(queryInput(dom).value, 'SELECT 1', 'the text survives a round trip');
+    });
+
+    it('re-runs the query that produced the result when the file is refreshed, keeping unsent edits', () => {
+      const { dom, postedMessages } = inSqlMode();
+      runButton(dom).click();
+      sendQueryData(dom, resultOk(runQueries(postedMessages)[0].seq));
+      queryInput(dom).value = 'SELECT 99 -- not run yet';
+      queryInput(dom).dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+
+      sendDuckdbData(dom, warehouse({ ...reloadMeta }));
+
+      const sent = runQueries(postedMessages);
+      assert.strictEqual(sent.length, 2);
+      assert.strictEqual(sent[1].sql, 'SELECT * FROM "a" LIMIT 100', 'the query behind the result, not the unsent edit');
+      assert.strictEqual(queryInput(dom).value, 'SELECT 99 -- not run yet');
+      assert.ok(doc(dom).querySelector('.query-result #csv-table'), 'the old result stays until the new one arrives');
+      assert.strictEqual(queryStatus(dom), 'Running…');
+      sendQueryData(dom, resultOk(sent[1].seq, { rows: [['9']], rowCount: 1 }));
+      assert.strictEqual(doc(dom).querySelector('#csv-table tbody td:not(.row-num)')?.textContent, '9');
+    });
+
+    it('keeps focus, caret and scroll in the box, and the result scroll, through a refresh', () => {
+      const { dom, postedMessages } = inSqlMode();
+      runButton(dom).click();
+      sendQueryData(dom, resultOk(runQueries(postedMessages)[0].seq));
+      const before = queryInput(dom);
+      before.focus();
+      before.setSelectionRange(3, 7);
+      before.scrollTop = 11;
+      const wrapper = () => doc(dom).querySelector<HTMLElement>('.query-result .scroll-wrapper')!;
+      wrapper().scrollTop = 120;
+      wrapper().scrollLeft = 30;
+
+      sendDuckdbData(dom, warehouse({ ...reloadMeta }));
+
+      const after = queryInput(dom);
+      assert.notStrictEqual(after, before, 'the page is rebuilt');
+      assert.strictEqual(doc(dom).activeElement, after, 'typing can go on');
+      assert.deepStrictEqual([after.selectionStart, after.selectionEnd], [3, 7]);
+      assert.strictEqual(after.scrollTop, 11);
+      assert.strictEqual(wrapper().scrollTop, 120, 'the old result is back where it was while the re-run is pending');
+
+      sendQueryData(dom, resultOk(runQueries(postedMessages)[1].seq, { rows: [['9']], rowCount: 1 }));
+      assert.strictEqual(wrapper().scrollTop, 120, 'and so is the new one');
+      assert.strictEqual(wrapper().scrollLeft, 30);
+    });
+
+    it('does not move focus into the box on a refresh when the user was elsewhere', () => {
+      const { dom } = inSqlMode();
+      (doc(dom).activeElement as HTMLElement).blur();
+      sendDuckdbData(dom, warehouse({ ...reloadMeta }));
+      assert.notStrictEqual(doc(dom).activeElement, queryInput(dom));
+    });
+
+    it('does not start a second run on top of a running one, but runs once more after its answer', () => {
+      const { dom, postedMessages } = inSqlMode();
+      runButton(dom).click();
+      sendDuckdbData(dom, warehouse({ ...reloadMeta }));
+      sendDuckdbData(dom, warehouse({ ...reloadMeta }));
+      assert.strictEqual(runQueries(postedMessages).length, 1, 'refreshes during a run add no runs');
+
+      sendQueryData(dom, resultOk(runQueries(postedMessages)[0].seq));
+      const sent = runQueries(postedMessages);
+      assert.strictEqual(sent.length, 2, 'one re-run for all of them, after the answer');
+      assert.strictEqual(sent[1].sql, sent[0].sql);
+      assert.ok(doc(dom).querySelector('#csv-table'), 'the answer that did arrive is shown meanwhile');
+    });
+
+    it('a manual run cancels a pending re-run', () => {
+      const { dom, postedMessages } = inSqlMode();
+      runButton(dom).click();
+      sendDuckdbData(dom, warehouse({ ...reloadMeta }));
+      runButton(dom).click();
+      sendQueryData(dom, resultOk(runQueries(postedMessages)[1].seq));
+      assert.strictEqual(runQueries(postedMessages).length, 2, 'no extra run after the manual one answered');
+    });
+
+    it('does not run anything on a refresh when no query was ever run', () => {
+      const { dom, postedMessages } = inSqlMode();
+      sendDuckdbData(dom, warehouse({ ...reloadMeta }));
+      assert.strictEqual(runQueries(postedMessages).length, 0);
+      assert.ok(queryInput(dom), 'still in SQL mode after the refresh');
+    });
+
+    it('falls back to table mode when the host can no longer query (e.g. the file became empty)', () => {
+      const { dom } = inSqlMode();
+      sendDuckdbData(dom, warehouse({ capabilities: { refresh: true, query: false } }));
+      assert.strictEqual(doc(dom).querySelector('.query-input'), null);
+      assert.strictEqual(doc(dom).querySelector('.mode-toggle'), null);
+    });
+  });
+
   describe('table picker', () => {
     const tableData = { headers: ['id'], rows: [['1']], rowCount: 1, columnCount: 1 };
 
     function sendTables(
       dom: JSDOM,
-      tables: { name: string; type: 'table' | 'view' }[],
+      tables: TableRef[],
       selectedTable = tables[0].name
     ): HTMLElement {
       sendDuckdbData(dom, { success: true, errors: [], data: { tables, selectedTable, data: tableData } });
       return dom.window.document.getElementById('app')!;
     }
 
-    const mixed: { name: string; type: 'table' | 'view' }[] = [
+    const mixed: TableRef[] = [
       { name: 'raw_invoices', type: 'table' },
       { name: 'stg_invoice', type: 'view' },
       { name: 'stg_payment', type: 'view' },
@@ -893,6 +1165,107 @@ describe('webview main.js rendering', () => {
       openPickerPopup(app);
       assert.strictEqual(app.querySelector('.table-picker-group'), null);
       assert.deepStrictEqual(listedNames(app), ['Sheet1', 'Sheet2']);
+    });
+
+    describe('tables in several schemas', () => {
+      const warehouse: TableRef[] = [
+        { name: 'raw_events', type: 'table', approxRows: 2 },
+        { name: 'main_marts.orders', type: 'table', schema: 'main_marts', table: 'orders', approxRows: 1500 },
+        { name: 'main_staging.orders', type: 'table', schema: 'main_staging', table: 'orders', approxRows: 3 },
+        { name: 'main_staging.stg_events', type: 'view', schema: 'main_staging', table: 'stg_events' },
+      ];
+      const groupTexts = (app: HTMLElement) =>
+        Array.from(app.querySelectorAll('.table-picker-group')).map((g) => g.textContent);
+
+      it('groups by schema with counts (main first) and shows the short table name', () => {
+        const { dom } = loadWebview();
+        const app = sendTables(dom, warehouse);
+        openPickerPopup(app);
+        assert.deepStrictEqual(groupTexts(app), ['main (1)', 'main_marts (1)', 'main_staging (2)']);
+        assert.deepStrictEqual(listedNames(app), ['raw_events', 'orders', 'orders', 'stg_events']);
+      });
+
+      it('picks the table by its qualified name, so same-named tables stay apart', () => {
+        const { dom, postedMessages } = loadWebview();
+        const app = sendTables(dom, warehouse);
+        openPickerPopup(app);
+        app.querySelectorAll<HTMLElement>('.table-picker-option')[2].click();
+        assert.deepStrictEqual(postedMessages.filter((m) => (m as { type: string }).type === 'select-table'), [
+          { type: 'select-table', table: 'main_staging.orders' },
+        ]);
+      });
+
+      it('shows the qualified name on the trigger', () => {
+        const { dom } = loadWebview();
+        const app = sendTables(dom, warehouse, 'main_marts.orders');
+        assert.strictEqual(pickerCurrent(app), 'main_marts.orders');
+      });
+
+      it('searches the schema part too', () => {
+        const { dom } = loadWebview();
+        const app = sendTables(dom, warehouse);
+        const popup = openPickerPopup(app);
+        typeInPicker(dom, popup, 'staging');
+        assert.deepStrictEqual(groupTexts(app), ['main_staging (2)']);
+        assert.deepStrictEqual(listedNames(app), ['orders', 'stg_events']);
+      });
+
+      it('finds the main tables under the "main" header by that name', () => {
+        const { dom } = loadWebview();
+        const app = sendTables(dom, warehouse);
+        const popup = openPickerPopup(app);
+        typeInPicker(dom, popup, 'main.');
+        assert.deepStrictEqual(groupTexts(app), ['main (1)']);
+        assert.deepStrictEqual(listedNames(app), ['raw_events']);
+        typeInPicker(dom, popup, 'main.raw');
+        assert.deepStrictEqual(listedNames(app), ['raw_events']);
+        typeInPicker(dom, popup, 'raw_ev');
+        assert.deepStrictEqual(listedNames(app), ['raw_events'], 'the plain name still works');
+      });
+
+      it('lists a single non-main schema flat, with qualified names', () => {
+        const { dom } = loadWebview();
+        const app = sendTables(dom, [
+          { name: 'staging.a', type: 'table', schema: 'staging', table: 'a' },
+          { name: 'staging.b', type: 'table', schema: 'staging', table: 'b' },
+        ]);
+        openPickerPopup(app);
+        assert.strictEqual(app.querySelector('.table-picker-group'), null);
+        assert.deepStrictEqual(listedNames(app), ['staging.a', 'staging.b']);
+      });
+    });
+
+    describe('row-count hints', () => {
+      it('shows an approximate count for tables that have one, and none for views', () => {
+        const { dom } = loadWebview();
+        const app = sendTables(dom, [
+          { name: 'small', type: 'table', approxRows: 3 },
+          { name: 'big', type: 'table', approxRows: 1500 },
+          { name: 'v', type: 'view' },
+        ]);
+        openPickerPopup(app);
+        const options = Array.from(app.querySelectorAll('.table-picker-option'));
+        const meta = options.map((o) => o.querySelector('.picker-meta')?.textContent ?? null);
+        assert.strictEqual(meta[0], '~3');
+        assert.match(meta[1] ?? '', /^~1[.,]5/);
+        assert.strictEqual(meta[2], null);
+        assert.strictEqual(options[0].getAttribute('title'), 'small · about 3 rows');
+        assert.strictEqual(options[2].getAttribute('title'), 'v');
+      });
+
+      it('says "1 row", not "1 rows"', () => {
+        const { dom } = loadWebview();
+        const app = sendTables(dom, [{ name: 'one', type: 'table', approxRows: 1 }]);
+        openPickerPopup(app);
+        assert.strictEqual(app.querySelector('.table-picker-option')?.getAttribute('title'), 'one · about 1 row');
+      });
+
+      it('leaves sources without estimates (SQLite, Excel) untouched', () => {
+        const { dom } = loadWebview();
+        const app = sendTables(dom, mixed);
+        openPickerPopup(app);
+        assert.strictEqual(app.querySelector('.picker-meta'), null);
+      });
     });
 
     it('filters case-insensitively, updates group counts and highlights the match', () => {

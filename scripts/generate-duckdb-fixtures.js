@@ -11,7 +11,7 @@
  *
  *     node scripts/generate-duckdb-fixtures.js
  *
- * Re-running rewrites every fixture. The older fixtures are storage v64
+ * Re-running rewrites every fixture (add `schemas` to write only schemas.duckdb). The older fixtures are storage v64
  * (written by DuckDB 1.5) and double as the backward-compat check for the
  * bundled engine, so to add or refresh only the v2 one run:
  *
@@ -67,9 +67,36 @@ async function writeStorageV2() {
   console.log(`wrote ${filePath}`);
 }
 
+// schemas.duckdb -- a dbt-shaped warehouse: a `main` table, models in other
+// schemas, the same table name in two schemas, a view outside `main`, and a
+// schema/table whose names need quoting. Exercises schema-qualified listing,
+// reads, stats and filters. Regenerate alone with:
+//
+//     node scripts/generate-duckdb-fixtures.js schemas
+async function writeSchemas() {
+  await write('schemas.duckdb', [
+    'CREATE TABLE raw_events (id INTEGER, kind VARCHAR)',
+    `INSERT INTO raw_events VALUES (1, 'click'), (2, 'view')`,
+    'CREATE SCHEMA main_staging',
+    'CREATE TABLE main_staging.orders (id INTEGER, status VARCHAR)',
+    `INSERT INTO main_staging.orders VALUES (1, 'new'), (2, 'paid'), (3, 'paid')`,
+    'CREATE VIEW main_staging.stg_events AS SELECT id, kind FROM main.raw_events',
+    'CREATE SCHEMA main_marts',
+    'CREATE TABLE main_marts.orders (id INTEGER, total DOUBLE)',
+    'INSERT INTO main_marts.orders VALUES (1, 19.99), (2, 5.5)',
+    'CREATE SCHEMA "my schema"',
+    'CREATE TABLE "my schema"."odd ""name""" (v INTEGER)',
+    'INSERT INTO "my schema"."odd ""name""" VALUES (7)',
+  ]);
+}
+
 async function main() {
   if (process.argv[2] === 'storage-v2') {
     await writeStorageV2();
+    return;
+  }
+  if (process.argv[2] === 'schemas') {
+    await writeSchemas();
     return;
   }
   // simple.duckdb -- mixed types mirroring simple.csv/simple.parquet/
@@ -176,6 +203,7 @@ async function main() {
   console.log(`wrote ${corruptPath}`);
 
   await writeStorageV2();
+  await writeSchemas();
 }
 
 main().catch((err) => {

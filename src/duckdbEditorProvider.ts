@@ -9,7 +9,10 @@ import {
   listDuckdbTables,
   openDuckdbDatabase,
   readSelectedTable,
+  duckdbRunQuery,
+  queryLimits,
   runExclusive,
+  suggestQuery,
   type DuckdbHandle,
 } from './duckdbParser';
 import { reportStatsFailure } from './columnStats';
@@ -22,6 +25,13 @@ import {
 } from './filter';
 import { filterDataMessage, isFilterMessage, type FilterMessage, type FilterPayload } from './filterMessage';
 import { isGetStatsMessage, statsDataMessage, type StatsPayload } from './statsMessage';
+import {
+  isRunQueryMessage,
+  queryDataMessage,
+  queryPayload,
+  type QueryPayload,
+  type RunQueryMessage,
+} from './queryMessage';
 import type { MultiTableData, MultiTableParseOutcome } from './tableData';
 import { ReloadScheduler } from './reloadScheduler';
 import { buildWebviewHtml } from './webviewHtml';
@@ -31,6 +41,16 @@ import { getAutoRefreshSetting, getMaxRowsSetting } from './config';
 const RELOAD_DEBOUNCE_MS = 750;
 /** How long a burst of events may wait for the writer's `.wal` to go away. */
 const RELOAD_MAX_WAIT_MS = 30_000;
+
+/** `workspaceState` key of the table last shown for a file. */
+function lastTableKey(uri: vscode.Uri): string {
+  return `tablas.lastTable:${uri.toString()}`;
+}
+
+/** `workspaceState` key of the SQL last run from the query box for a file. */
+function lastQueryKey(uri: vscode.Uri): string {
+  return `tablas.lastQuery:${uri.toString()}`;
+}
 
 class DuckdbDocument implements vscode.CustomDocument {
   constructor(public readonly uri: vscode.Uri) {}
@@ -45,6 +65,8 @@ class DuckdbDocument implements vscode.CustomDocument {
   handle?: DuckdbHandle;
   /** `seq` of the newest `filter` request received; an older one still queued is dropped. */
   filterSeq = 0;
+  /** Same for `run-query`: a query still queued behind a newer one never runs. */
+  querySeq = 0;
   /**
    * True once the first load has been attempted (it may have failed or found an
    * empty file, leaving `handle` undefined). A reload may then do the load that
@@ -285,12 +307,64 @@ export class DuckdbEditorProvider
         if (payload) {
           await webview.postMessage(filterDataMessage(payload));
         }
+      } else if (isRunQueryMessage(message)) {
+        const payload = await this.handleRunQuery(document, message);
+        if (payload) {
+          await webview.postMessage(queryDataMessage(payload));
+        }
       }
     });
   }
 
-  /** First load: reads the file, opens the database, stashes the handle, reads the first table. */
-  private async loadInitial(document: DuckdbDocument): Promise<MultiTableParseOutcome> {
+  /**
+   * The table the user last looked at in this file, kept in the workspace state
+   * so reopening the file (or a new VS Code window on the same workspace) lands
+   * on it instead of the first table. `workspaceState` is optional because tests
+   * build the provider with a bare context.
+   */
+  private rememberedTable(document: DuckdbDocument): string | undefined {
+    try {
+      return this.context.workspaceState?.get<string>(lastTableKey(document.uri));
+    } catch {
+      return undefined;
+    }
+  }
+
+  private rememberTable(document: DuckdbDocument, table: string): void {
+    try {
+      void this.context.workspaceState?.update(lastTableKey(document.uri), table)?.then(undefined, () => undefined);
+    } catch {
+      // best effort: forgetting the last table is not worth failing a table switch
+    }
+  }
+
+  private rememberedQuery(document: DuckdbDocument): string | undefined {
+    try {
+      return this.context.workspaceState?.get<string>(lastQueryKey(document.uri));
+    } catch {
+      return undefined;
+    }
+  }
+
+  private rememberQuery(document: DuckdbDocument, sql: string): void {
+    // An over-long text is refused by the runner; it must not replace (or clear)
+    // the last query that did run.
+    if (sql.length > queryLimits.maxSqlLength) {
+      return;
+    }
+    try {
+      void this.context.workspaceState?.update(lastQueryKey(document.uri), sql)?.then(undefined, () => undefined);
+    } catch {
+      // best effort
+    }
+  }
+
+  /**
+   * First load: reads the file, opens the database, stashes the handle, reads
+   * the remembered table (else the first one). Public so an integration test
+   * can call it without a real webview.
+   */
+  public async loadInitial(document: DuckdbDocument): Promise<MultiTableParseOutcome> {
     try {
       const bytes = await vscode.workspace.fs.readFile(document.uri);
       if (bytes.byteLength === 0) {
@@ -310,7 +384,7 @@ export class DuckdbEditorProvider
       let data: MultiTableData;
       try {
         const tables = await listDuckdbTables(opened);
-        data = await readSelectedTable(opened, tables, undefined, getMaxRowsSetting());
+        data = await readSelectedTable(opened, tables, this.rememberedTable(document), getMaxRowsSetting());
       } catch (err) {
         opened.close();
         throw err;
@@ -342,9 +416,14 @@ export class DuckdbEditorProvider
       data.tableError === undefined && data.selectedTable !== ''
         ? (data.data.totalRowCount ?? data.data.rowCount)
         : undefined;
+    // Without a handle (an empty file so far) there is nothing to query yet.
+    const handle = document.handle;
+    const lastQuery = this.rememberedQuery(document);
     return {
       ...data,
-      capabilities: { refresh: true },
+      capabilities: { refresh: true, query: handle !== undefined },
+      ...(lastQuery !== undefined && lastQuery !== '' && { lastQuery }),
+      ...(handle !== undefined && data.selectedTable !== '' && { querySuggestion: suggestQuery(handle, data.selectedTable) }),
       ...(reloadAt !== undefined && {
         reload: { at: reloadAt, ...(previousRowCount !== undefined && { previousRowCount }) },
       }),
@@ -394,12 +473,15 @@ export class DuckdbEditorProvider
       opened = result;
       try {
         const tables = await listDuckdbTables(opened);
+        // What is on screen, else (a first load that failed, so nothing is) what the
+        // user last looked at, like `loadInitial` would have opened.
+        const wanted = (): string | undefined => document.selectedTable ?? this.rememberedTable(document);
         let target: string | undefined;
         let attempts = 0;
         do {
-          target = document.selectedTable;
+          target = wanted();
           data = await readSelectedTable(opened, tables, target, getMaxRowsSetting());
-        } while (document.selectedTable !== target && ++attempts < 3);
+        } while (wanted() !== target && ++attempts < 3);
       } catch (err) {
         opened.close();
         throw err;
@@ -447,6 +529,9 @@ export class DuckdbEditorProvider
     try {
       const tables = await listDuckdbTables(document.handle);
       const data = await readSelectedTable(document.handle, tables, table, getMaxRowsSetting());
+      if (data.tableError === undefined && data.selectedTable !== '') {
+        this.rememberTable(document, data.selectedTable);
+      }
       return { success: true, data: this.publish(document, data), errors: [] };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -477,6 +562,28 @@ export class DuckdbEditorProvider
       reportStatsFailure(err);
       return { table, stats: undefined };
     }
+  }
+
+  /**
+   * Runs the SQL the user typed in the query box against the already-open
+   * database (reads only, capped at `tablas.maxRows` rows; see `duckdbRunQuery`)
+   * and answers with the rows or the error text. Returns `undefined` (nothing
+   * to post) when the database is not open or a newer request overtook this one
+   * while it waited in the connection's queue. The text is kept in the workspace
+   * state so the box can be prefilled next time; it is never run unless the user
+   * asks, except that a refresh re-runs the last query the webview itself sent.
+   * Public so an integration test can call it without a real webview.
+   */
+  public async handleRunQuery(document: DuckdbDocument, message: RunQueryMessage): Promise<QueryPayload | undefined> {
+    if (!document.handle) {
+      return undefined;
+    }
+    document.querySeq = message.seq;
+    this.rememberQuery(document, message.sql);
+    const outcome = await duckdbRunQuery(document.handle, message.sql, getMaxRowsSetting(), {
+      shouldRun: () => document.querySeq === message.seq,
+    });
+    return outcome === undefined ? undefined : queryPayload(message, outcome);
   }
 
   /**

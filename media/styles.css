@@ -157,6 +157,143 @@ body.vscode-high-contrast-light {
   border-radius: 3px;
 }
 
+/* Table | SQL switch at the toolbar's left. */
+.mode-toggle {
+  display: inline-flex;
+  flex-shrink: 0;
+  margin: 6px 0 0 12px;
+  border: 1px solid var(--vscode-dropdown-border, var(--vscode-input-border, var(--vscode-editorGroup-border, transparent)));
+  border-radius: 2px;
+}
+
+.mode-button {
+  padding: 3px 10px;
+  font: inherit;
+  color: var(--vscode-foreground);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.mode-button + .mode-button {
+  border-left: 1px solid var(--vscode-dropdown-border, var(--vscode-input-border, var(--vscode-editorGroup-border, transparent)));
+}
+
+.mode-button:hover {
+  background-color: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+
+.mode-button[aria-pressed='true'] {
+  color: var(--vscode-button-foreground);
+  background-color: var(--vscode-button-background);
+}
+
+.mode-button:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+/* ── SQL box ───────────────────────────────────────────
+   Query text above, its result (the usual stats bar + table) below. */
+
+.query-panel {
+  flex-shrink: 0;
+  padding: 6px 12px 8px;
+  background-color: var(--vscode-editorGroupHeader-tabsBackground, var(--vscode-editor-background));
+  border-bottom: 1px solid var(--vscode-editorGroup-border, var(--vscode-panel-border));
+}
+
+.query-input {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 72px;
+  max-height: 45vh;
+  padding: 6px 8px;
+  resize: vertical;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: var(--vscode-editor-font-size, 13px);
+  color: var(--vscode-input-foreground);
+  background-color: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 2px;
+}
+
+.query-input:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.query-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+  min-width: 0;
+}
+
+.query-run {
+  flex-shrink: 0;
+  padding: 3px 14px;
+  font: inherit;
+  color: var(--vscode-button-foreground);
+  background-color: var(--vscode-button-background);
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.query-run:hover:not(:disabled) {
+  background-color: var(--vscode-button-hoverBackground);
+}
+
+.query-run:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.query-run:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+.query-hint,
+.query-status {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.query-status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.query-status.error {
+  color: var(--vscode-errorForeground);
+}
+
+/* Holds the result's stats bar + scroll wrapper, so they size like they do under #app. */
+.query-result {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* Approximate row count beside a table in the picker. */
+.picker-meta {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--vscode-descriptionForeground);
+}
+
+.table-picker-option.active .picker-meta {
+  color: inherit;
+}
+
 .table-picker-popup {
   position: absolute;
   top: calc(100% - 2px);

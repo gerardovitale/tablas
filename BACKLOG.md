@@ -103,16 +103,39 @@ A torn read fails once with "Refresh failed" and waits for the next file event. 
 
 If VS Code re-resolves the same document with a new panel (not verified that it does, e.g. when a tab moves to another window), the earlier handle and its temp copy leak. Acceptance: close any existing handle before assigning in `loadInitial`.
 
-## Multi-table sources
+## SQL box (DuckDB)
 
-### T-1 · DuckDB only lists tables in the `main` schema · P2 · M
+### Q-1 · A running query cannot be cancelled by the user · P2 · S
 
-`listDuckdbTables` filters `information_schema.tables` on `table_schema = 'main'`, so tables and views in any other schema (common in dbt warehouses, which put models in `staging`, `marts`, etc.) are invisible in the table picker.
+A slow query blocks the connection's queue (stats, filters and table switches wait behind it) until it ends or hits the 30 s limit. A Cancel button would send `{type:'cancel-query'}` and call `interrupt()`, but `interrupt()` is connection-wide: it must only fire while *that query* is the one running, so track which request holds the connection.
 
-Acceptance:
-- List every non-system schema (skip `information_schema`, `pg_catalog`), group by schema in the picker, and qualify names as `schema.table` end to end.
-- `TableRef` gains a schema; `select-table`, `readDuckdbTable`, `duckdbTableStats` and the filter SQL quote it (see `quoteIdentifier`).
-- Fixture with tables in two schemas, plus a name that exists in both.
+### Q-2 · No way to export or reuse a query result · P3 · M
+
+`COPY .. TO` is refused on purpose (see CLAUDE.md, "SQL box"). A result export (CSV) would be its own button: host-side write to a path the user picks in a save dialog, never from SQL text.
+
+### Q-3 · Table names are not offered while typing · P3 · M
+
+The box is a plain `<textarea>`: no completion, no highlighting. Candidates: insert the picked table's qualified name from a picker, or a small completion list from `TableRef`s.
+
+### Q-4 · A query with unsent edits and a stuck "Running…" · P3 · S
+
+If the host never answers (for example `document.handle` is missing), the status stays "Running…". Add a timeout in the webview or an explicit "not available" reply.
+
+### Q-5 · Table ids can collide when a `main` table name contains a dot · P3 · S
+
+`TableRef.name` for a table outside `main` is `schema.table`, so a `main` table `"a.b"` and table `b` in schema `a` get the same id, and the picker, reads, stats and filters resolve both to the last one listed (silent wrong data). Same for a schema name with a dot. Acceptance: an unambiguous id for non-`main` refs (or qualify the `main` one on a duplicate), with a fixture holding both.
+
+### Q-6 · The SQL box binds every statement twice, and `EXPORT DATABASE` leaves a folder · P3 · M
+
+Each statement is `prepare`d to learn its type (binding, which for `read_csv`/remote sources can mean sniffing or fetching), then `streamAndReadUntil(sql)` parses and binds the whole text again. A refused `EXPORT DATABASE '<dir>'` still creates `<dir>` while binding. Acceptance: classify without binding, or run the prepared statements instead of re-parsing, and refuse by leading keyword before preparing.
+
+### Q-7 · Per-file query and last-table entries are never pruned · P3 · S
+
+`tablas.lastQuery:<uri>` (up to 100k characters) and `tablas.lastTable:<uri>` stay in `workspaceState` for every file ever opened. Acceptance: cap the number of remembered files (drop the least recently used) or drop entries for files that no longer exist.
+
+### Q-8 · The auto re-run after a refresh ignores how slow the query is · P3 · S
+
+A refresh re-runs the last query even if the previous run took most of the 30 s budget, and each run holds the connection queue (table switches, filters and stats wait behind it). Now at most one re-run waits behind a running query. Acceptance: skip the automatic re-run when the last run took longer than a few seconds and show a "Run again" hint instead.
 
 ## Packaging and marketplace
 

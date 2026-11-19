@@ -7,7 +7,7 @@ import type { TablasApi } from '../../src/extension';
 import type { MultiTableParseOutcome } from '../../src/tableData';
 import { DuckdbEditorProvider } from '../../src/duckdbEditorProvider';
 import { DuckDBInstance } from '@duckdb/node-api';
-import { openDuckdbDatabase } from '../../src/duckdbParser';
+import { openDuckdbDatabase, queryLimits } from '../../src/duckdbParser';
 import { idsOf } from '../unit/filterCases';
 import { FILTER_UNKNOWN_TABLE_REASON } from '../../src/filter';
 
@@ -78,7 +78,7 @@ describe('DuckdbEditorProvider Integration', () => {
     const outcome = await openDuckdbAndAwaitOutcome('simple.duckdb');
     assert.strictEqual(outcome.success, true, 'Parsing simple.duckdb should succeed');
     if (outcome.success) {
-      assert.deepStrictEqual(outcome.data.tables, [{ name: 'people', type: 'table' }]);
+      assert.deepStrictEqual(outcome.data.tables, [{ name: 'people', type: 'table', approxRows: 3 }]);
       assert.strictEqual(outcome.data.selectedTable, 'people');
       assert.strictEqual(outcome.data.data.rowCount, 3);
     }
@@ -90,8 +90,8 @@ describe('DuckdbEditorProvider Integration', () => {
     if (outcome.success) {
       assert.deepStrictEqual(outcome.data.tables, [
         { name: 'customer_totals', type: 'view' },
-        { name: 'customers', type: 'table' },
-        { name: 'orders', type: 'table' },
+        { name: 'customers', type: 'table', approxRows: 2 },
+        { name: 'orders', type: 'table', approxRows: 3 },
       ]);
     }
   });
@@ -328,6 +328,284 @@ describe('DuckdbEditorProvider Integration', () => {
     });
   });
   /**
+   * The last table shown per file is kept in `workspaceState`. The provider is
+   * built with a stub memento here; `loadInitial` is what the ready-handshake
+   * calls on first open.
+   */
+  describe('remembering the last table', () => {
+    function stubContext(initial: Record<string, string> = {}) {
+      const store = new Map<string, string>(Object.entries(initial));
+      const context = {
+        extensionPath: process.cwd(),
+        workspaceState: {
+          get: <T>(key: string) => store.get(key) as T | undefined,
+          update: async (key: string, value: string) => {
+            store.set(key, value);
+          },
+        },
+      } as unknown as vscode.ExtensionContext;
+      return { store, context };
+    }
+    const keyFor = (name: string) => `tablas.lastTable:${fixtureUri(name).toString()}`;
+
+    it('stores the table after a successful switch', async () => {
+      const { store, context } = stubContext();
+      const provider = new DuckdbEditorProvider(context);
+      const document = provider.openCustomDocument(fixtureUri('multi-table.duckdb'));
+      try {
+        await provider.loadInitial(document);
+        assert.strictEqual(store.size, 0, 'the default first table is not a choice, so nothing is stored');
+        await provider.handleSelectTable(document, 'orders');
+        assert.strictEqual(store.get(keyFor('multi-table.duckdb')), 'orders');
+      } finally {
+        document.dispose();
+      }
+    });
+
+    it('opens on the remembered table', async () => {
+      const { context } = stubContext({ [keyFor('multi-table.duckdb')]: 'orders' });
+      const provider = new DuckdbEditorProvider(context);
+      const document = provider.openCustomDocument(fixtureUri('multi-table.duckdb'));
+      try {
+        const outcome = await provider.loadInitial(document);
+        assert.strictEqual(outcome.success && outcome.data.selectedTable, 'orders');
+      } finally {
+        document.dispose();
+      }
+    });
+
+    it('falls back to the first table when the remembered one no longer exists', async () => {
+      const { context } = stubContext({ [keyFor('multi-table.duckdb')]: 'dropped_by_a_rebuild' });
+      const provider = new DuckdbEditorProvider(context);
+      const document = provider.openCustomDocument(fixtureUri('multi-table.duckdb'));
+      try {
+        const outcome = await provider.loadInitial(document);
+        assert.strictEqual(outcome.success && outcome.data.selectedTable, 'customer_totals');
+      } finally {
+        document.dispose();
+      }
+    });
+
+    it('remembers a table in another schema by its qualified name, and never stores an unreadable one', async () => {
+      const { store, context } = stubContext();
+      const provider = new DuckdbEditorProvider(context);
+      const document = provider.openCustomDocument(fixtureUri('schemas.duckdb'));
+      try {
+        await provider.loadInitial(document);
+        await provider.handleSelectTable(document, 'main_staging.orders');
+        assert.strictEqual(store.get(keyFor('schemas.duckdb')), 'main_staging.orders');
+        // A name that is not listed falls back to the first table; that is not the user's choice either way,
+        // but what was actually shown (raw_events) is what gets remembered.
+        await provider.handleSelectTable(document, 'nope');
+        assert.strictEqual(store.get(keyFor('schemas.duckdb')), 'raw_events');
+      } finally {
+        document.dispose();
+      }
+    });
+
+    it('works without a workspace state (a provider built with a bare context)', async () => {
+      const provider = new DuckdbEditorProvider({ extensionPath: process.cwd() } as vscode.ExtensionContext);
+      const document = provider.openCustomDocument(fixtureUri('multi-table.duckdb'));
+      try {
+        await provider.loadInitial(document);
+        assert.strictEqual((await provider.handleSelectTable(document, 'orders'))?.success, true);
+      } finally {
+        document.dispose();
+      }
+    });
+  });
+
+  /** The SQL box: `handleRunQuery` is what the webview's `run-query` message ends up calling. */
+  describe('handleRunQuery (read-only SQL, no webview involved)', () => {
+    function stubContext() {
+      const store = new Map<string, string | undefined>();
+      const context = {
+        extensionPath: process.cwd(),
+        workspaceState: {
+          get: <T>(key: string) => store.get(key) as T | undefined,
+          update: async (key: string, value: string | undefined) => {
+            store.set(key, value);
+          },
+        },
+      } as unknown as vscode.ExtensionContext;
+      return { store, context };
+    }
+    const queryKey = (name: string) => `tablas.lastQuery:${fixtureUri(name).toString()}`;
+
+    async function open(name: string, context?: vscode.ExtensionContext) {
+      const provider = new DuckdbEditorProvider(context ?? ({ extensionPath: process.cwd() } as vscode.ExtensionContext));
+      const document = provider.openCustomDocument(fixtureUri(name));
+      const outcome = await provider.loadInitial(document);
+      return { provider, document, outcome };
+    }
+
+    it('answers with the rows, echoing seq', async () => {
+      const { provider, document } = await open('multi-table.duckdb');
+      try {
+        const payload = await provider.handleRunQuery(document, {
+          type: 'run-query',
+          seq: 7,
+          sql: 'SELECT name FROM customers ORDER BY id',
+        });
+        assert.strictEqual(payload?.seq, 7);
+        assert.deepStrictEqual(payload?.data?.rows, [['Acme'], ['Globex']]);
+        assert.strictEqual(payload?.truncated, false);
+        assert.strictEqual(payload?.error, undefined);
+      } finally {
+        document.dispose();
+      }
+    });
+
+    it('answers a refused or invalid query with the error text', async () => {
+      const { provider, document } = await open('multi-table.duckdb');
+      try {
+        const copy = await provider.handleRunQuery(document, { type: 'run-query', seq: 1, sql: "COPY (SELECT 1) TO '/tmp/tablas-never.csv'" });
+        assert.match(copy?.error ?? '', /^Only read queries can be run here/);
+        assert.strictEqual(copy?.data, undefined);
+        const bad = await provider.handleRunQuery(document, { type: 'run-query', seq: 2, sql: 'SELEC 1' });
+        assert.match(bad?.error ?? '', /syntax error/);
+        // and the connection is still good for the next table read
+        assert.strictEqual((await provider.handleSelectTable(document, 'orders'))?.success, true);
+      } finally {
+        document.dispose();
+      }
+    });
+
+    it('caps the rows at tablas.maxRows', async () => {
+      const { provider, document } = await open('multi-table.duckdb');
+      const config = vscode.workspace.getConfiguration('tablas');
+      try {
+        await config.update('maxRows', 2, vscode.ConfigurationTarget.Global);
+        const payload = await provider.handleRunQuery(document, { type: 'run-query', seq: 1, sql: 'SELECT range FROM range(50)' });
+        assert.strictEqual(payload?.data?.rowCount, 2);
+        assert.strictEqual(payload?.truncated, true);
+      } finally {
+        await config.update('maxRows', undefined, vscode.ConfigurationTarget.Global);
+        document.dispose();
+      }
+    });
+
+    it('drops a request that a newer one overtook, and does nothing before the database is open', async () => {
+      const { provider, document } = await open('multi-table.duckdb');
+      try {
+        const first = provider.handleRunQuery(document, { type: 'run-query', seq: 1, sql: 'SELECT 1' });
+        const second = provider.handleRunQuery(document, { type: 'run-query', seq: 2, sql: 'SELECT 2 AS two' });
+        assert.strictEqual(await first, undefined, 'the older request must not run');
+        assert.deepStrictEqual((await second)?.data?.rows, [['2']]);
+      } finally {
+        document.dispose();
+      }
+      const closed = new DuckdbEditorProvider({ extensionPath: process.cwd() } as vscode.ExtensionContext);
+      const unopened = closed.openCustomDocument(fixtureUri('multi-table.duckdb'));
+      assert.strictEqual(await closed.handleRunQuery(unopened, { type: 'run-query', seq: 1, sql: 'SELECT 1' }), undefined);
+    });
+
+    it('remembers the query, and offers it again with a suggestion for the shown table', async () => {
+      const { store, context } = stubContext();
+      const first = await open('multi-table.duckdb', context);
+      try {
+        assert.ok(first.outcome.success);
+        if (first.outcome.success) {
+          assert.deepStrictEqual(first.outcome.data.capabilities, { refresh: true, query: true });
+          assert.strictEqual(first.outcome.data.querySuggestion, 'SELECT * FROM "customer_totals" LIMIT 100');
+          assert.strictEqual(first.outcome.data.lastQuery, undefined);
+        }
+        await first.provider.handleRunQuery(first.document, { type: 'run-query', seq: 1, sql: 'SELECT count(*) FROM orders' });
+        assert.strictEqual(store.get(queryKey('multi-table.duckdb')), 'SELECT count(*) FROM orders');
+      } finally {
+        first.document.dispose();
+      }
+      const second = await open('multi-table.duckdb', context);
+      try {
+        assert.ok(second.outcome.success && second.outcome.data.lastQuery === 'SELECT count(*) FROM orders');
+      } finally {
+        second.document.dispose();
+      }
+    });
+
+    it('keeps the last query that ran when a later text is too long to run', async () => {
+      const { store, context } = stubContext();
+      const { provider, document } = await open('multi-table.duckdb', context);
+      const original = queryLimits.maxSqlLength;
+      try {
+        await provider.handleRunQuery(document, { type: 'run-query', seq: 1, sql: 'SELECT 1' });
+        queryLimits.maxSqlLength = 20;
+        const payload = await provider.handleRunQuery(document, {
+          type: 'run-query',
+          seq: 2,
+          sql: 'SELECT * FROM orders WHERE 1 = 1',
+        });
+        assert.match(payload?.error ?? '', /too long/);
+        assert.strictEqual(store.get(queryKey('multi-table.duckdb')), 'SELECT 1', 'the good query is not replaced or cleared');
+      } finally {
+        queryLimits.maxSqlLength = original;
+        document.dispose();
+      }
+    });
+
+    it('refuses EXPLAIN ANALYZE of a write through the whole handler, and writes nothing', async () => {
+      const { provider, document } = await open('multi-table.duckdb');
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tablas-explain-'));
+      const out = path.join(dir, 'out.csv');
+      try {
+        const payload = await provider.handleRunQuery(document, {
+          type: 'run-query',
+          seq: 1,
+          sql: `EXPLAIN ANALYZE COPY (SELECT 1 AS a) TO '${out}'`,
+        });
+        assert.match(payload?.error ?? '', /^EXPLAIN ANALYZE runs the statement it explains/);
+        assert.strictEqual(fs.existsSync(out), false);
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+        document.dispose();
+      }
+    });
+
+    it('suggests the schema-qualified name for a table outside main', async () => {
+      const { provider, document } = await open('schemas.duckdb');
+      try {
+        const outcome = await provider.handleSelectTable(document, 'main_marts.orders');
+        assert.ok(outcome?.success);
+        if (outcome?.success) {
+          assert.strictEqual(outcome.data.querySuggestion, 'SELECT * FROM "main_marts"."orders" LIMIT 100');
+        }
+      } finally {
+        document.dispose();
+      }
+    });
+
+    it('does not offer queries before there is a database (a file still being created)', async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tablas-query-'));
+      const target = path.join(dir, 'empty-so-far.duckdb');
+      fs.writeFileSync(target, new Uint8Array(0));
+      try {
+        const provider = new DuckdbEditorProvider({ extensionPath: process.cwd() } as vscode.ExtensionContext);
+        const document = provider.openCustomDocument(vscode.Uri.file(target));
+        const outcome = await provider.loadInitial(document);
+        assert.ok(outcome.success);
+        if (outcome.success) {
+          assert.deepStrictEqual(outcome.data.capabilities, { refresh: true, query: false });
+          assert.strictEqual(outcome.data.querySuggestion, undefined);
+        }
+        document.dispose();
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it('lists tables in every schema through the real handshake', async () => {
+    const outcome = await openDuckdbAndAwaitOutcome('schemas.duckdb');
+    assert.strictEqual(outcome.success, true);
+    if (outcome.success) {
+      assert.deepStrictEqual(
+        outcome.data.tables.map((t) => t.name),
+        ['raw_events', 'main_marts.orders', 'main_staging.orders', 'main_staging.stg_events', 'my schema.odd "name"']
+      );
+    }
+  });
+
+  /**
    * Live refresh: `handleReload` is what the file watcher, the toolbar button and
    * `tablas.refresh` all end up calling. Tested directly for the same reason as
    * `handleSelectTable`: a webview can't be driven from test code.
@@ -378,7 +656,7 @@ describe('DuckdbEditorProvider Integration', () => {
           assert.strictEqual(outcome.data.data.rowCount, 3);
           assert.strictEqual(outcome.data.reload?.previousRowCount, 3);
           assert.ok(!Number.isNaN(Date.parse(outcome.data.reload?.at ?? '')), 'reload.at is an ISO timestamp');
-          assert.deepStrictEqual(outcome.data.capabilities, { refresh: true });
+          assert.deepStrictEqual(outcome.data.capabilities, { refresh: true, query: true });
         }
         assert.notStrictEqual(document.handle, old, 'a fresh handle replaces the old one');
         await waitUntil(() => !fs.existsSync(old.tempFilePath), 'the old handle should be closed');
@@ -397,7 +675,7 @@ describe('DuckdbEditorProvider Integration', () => {
         const outcome = await provider.handleReload(document);
         assert.strictEqual(outcome?.success, true);
         if (outcome?.success) {
-          assert.deepStrictEqual(outcome.data.tables, [{ name: 'people', type: 'table' }]);
+          assert.deepStrictEqual(outcome.data.tables, [{ name: 'people', type: 'table', approxRows: 3 }]);
           assert.strictEqual(outcome.data.selectedTable, 'people');
           assert.strictEqual(outcome.data.reload?.previousRowCount, undefined, 'a different table has no previous count');
         }
@@ -452,7 +730,7 @@ describe('DuckdbEditorProvider Integration', () => {
         if (outcome?.success) {
           assert.strictEqual(outcome.data.tables.length, 3);
           assert.strictEqual(outcome.data.reload?.previousRowCount, undefined);
-          assert.deepStrictEqual(outcome.data.capabilities, { refresh: true });
+          assert.deepStrictEqual(outcome.data.capabilities, { refresh: true, query: true });
         }
       } finally {
         document.dispose();
@@ -512,6 +790,29 @@ describe('DuckdbEditorProvider Integration', () => {
         if (outcome?.success && outcome.data.selectedTable === 'orders') {
           assert.strictEqual(outcome.data.data.rowCount, 3);
         }
+      } finally {
+        document.dispose();
+      }
+    });
+
+    it('opens the remembered table, not the first one, when the reload is the first load', async () => {
+      fs.writeFileSync(target, new Uint8Array(0)); // dbt still creating the file
+      const remembered = `tablas.lastTable:${vscode.Uri.file(target).toString()}`;
+      const context = {
+        extensionPath: process.cwd(),
+        workspaceState: {
+          get: <T>(key: string) => (key === remembered ? ('orders' as unknown as T) : undefined),
+          update: async () => undefined,
+        },
+      } as unknown as vscode.ExtensionContext;
+      const provider = new DuckdbEditorProvider(context);
+      const document = provider.openCustomDocument(vscode.Uri.file(target));
+      document.initialLoadDone = true;
+      try {
+        copyFixture('multi-table.duckdb');
+        const outcome = await provider.handleReload(document);
+        assert.strictEqual(outcome?.success && outcome.data.selectedTable, 'orders');
+        assert.strictEqual(document.selectedTable, 'orders');
       } finally {
         document.dispose();
       }
