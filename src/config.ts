@@ -14,6 +14,11 @@ export const DEFAULT_MAX_ROWS = 5000;
  */
 export const MAX_ROWS_CEILING = 200_000;
 
+/** `tablas.autoRefresh`: re-read a DuckDB file when it changes on disk (default on). */
+export function getAutoRefreshSetting(): boolean {
+  return vscode.workspace.getConfiguration('tablas').get<boolean>('autoRefresh', true);
+}
+
 /**
  * Single source of truth for reading `tablas.maxRows`, used by both
  * editor providers so the default/ceiling can't drift between them.

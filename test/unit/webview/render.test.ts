@@ -5,7 +5,13 @@ import * as vm from 'vm';
 import { JSDOM } from 'jsdom';
 import type { CsvParseOutcome } from '../../../src/csvParser';
 import { bucketIndex, planHistogram } from '../../../src/columnStats';
-import type { ColumnStats, MultiTableParseOutcome, ParsedTable, TableStats } from '../../../src/tableData';
+import type {
+  ColumnStats,
+  MultiTableData,
+  MultiTableParseOutcome,
+  ParsedTable,
+  TableStats,
+} from '../../../src/tableData';
 
 const webviewMainPath = path.join(process.cwd(), 'src', 'webview', 'main.js');
 const webviewMainSource = fs.readFileSync(webviewMainPath, 'utf8');
@@ -572,6 +578,264 @@ describe('webview main.js rendering', () => {
       const message = app.querySelector('p.message.error');
       assert.ok(message);
       assert.strictEqual(message!.textContent, 'Could not read "broken_view":\nIO Error: No files found');
+    });
+  });
+
+  describe('duckdb reload (live refresh)', () => {
+    function payload(
+      rows: string[][],
+      extra: Partial<MultiTableData> = {},
+      headers = ['id', 'city']
+    ): MultiTableParseOutcome {
+      return {
+        success: true,
+        errors: [],
+        data: {
+          tables: [
+            { name: 'a', type: 'table' },
+            { name: 'b', type: 'table' },
+          ],
+          selectedTable: 'a',
+          data: { headers, rows, rowCount: rows.length, columnCount: headers.length },
+          capabilities: { refresh: true },
+          ...extra,
+        },
+      };
+    }
+    const threeRows = [['1', 'Rome'], ['2', 'Paris'], ['3', 'Oslo']];
+    const fiveRows = [...threeRows, ['4', 'Lima'], ['5', 'Rome']];
+    const status = (dom: JSDOM) => dom.window.document.querySelector('.reload-status');
+    const filterBoxes = (dom: JSDOM) =>
+      Array.from(dom.window.document.querySelectorAll<HTMLInputElement>('input.col-filter'));
+    const filterRequests = (posted: unknown[]) =>
+      posted.filter((m) => (m as { type: string }).type === 'filter') as Array<{
+        filters: Array<{ column: number; text: string }>;
+      }>;
+    const sendStatus = (dom: JSDOM, message: Record<string, unknown>) =>
+      dom.window.dispatchEvent(
+        new dom.window.MessageEvent('message', { data: { type: 'reload-status', ...message } })
+      );
+
+    it('shows a refresh button only when the host advertises refresh', () => {
+      const { dom, postedMessages } = loadWebview();
+      sendDuckdbData(dom, payload(threeRows, { capabilities: undefined }));
+      assert.strictEqual(dom.window.document.querySelector('.toolbar-button'), null);
+      assert.strictEqual(status(dom), null);
+
+      sendDuckdbData(dom, payload(threeRows));
+      const button = dom.window.document.querySelector<HTMLButtonElement>('.toolbar-button');
+      assert.ok(button);
+      button.click();
+      assert.ok(postedMessages.some((m) => (m as { type: string }).type === 'refresh'));
+    });
+
+    it('shows when the data was refreshed and how the row count moved', () => {
+      const { dom } = loadWebview();
+      sendDuckdbData(dom, payload(threeRows));
+      assert.strictEqual(status(dom)?.textContent, '');
+      sendDuckdbData(dom, payload(fiveRows, { reload: { at: '2026-11-19T10:00:00.000Z', previousRowCount: 3 } }));
+      assert.match(status(dom)?.textContent ?? '', /^Updated .+ · rows 3 → 5 \(\+2\)$/);
+      sendDuckdbData(dom, payload(threeRows, { reload: { at: '2026-11-19T10:01:00.000Z', previousRowCount: 5 } }));
+      assert.match(status(dom)?.textContent ?? '', /rows 5 → 3 \(−2\)$/);
+      sendDuckdbData(dom, payload(threeRows, { reload: { at: '2026-11-19T10:02:00.000Z', previousRowCount: 3 } }));
+      assert.match(status(dom)?.textContent ?? '', /3 rows, count unchanged$/);
+    });
+
+    it('reports refresh progress and failure from reload-status', () => {
+      const { dom } = loadWebview();
+      sendDuckdbData(dom, payload(threeRows));
+      sendStatus(dom, { state: 'refreshing' });
+      assert.strictEqual(status(dom)?.textContent, 'Refreshing…');
+      sendStatus(dom, { state: 'building' });
+      assert.match(status(dom)?.textContent ?? '', /^Build in progress/);
+      sendStatus(dom, { state: 'failed', message: 'file is locked\nsecond line' });
+      assert.strictEqual(status(dom)?.textContent, 'Refresh failed: file is locked');
+      assert.ok(status(dom)?.classList.contains('error'));
+      assert.strictEqual(status(dom)?.getAttribute('title'), 'file is locked\nsecond line');
+      // The table that was on screen is untouched by a failed refresh.
+      assert.strictEqual(dom.window.document.querySelectorAll('#csv-table tbody tr').length, 3);
+    });
+
+    it('keeps the filter text and asks the host to filter the new data', () => {
+      const { dom, postedMessages } = loadWebview();
+      sendDuckdbData(dom, payload(threeRows));
+      filterBoxes(dom)[1].value = 'Rome';
+      sendDuckdbData(dom, payload(fiveRows, { reload: { at: '2026-11-19T10:00:00.000Z', previousRowCount: 3 } }));
+      assert.strictEqual(filterBoxes(dom)[1].value, 'Rome');
+      const requests = filterRequests(postedMessages);
+      assert.deepStrictEqual(requests[requests.length - 1].filters, [{ column: 1, text: 'Rome' }]);
+    });
+
+    it('drops the filters when the columns changed', () => {
+      const { dom, postedMessages } = loadWebview();
+      sendDuckdbData(dom, payload(threeRows));
+      filterBoxes(dom)[1].value = 'Rome';
+      const before = filterRequests(postedMessages).length;
+      sendDuckdbData(
+        dom,
+        payload(
+          [['1', 'Rome', 'x']],
+          { reload: { at: '2026-11-19T10:00:00.000Z', previousRowCount: 3 } },
+          ['id', 'city', 'extra']
+        )
+      );
+      assert.ok(filterBoxes(dom).every((box) => box.value === ''));
+      assert.strictEqual(
+        filterRequests(postedMessages).slice(before).filter((r) => r.filters.length > 0).length,
+        0
+      );
+    });
+
+    it('keeps focus in the filter box the user was typing in', () => {
+      const { dom } = loadWebview();
+      sendDuckdbData(dom, payload(threeRows));
+      const box = filterBoxes(dom)[0];
+      box.focus();
+      box.value = '1';
+      sendDuckdbData(dom, payload(fiveRows, { reload: { at: '2026-11-19T10:00:00.000Z', previousRowCount: 3 } }));
+      assert.strictEqual(dom.window.document.activeElement, filterBoxes(dom)[0]);
+      assert.strictEqual(filterBoxes(dom)[0].value, '1');
+    });
+
+    it('ignores a reload that still shows the previous table while a pick is pending', () => {
+      const { dom } = loadWebview();
+      sendDuckdbData(dom, payload(threeRows));
+      const app = dom.window.document.getElementById('app')!;
+      openPickerPopup(app);
+      const option = Array.from(app.querySelectorAll<HTMLElement>('.table-picker-option')).find(
+        (o) => o.querySelector('.picker-name')?.textContent === 'b'
+      )!;
+      option.click();
+      sendDuckdbData(dom, payload(fiveRows, { reload: { at: '2026-11-19T10:00:00.000Z', previousRowCount: 3 } }));
+      assert.strictEqual(pickerCurrent(app), 'b', 'the pick must not be overwritten');
+      assert.strictEqual(app.querySelectorAll('#csv-table tbody tr').length, 3);
+    });
+
+    /** Picks `name` in the open picker, like a user would. */
+    function pickTable(dom: JSDOM, name: string): void {
+      const app = dom.window.document.getElementById('app')!;
+      openPickerPopup(app);
+      Array.from(app.querySelectorAll<HTMLElement>('.table-picker-option'))
+        .find((o) => o.querySelector('.picker-name')?.textContent === name)!
+        .click();
+    }
+    const reloadMeta = { reload: { at: '2026-11-19T10:00:00.000Z' } };
+    const rowCount = (dom: JSDOM) => dom.window.document.querySelectorAll('#csv-table tbody tr').length;
+
+    it('follows the host when the shown table disappeared in the reload', () => {
+      const { dom } = loadWebview();
+      sendDuckdbData(dom, payload(threeRows));
+      pickTable(dom, 'b');
+      sendDuckdbData(dom, payload(threeRows, { selectedTable: 'b' }));
+      // The rebuild dropped 'b': the host falls back to 'a'.
+      sendDuckdbData(dom, payload(fiveRows, { ...reloadMeta, tables: [{ name: 'a', type: 'table' }] }));
+      const app = dom.window.document.getElementById('app')!;
+      assert.strictEqual(pickerCurrent(app), 'a');
+      assert.strictEqual(rowCount(dom), 5);
+    });
+
+    it('drops a slow reload for the old table that lands after a completed pick', () => {
+      const { dom } = loadWebview();
+      sendDuckdbData(dom, payload(threeRows));
+      pickTable(dom, 'b');
+      sendDuckdbData(dom, payload(threeRows, { selectedTable: 'b' }));
+      // The reload started on 'a' and only now arrives, though 'b' still exists.
+      sendDuckdbData(dom, payload(fiveRows, { ...reloadMeta }));
+      const app = dom.window.document.getElementById('app')!;
+      assert.strictEqual(pickerCurrent(app), 'b', 'the user stays on the table they picked');
+      assert.strictEqual(rowCount(dom), 3);
+    });
+
+    it('shows the host fallback when the picked table is gone, and keeps accepting reloads after it', () => {
+      const { dom } = loadWebview();
+      sendDuckdbData(dom, payload(threeRows));
+      pickTable(dom, 'b');
+      // 'b' was dropped by a rebuild meanwhile: the host answers with 'a'.
+      sendDuckdbData(dom, payload(threeRows, { selectedTable: 'a', tables: [{ name: 'a', type: 'table' }] }));
+      const app = dom.window.document.getElementById('app')!;
+      assert.strictEqual(pickerCurrent(app), 'a');
+      sendDuckdbData(dom, payload(fiveRows, { ...reloadMeta, tables: [{ name: 'a', type: 'table' }] }));
+      assert.strictEqual(rowCount(dom), 5, 'later reloads are not stuck behind the dropped pick');
+    });
+
+    it('still drops an older select reply that a newer pick superseded', () => {
+      const { dom } = loadWebview();
+      sendDuckdbData(dom, payload(threeRows));
+      pickTable(dom, 'b');
+      sendDuckdbData(dom, payload(fiveRows, { selectedTable: 'a' }));
+      const app = dom.window.document.getElementById('app')!;
+      assert.strictEqual(rowCount(dom), 3, 'a reply for a table other than the pick is dropped');
+      assert.strictEqual(pickerCurrent(app), 'b');
+    });
+
+    it('keeps keyboard focus on the refresh button across the reload it triggers', () => {
+      const { dom } = loadWebview();
+      sendDuckdbData(dom, payload(threeRows));
+      dom.window.document.querySelector<HTMLButtonElement>('.toolbar-button')!.focus();
+      sendDuckdbData(dom, payload(fiveRows, { ...reloadMeta }));
+      assert.strictEqual(
+        dom.window.document.activeElement,
+        dom.window.document.querySelector('.toolbar-button')
+      );
+    });
+
+    it('does not rewrite an identical status, so the live region is not re-announced', () => {
+      const { dom } = loadWebview();
+      sendDuckdbData(dom, payload(threeRows));
+      sendStatus(dom, { state: 'building' });
+      const node = status(dom)!.firstChild;
+      assert.ok(node);
+      sendStatus(dom, { state: 'building' });
+      sendStatus(dom, { state: 'building' });
+      assert.strictEqual(status(dom)!.firstChild, node);
+    });
+
+    describe('scroll position after a reload with a filter', () => {
+      const wrapper = (dom: JSDOM) => dom.window.document.querySelector<HTMLElement>('.scroll-wrapper')!;
+      const lastFilterSeq = (posted: unknown[]) =>
+        (filterRequests(posted) as unknown as Array<{ seq: number }>).at(-1)!.seq;
+      const filterReply = (dom: JSDOM, seq: number, rest: Record<string, unknown>) =>
+        dom.window.dispatchEvent(
+          new dom.window.MessageEvent('message', { data: { type: 'filter-data', payload: { seq, table: 'a', ...rest } } })
+        );
+      /** A filtered view scrolled to (120, 30), then a reload that re-applies the filter. */
+      function reloadWithFilterScrolled() {
+        const loaded = loadWebview();
+        sendDuckdbData(loaded.dom, payload(threeRows));
+        filterBoxes(loaded.dom)[1].value = 'Rome';
+        wrapper(loaded.dom).scrollTop = 120;
+        wrapper(loaded.dom).scrollLeft = 30;
+        sendDuckdbData(loaded.dom, payload(fiveRows, { ...reloadMeta }));
+        return loaded;
+      }
+
+      it('is restored when the re-applied filter answers', () => {
+        const { dom, postedMessages } = reloadWithFilterScrolled();
+        filterReply(dom, lastFilterSeq(postedMessages), { rows: [['1', 'Rome']], matchCount: 1 });
+        assert.strictEqual(wrapper(dom).scrollTop, 120);
+        assert.strictEqual(wrapper(dom).scrollLeft, 30);
+      });
+
+      it('is restored even when the re-applied filter fails', () => {
+        const { dom, postedMessages } = reloadWithFilterScrolled();
+        filterReply(dom, lastFilterSeq(postedMessages), { failedReason: 'too big' });
+        assert.strictEqual(wrapper(dom).scrollTop, 120);
+      });
+
+      it('is restored even when the re-applied filter text is invalid', () => {
+        const { dom, postedMessages } = reloadWithFilterScrolled();
+        filterReply(dom, lastFilterSeq(postedMessages), { errors: [{ column: 1, message: 'bad' }] });
+        assert.strictEqual(wrapper(dom).scrollTop, 120);
+      });
+
+      it('is not applied to a later filter the user changes', () => {
+        const { dom, postedMessages } = reloadWithFilterScrolled();
+        // The user edits the filter before the reload's own request is answered.
+        filterBoxes(dom)[1].value = 'Paris';
+        filterBoxes(dom)[1].dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        filterReply(dom, lastFilterSeq(postedMessages), { rows: [['2', 'Paris']], matchCount: 1 });
+        assert.strictEqual(wrapper(dom).scrollTop, 0);
+      });
     });
   });
 

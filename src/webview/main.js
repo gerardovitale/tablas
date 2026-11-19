@@ -71,6 +71,7 @@
    *          originalRows: string[][], baseStatsText: string,
    *          filterInputs: HTMLInputElement[], clearButton: HTMLButtonElement,
    *          filterSeq: number, filterTimer: number | undefined,
+   *          pendingScroll?: { top: number, left: number },
    *          filter: 'none' | 'pending' | 'active' | 'invalid' | 'failed' } | undefined}
    */
   let currentView;
@@ -750,10 +751,14 @@
    * are put back locally -- no round trip -- and the host is only told so it
    * can release anything it cached for this table.
    * @param {NonNullable<typeof currentView>} view
+   * @param {boolean=} keepPendingScroll true only for the request a reload sends on the user's behalf
    */
-  function sendFilter(view) {
+  function sendFilter(view, keepPendingScroll) {
     cancelFilterTimer(view);
     if (currentView !== view) { return; }
+    // The scroll position a reload wants back only belongs to the request the
+    // reload itself sends; any filter the user changes after that starts at the top.
+    if (!keepPendingScroll) { view.pendingScroll = undefined; }
     for (const input of view.filterInputs) {
       input.removeAttribute('aria-invalid');
       input.title = FILTER_HELP;
@@ -786,6 +791,19 @@
   }
 
   /**
+   * Puts back the scroll position a reload captured, once, however its filter
+   * request ended (applied, invalid or failed).
+   * @param {NonNullable<typeof currentView>} view
+   */
+  function restorePendingScroll(view) {
+    const scroll = view.pendingScroll;
+    view.pendingScroll = undefined;
+    if (!scroll) { return; }
+    view.wrapper.scrollTop = scroll.top;
+    view.wrapper.scrollLeft = scroll.left;
+  }
+
+  /**
    * Applies a `filter-data` reply to the view it was requested for. Replies
    * that were overtaken by a newer request (or belong to another table) are
    * dropped, so a slow answer can never overwrite a newer one.
@@ -799,6 +817,7 @@
     if (Array.isArray(payload.errors) && payload.errors.length > 0) {
       // Keep whatever rows are showing; just point at the boxes that didn't parse.
       view.filter = 'invalid';
+      restorePendingScroll(view);
       for (const error of payload.errors) {
         const input = view.filterInputs[error.column];
         if (input) {
@@ -811,13 +830,16 @@
     if (typeof payload.failedReason === 'string' || !Array.isArray(payload.rows) || typeof payload.matchCount !== 'number') {
       view.filter = 'failed';
       restoreOriginalRows(view);
+      restorePendingScroll(view);
       const reason = typeof payload.failedReason === 'string' ? payload.failedReason : 'unexpected reply';
       view.statsBar.textContent = `${view.baseStatsText} — filter unavailable: ${reason}`;
       return;
     }
     view.filter = 'active';
     renderRows(view.tbody, payload.rows);
+    // After a reload the user's scroll position comes back with the filtered rows.
     view.wrapper.scrollTop = 0;
+    restorePendingScroll(view);
     const total = view.totalRowCount != null ? view.totalRowCount : view.rowCount;
     let text = `${payload.matchCount.toLocaleString()} of ${total.toLocaleString()} row${total !== 1 ? 's' : ''} match`;
     if (payload.matchCount > payload.rows.length) {
@@ -1067,6 +1089,12 @@
   // flashing outdated data. undefined until the user changes the dropdown
   // for the first time -- the initial load's response is always accepted.
   let requestedTable;
+  /**
+   * The toolbar's "Updated 14:32 · rows ..." / "Refreshing…" line, when the
+   * source can refresh. Replaced on every multi-table render.
+   * @type {HTMLElement | undefined}
+   */
+  let reloadStatusEl;
 
   // ── Table picker ──────────────────────────────────────────────────────
 
@@ -1361,20 +1389,28 @@
    * @param {import('../../src/tableData').MultiTableParseOutcome} outcome
    */
   function renderMultiTableOutcome(outcome) {
-    if (
-      outcome.success &&
-      requestedTable !== undefined &&
-      outcome.data.selectedTable !== requestedTable
-    ) {
-      // A response to an older select-table request, superseded by a newer
-      // one already in flight -- drop it rather than momentarily showing a
-      // table the user already moved away from.
-      return;
+    const isReload = outcome.success && outcome.data.reload !== undefined;
+    if (outcome.success) {
+      const selected = outcome.data.selectedTable;
+      if (requestedTable !== undefined && selected !== requestedTable) {
+        // A response to an older select-table request, superseded by a newer
+        // one already in flight -- drop it rather than momentarily showing a
+        // table the user already moved away from. The same goes for a reload
+        // that was still reading the table the user has since left. The one
+        // exception is a table that is gone from the file (dropped by a
+        // rebuild): the host fell back to another table, and that is what the
+        // user is looking at from now on.
+        if (outcome.data.tables.some((t) => t.name === requestedTable)) { return; }
+        requestedTable = selected;
+      }
     }
+    // A reload re-renders everything; remember what the user was doing.
+    const carried = isReload ? captureReloadState() : undefined;
     // A keyboard user who just picked a table has focus on the picker's
     // trigger; the re-render below replaces it, so hand focus to the new one.
     const active = document.activeElement;
     const pickerHadFocus = !!active && active.closest('.table-selector') !== null;
+    const refreshHadFocus = !!active && active.classList.contains('toolbar-button');
     clearApp();
     if (!outcome.success) {
       const msgs = outcome.errors.map((e) => e.message).join('\n');
@@ -1390,12 +1426,131 @@
     const app = document.getElementById('app');
     if (!app) { return; }
     const selector = renderTableSelector(outcome.data.tables, outcome.data.selectedTable);
-    app.appendChild(selector);
+    const toolbar = el('div', { class: 'table-toolbar' });
+    toolbar.appendChild(selector);
+    reloadStatusEl = undefined;
+    /** @type {HTMLElement | undefined} */
+    let refreshButton;
+    if (outcome.data.capabilities && outcome.data.capabilities.refresh) {
+      const refresh = el('button', {
+        type: 'button',
+        class: 'toolbar-button',
+        'aria-label': 'Refresh from disk',
+        title: 'Re-read the file from disk (also happens automatically when it changes)',
+      });
+      refresh.textContent = '↻';
+      refresh.addEventListener('click', () => { vscode.postMessage({ type: 'refresh' }); });
+      toolbar.appendChild(refresh);
+      refreshButton = refresh;
+      reloadStatusEl = el('span', { class: 'reload-status', role: 'status' });
+      if (outcome.data.reload) {
+        setReloadStatus(reloadSummary(outcome.data), false);
+      }
+      toolbar.appendChild(reloadStatusEl);
+    }
+    app.appendChild(toolbar);
+    // The reload a click on the refresh button causes replaces that button; focus
+    // can only move once the new one is in the document.
+    if (refreshHadFocus && refreshButton) { refreshButton.focus(); }
     if (pickerHadFocus) {
       const newTrigger = selector.querySelector('button');
       if (newTrigger) { newTrigger.focus(); }
     }
     renderTable(outcome.data.data, outcome.data.selectedTable, outcome.data.tableError);
+    if (carried) { restoreReloadState(carried); }
+  }
+
+  /** @param {string} text @param {boolean} isError @param {string=} title */
+  function setReloadStatus(text, isError, title) {
+    if (!reloadStatusEl) { return; }
+    // Identical text is not rewritten: the element is a live region, and a
+    // rewrite makes screen readers announce it again (the host repeats
+    // "Build in progress" on every poll while it waits).
+    if (reloadStatusEl.textContent === text && reloadStatusEl.classList.contains('error') === isError) { return; }
+    reloadStatusEl.textContent = text;
+    reloadStatusEl.classList.toggle('error', isError);
+    reloadStatusEl.title = title !== undefined ? title : '';
+  }
+
+  /**
+   * "Updated 14:32:05 · rows 1,204 → 1,310 (+106)". Only the row count is
+   * compared: it says the table moved, not that unchanged-count data is the same.
+   * @param {import('../../src/tableData').MultiTableData} data
+   */
+  function reloadSummary(data) {
+    const reload = /** @type {import('../../src/tableData').ReloadInfo} */ (data.reload);
+    let text = 'Updated ' + new Date(reload.at).toLocaleTimeString();
+    if (reload.previousRowCount !== undefined && data.tableError === undefined) {
+      const now = data.data.totalRowCount != null ? data.data.totalRowCount : data.data.rowCount;
+      const delta = now - reload.previousRowCount;
+      text += delta === 0
+        ? ` · ${now.toLocaleString()} rows, count unchanged`
+        : ` · rows ${reload.previousRowCount.toLocaleString()} → ${now.toLocaleString()} (${delta > 0 ? '+' : '−'}${Math.abs(delta).toLocaleString()})`;
+    }
+    return text;
+  }
+
+  /** `reload-status` from the host: a refresh started, is waiting for a build, or failed. */
+  function handleReloadStatus(message) {
+    if (message.state === 'refreshing') {
+      setReloadStatus('Refreshing…', false);
+    } else if (message.state === 'building') {
+      setReloadStatus('Build in progress — refreshing when it finishes…', false);
+    } else if (message.state === 'failed') {
+      const reason = typeof message.message === 'string' ? message.message : 'unknown error';
+      setReloadStatus('Refresh failed: ' + reason.split('\n')[0], true, reason);
+    }
+  }
+
+  /**
+   * What a reload must not lose: filter text, scroll position, and the focused
+   * filter box (an auto-refresh can land while the user is typing).
+   */
+  function captureReloadState() {
+    const view = currentView;
+    if (!view) { return undefined; }
+    const active = document.activeElement;
+    const focused = view.filterInputs.findIndex((input) => input === active);
+    const focusedInput = focused >= 0 ? view.filterInputs[focused] : undefined;
+    return {
+      tableName: view.tableName,
+      headers: view.headers,
+      filters: view.filterInputs.map((input) => input.value),
+      top: view.wrapper.scrollTop,
+      left: view.wrapper.scrollLeft,
+      focused,
+      selection: focusedInput ? [focusedInput.selectionStart, focusedInput.selectionEnd] : undefined,
+    };
+  }
+
+  /**
+   * Puts that state back onto the freshly rendered view -- only if it is the
+   * same table with the same columns; otherwise the old boxes would mean
+   * something else (or nothing) and are dropped.
+   * @param {NonNullable<ReturnType<typeof captureReloadState>>} state
+   */
+  function restoreReloadState(state) {
+    const view = currentView;
+    if (
+      !view || view.tableName !== state.tableName || view.headers.length !== state.headers.length ||
+      view.headers.some((header, i) => header !== state.headers[i])
+    ) { return; }
+    const hasFilter = state.filters.some((text) => text.trim() !== '');
+    if (hasFilter) {
+      state.filters.forEach((text, i) => { view.filterInputs[i].value = text; });
+      view.pendingScroll = { top: state.top, left: state.left };
+      sendFilter(view, true);
+    } else {
+      view.wrapper.scrollTop = state.top;
+      view.wrapper.scrollLeft = state.left;
+    }
+    const input = state.focused >= 0 ? view.filterInputs[state.focused] : undefined;
+    if (input) {
+      input.focus();
+      if (state.selection && state.selection[0] !== null && state.selection[1] !== null) {
+        input.setSelectionRange(state.selection[0], state.selection[1]);
+      }
+    }
   }
 
   window.addEventListener('message', (event) => {
@@ -1413,6 +1568,8 @@
       handleStatsData(message.payload);
     } else if (message.type === 'filter-data') {
       handleFilterData(message.payload);
+    } else if (message.type === 'reload-status') {
+      handleReloadStatus(message);
     }
   });
 

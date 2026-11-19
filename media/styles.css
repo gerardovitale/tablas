@@ -49,6 +49,54 @@ body.vscode-high-contrast-light {
   background-color: var(--vscode-editorGroupHeader-tabsBackground, var(--vscode-editor-background));
 }
 
+/* Row above the stats header: the picker, then (for refreshable sources) the
+   refresh button and its status line. Background comes from .table-selector. */
+.table-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  min-width: 0;
+  background-color: var(--vscode-editorGroupHeader-tabsBackground, var(--vscode-editor-background));
+}
+
+.toolbar-button {
+  flex-shrink: 0;
+  margin-top: 4px;
+  padding: 2px 7px;
+  font: inherit;
+  line-height: 1.2;
+  color: var(--vscode-foreground);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.toolbar-button:hover {
+  background-color: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+
+.toolbar-button:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.reload-status {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.reload-status.error {
+  color: var(--vscode-errorForeground);
+}
+
 .table-picker-trigger {
   display: inline-flex;
   align-items: center;

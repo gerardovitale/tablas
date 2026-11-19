@@ -102,6 +102,30 @@ export interface MultiTableData {
    * another table instead of losing the whole file to one bad table.
    */
   tableError?: string;
+  /**
+   * Set when this payload is a re-read of the same file (the source changed on
+   * disk, or the user asked to refresh), not a first load or a table switch.
+   * The webview then keeps the user's filters and scroll position, and shows
+   * when the data was refreshed and how the row count moved.
+   */
+  reload?: ReloadInfo;
+  /**
+   * What the host can do for this source. The webview gates toolbar controls on
+   * these flags, never on the file format, so it stays format-agnostic.
+   */
+  capabilities?: SourceCapabilities;
+}
+
+export interface ReloadInfo {
+  /** ISO timestamp of the re-read. */
+  at: string;
+  /** Row count of the same table before the reload; omitted if the table changed or was unreadable. */
+  previousRowCount?: number;
+}
+
+export interface SourceCapabilities {
+  /** The host answers `{type:'refresh'}` by re-reading the file. */
+  refresh?: boolean;
 }
 
 export type MultiTableParseOutcome =

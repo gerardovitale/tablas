@@ -85,6 +85,24 @@ Acceptance:
 - Truncate the cell to the operand's precision (month, day, minute, second), treating `T` and a space as the same separator, in `compileCellPredicate` and in `filterPredicateSql`.
 - Add cases to `FILTER_CASES` (including `=`/`!=` on columns 6-7) and to the DuckDB differential test.
 
+## Live refresh (DuckDB)
+
+### R-1 · Refresh copies the main file only, not the `.wal` · P2 · M
+
+`handleReload` reads `foo.duckdb` into a temp copy. While a long-lived writer holds uncheckpointed data in `foo.duckdb.wal`, the 30 s wait cap reloads without it, so the view can lag a running build. Acceptance: find out whether DuckDB opens a read-only copy that has a `.wal` next to it (and replays it); if so copy both. Test with a writer that keeps its connection open.
+
+### R-2 · Every refresh re-reads the whole file, even when it did not change · P3 · S
+
+A `.wal`-only event, the 30 s cap, or the manual button re-reads and re-copies the full database (multi-GB warehouses cost a multi-GB read, a synchronous temp write and two temp copies at once), and the re-render closes an open stats card or picker. Acceptance: skip the swap and the re-render when size and mtime of the main file match the last load; consider a size guard for auto-refresh.
+
+### R-3 · A refresh that lands on a half-written file is not retried · P3 · S
+
+A torn read fails once with "Refresh failed" and waits for the next file event. Acceptance: retry once or twice after a short delay before reporting the failure.
+
+### R-4 · `loadInitial` overwrites `document.handle` without closing the old one · P3 · S · pre-existing
+
+If VS Code re-resolves the same document with a new panel (not verified that it does, e.g. when a tab moves to another window), the earlier handle and its temp copy leak. Acceptance: close any existing handle before assigning in `loadInitial`.
+
 ## Multi-table sources
 
 ### T-1 · DuckDB only lists tables in the `main` schema · P2 · M

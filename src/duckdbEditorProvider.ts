@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import * as fs from 'fs';
 import {
   duckdbTableFilter,
   duckdbTableStats,
@@ -8,6 +9,7 @@ import {
   listDuckdbTables,
   openDuckdbDatabase,
   readSelectedTable,
+  runExclusive,
   type DuckdbHandle,
 } from './duckdbParser';
 import { reportStatsFailure } from './columnStats';
@@ -20,9 +22,15 @@ import {
 } from './filter';
 import { filterDataMessage, isFilterMessage, type FilterMessage, type FilterPayload } from './filterMessage';
 import { isGetStatsMessage, statsDataMessage, type StatsPayload } from './statsMessage';
-import type { MultiTableParseOutcome } from './tableData';
+import type { MultiTableData, MultiTableParseOutcome } from './tableData';
+import { ReloadScheduler } from './reloadScheduler';
 import { buildWebviewHtml } from './webviewHtml';
-import { getMaxRowsSetting } from './config';
+import { getAutoRefreshSetting, getMaxRowsSetting } from './config';
+
+/** Quiet period after the last file event before a changed file is re-read. */
+const RELOAD_DEBOUNCE_MS = 750;
+/** How long a burst of events may wait for the writer's `.wal` to go away. */
+const RELOAD_MAX_WAIT_MS = 30_000;
 
 class DuckdbDocument implements vscode.CustomDocument {
   constructor(public readonly uri: vscode.Uri) {}
@@ -37,7 +45,22 @@ class DuckdbDocument implements vscode.CustomDocument {
   handle?: DuckdbHandle;
   /** `seq` of the newest `filter` request received; an older one still queued is dropped. */
   filterSeq = 0;
+  /**
+   * True once the first load has been attempted (it may have failed or found an
+   * empty file, leaving `handle` undefined). A reload may then do the load that
+   * did not work, e.g. a warehouse opened while `dbt` was still creating it.
+   */
+  initialLoadDone = false;
+  /** The table last posted to the webview; a reload keeps showing it. */
+  selectedTable?: string;
+  /** Its (total) row count, to report how a reload moved it. */
+  shownRowCount?: number;
+  private disposed = false;
+  get isDisposed(): boolean {
+    return this.disposed;
+  }
   dispose(): void {
+    this.disposed = true;
     this.handle?.close();
   }
 }
@@ -72,7 +95,19 @@ export class DuckdbEditorProvider
         webviewOptions: { retainContextWhenHidden: true },
       }
     );
-    return { disposable, provider };
+    const refreshCommand = vscode.commands.registerCommand('tablas.refresh', () => provider.refreshActive());
+    return { disposable: vscode.Disposable.from(disposable, refreshCommand), provider };
+  }
+
+  /** Re-read triggers of the open panels, keyed by document URI (see `refreshActive`). */
+  private readonly refreshers = new Map<string, () => Promise<void>>();
+
+  /** `tablas.refresh`: re-reads the DuckDB file shown in the active editor tab. */
+  public async refreshActive(): Promise<void> {
+    const input = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
+    if (input instanceof vscode.TabInputCustom && input.viewType === DuckdbEditorProvider.viewType) {
+      await this.refreshers.get(input.uri.toString())?.();
+    }
   }
 
   private readonly _onDidPostDuckdbData = new vscode.EventEmitter<MultiTableParseOutcome>();
@@ -115,6 +150,106 @@ export class DuckdbEditorProvider
     // handles every subsequent 'select-table' request against the same
     // already-open database.
     let hasLoadedInitial = false;
+
+    // ── Live refresh ──
+    let panelDisposed = false;
+    const post = (message: unknown): void => {
+      if (panelDisposed) {
+        return;
+      }
+      try {
+        void webview.postMessage(message).then(undefined, () => undefined);
+      } catch {
+        // webview went away between the check and the call
+      }
+    };
+    let reloading = false;
+    let reloadQueued = false;
+    let initialLoading: Promise<MultiTableParseOutcome> | undefined;
+    // Re-reads the file now and posts the result. One at a time: a request that
+    // lands mid-reload is remembered and runs once more afterwards.
+    const runReload = async (): Promise<void> => {
+      if (panelDisposed) {
+        return;
+      }
+      // A change that lands during the first load is not lost: it re-reads once
+      // that load has been posted.
+      if (initialLoading) {
+        await initialLoading.then(undefined, () => undefined);
+      }
+      if (panelDisposed || (!document.handle && !document.initialLoadDone)) {
+        return;
+      }
+      if (reloading) {
+        reloadQueued = true;
+        return;
+      }
+      reloading = true;
+      try {
+        do {
+          reloadQueued = false;
+          post({ type: 'reload-status', state: 'refreshing' });
+          const outcome = await this.handleReload(document);
+          if (panelDisposed || outcome === undefined) {
+            break;
+          }
+          if (outcome.success) {
+            post({ type: 'duckdb-data', payload: outcome });
+            this._onDidPostDuckdbData.fire(outcome);
+          } else {
+            // Keep what is on screen; just say why it is not up to date.
+            const reason = outcome.errors.map((e) => e.message).join('\n');
+            post({ type: 'reload-status', state: 'failed', message: reason });
+          }
+        } while (reloadQueued && !panelDisposed);
+      } finally {
+        reloading = false;
+      }
+    };
+    const key = document.uri.toString();
+    this.refreshers.set(key, runReload);
+
+    let scheduler: ReloadScheduler | undefined;
+    let watcher: vscode.FileSystemWatcher | undefined;
+    if (document.uri.scheme === 'file') {
+      const filePath = document.uri.fsPath;
+      const walPath = filePath + '.wal';
+      scheduler = new ReloadScheduler({
+        debounceMs: RELOAD_DEBOUNCE_MS,
+        maxWaitMs: RELOAD_MAX_WAIT_MS,
+        isWriteInProgress: () =>
+          fs.promises.stat(walPath).then(
+            () => true,
+            () => false
+          ),
+        onWaiting: () => post({ type: 'reload-status', state: 'building' }),
+        reload: runReload,
+      });
+      // Non-recursive: the file and its `.wal` live in one folder, which may sit
+      // outside the workspace. Watches every file there and filters by exact path
+      // below: a pattern built from the file name would misfire for names holding
+      // glob characters (`sales[2024].duckdb`, `{prod}.duckdb`).
+      watcher = vscode.workspace.createFileSystemWatcher(
+        new vscode.RelativePattern(vscode.Uri.file(path.dirname(filePath)), '*')
+      );
+      const onFileEvent = (uri: vscode.Uri): void => {
+        if ((uri.fsPath === filePath || uri.fsPath === walPath) && getAutoRefreshSetting()) {
+          scheduler?.notify();
+        }
+      };
+      watcher.onDidChange(onFileEvent);
+      watcher.onDidCreate(onFileEvent);
+      watcher.onDidDelete(onFileEvent);
+    }
+    webviewPanel.onDidDispose(() => {
+      panelDisposed = true;
+      scheduler?.dispose();
+      watcher?.dispose();
+      if (this.refreshers.get(key) === runReload) {
+        this.refreshers.delete(key);
+      }
+    });
+
     webview.onDidReceiveMessage(async (message) => {
       if (message?.type === 'ready') {
         // A real webview only posts 'ready' once per panel lifetime, but
@@ -126,7 +261,8 @@ export class DuckdbEditorProvider
           return;
         }
         hasLoadedInitial = true;
-        const outcome = await this.loadInitial(document);
+        initialLoading = this.loadInitial(document);
+        const outcome = await initialLoading;
         await webview.postMessage({ type: 'duckdb-data', payload: outcome });
         this._onDidPostDuckdbData.fire(outcome);
       } else if (message?.type === 'select-table' && typeof message.table === 'string') {
@@ -137,6 +273,8 @@ export class DuckdbEditorProvider
           await webview.postMessage({ type: 'duckdb-data', payload: outcome });
           this._onDidPostDuckdbData.fire(outcome);
         }
+      } else if (message?.type === 'refresh') {
+        await runReload();
       } else if (isGetStatsMessage(message)) {
         const payload = await this.handleGetStats(document, message.table);
         if (payload) {
@@ -156,11 +294,9 @@ export class DuckdbEditorProvider
     try {
       const bytes = await vscode.workspace.fs.readFile(document.uri);
       if (bytes.byteLength === 0) {
-        return {
-          success: true,
-          data: { tables: [], selectedTable: '', data: emptyParsedTable() },
-          errors: [],
-        };
+        // Still advertises refresh: the file may be about to be written.
+        const empty: MultiTableData = { tables: [], selectedTable: '', data: emptyParsedTable() };
+        return { success: true, data: this.publish(document, empty), errors: [] };
       }
 
       // Relative paths inside views resolve next to the source file, which only
@@ -170,18 +306,122 @@ export class DuckdbEditorProvider
       if ('error' in opened) {
         return { success: false, errors: [opened.error] };
       }
-      document.handle = opened;
 
-      const tables = await listDuckdbTables(opened);
-      const data = await readSelectedTable(opened, tables, undefined, getMaxRowsSetting());
-      return { success: true, data, errors: [] };
+      let data: MultiTableData;
+      try {
+        const tables = await listDuckdbTables(opened);
+        data = await readSelectedTable(opened, tables, undefined, getMaxRowsSetting());
+      } catch (err) {
+        opened.close();
+        throw err;
+      }
+      // Only now: a reload must not swap in while this first read is running.
+      document.handle = opened;
+      return { success: true, data: this.publish(document, data), errors: [] };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return {
         success: false,
         errors: [{ type: 'IOError', code: 'ReadFailed', message }],
       };
+    } finally {
+      document.initialLoadDone = true;
     }
+  }
+
+  /**
+   * Final touches on a payload before it goes to the webview: remembers what is
+   * on screen (so a reload can keep the table and report the row delta) and
+   * advertises what the host can do. `reloadAt` marks the payload as a re-read.
+   */
+  private publish(document: DuckdbDocument, data: MultiTableData, reloadAt?: string): MultiTableData {
+    const previousRowCount =
+      reloadAt !== undefined && document.selectedTable === data.selectedTable ? document.shownRowCount : undefined;
+    document.selectedTable = data.selectedTable === '' ? undefined : data.selectedTable;
+    document.shownRowCount =
+      data.tableError === undefined && data.selectedTable !== ''
+        ? (data.data.totalRowCount ?? data.data.rowCount)
+        : undefined;
+    return {
+      ...data,
+      capabilities: { refresh: true },
+      ...(reloadAt !== undefined && {
+        reload: { at: reloadAt, ...(previousRowCount !== undefined && { previousRowCount }) },
+      }),
+    };
+  }
+
+  /**
+   * Re-reads the file into a fresh database handle and, if that works, swaps it
+   * in and returns the same table's new contents (`reload` set). On any failure
+   * -- the file is unreadable, empty or corrupt, or the shown table cannot be
+   * read from it (e.g. a view whose source files are missing mid-build) -- the
+   * old handle and what the webview shows stay untouched and a `success: false`
+   * outcome says why. If the first load had failed (no handle yet), a successful
+   * reload is that first load. `undefined` = nothing to do (the first load has
+   * not been attempted yet, or the document was disposed meanwhile). Public so an
+   * integration test can call it without a real webview.
+   *
+   * A table pick can land while this runs: the table is read from
+   * `document.selectedTable` and re-read if it changed meanwhile, so a reload
+   * never records (or shows) a table the user already left.
+   *
+   * The old handle is closed only after queries already queued on it finished,
+   * and the reload never holds a lock on the source file (it works on a copy), so
+   * a running `dbt build` is never blocked.
+   */
+  public async handleReload(document: DuckdbDocument): Promise<MultiTableParseOutcome | undefined> {
+    if (!document.handle && !document.initialLoadDone) {
+      return undefined;
+    }
+    const old = document.handle;
+    const failed = (code: string, message: string): MultiTableParseOutcome => ({
+      success: false,
+      errors: [{ type: 'DuckdbError', code, message }],
+    });
+    let opened: DuckdbHandle;
+    let data: MultiTableData;
+    try {
+      const bytes = await vscode.workspace.fs.readFile(document.uri);
+      if (bytes.byteLength === 0) {
+        return failed('ReloadFailed', 'The file is empty right now (it may still be being written).');
+      }
+      const searchDir = document.uri.scheme === 'file' ? path.dirname(document.uri.fsPath) : undefined;
+      const result = await openDuckdbDatabase(bytes, { searchDir });
+      if ('error' in result) {
+        return { success: false, errors: [result.error] };
+      }
+      opened = result;
+      try {
+        const tables = await listDuckdbTables(opened);
+        let target: string | undefined;
+        let attempts = 0;
+        do {
+          target = document.selectedTable;
+          data = await readSelectedTable(opened, tables, target, getMaxRowsSetting());
+        } while (document.selectedTable !== target && ++attempts < 3);
+      } catch (err) {
+        opened.close();
+        throw err;
+      }
+    } catch (err) {
+      return failed('ReloadFailed', err instanceof Error ? err.message : String(err));
+    }
+
+    if (document.isDisposed) {
+      opened.close();
+      return undefined;
+    }
+    if (data.tableError !== undefined) {
+      opened.close();
+      return failed('ReloadFailed', `Could not read "${data.selectedTable}": ${data.tableError}`);
+    }
+    document.handle = opened;
+    // Let queries already queued on the old handle finish before closing it.
+    if (old) {
+      void runExclusive(old, async () => undefined).then(() => old.close());
+    }
+    return { success: true, data: this.publish(document, data, new Date().toISOString()), errors: [] };
   }
 
   /**
@@ -207,7 +447,7 @@ export class DuckdbEditorProvider
     try {
       const tables = await listDuckdbTables(document.handle);
       const data = await readSelectedTable(document.handle, tables, table, getMaxRowsSetting());
-      return { success: true, data, errors: [] };
+      return { success: true, data: this.publish(document, data), errors: [] };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return {

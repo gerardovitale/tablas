@@ -94,9 +94,36 @@
         "priority": "default"
       }
     ],
+    "commands": [
+      {
+        "command": "tablas.refresh",
+        "title": "Tablas: Refresh",
+        "icon": "$(refresh)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "tablas.refresh",
+          "when": "activeCustomEditorId == 'tablas.duckdbViewer'",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "tablas.refresh",
+          "when": "activeCustomEditorId == 'tablas.duckdbViewer'"
+        }
+      ]
+    },
     "configuration": {
       "title": "Tablas",
       "properties": {
+        "tablas.autoRefresh": {
+          "type": "boolean",
+          "default": true,
+          "description": "Re-read a DuckDB file automatically when it changes on disk (for example after `dbt build`), keeping the selected table, filters and scroll position."
+        },
         "tablas.maxRows": {
           "type": "number",
           "default": 5000,

@@ -1,9 +1,12 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as fs from 'fs';
+import * as os from 'os';
 import type { TablasApi } from '../../src/extension';
 import type { MultiTableParseOutcome } from '../../src/tableData';
 import { DuckdbEditorProvider } from '../../src/duckdbEditorProvider';
+import { DuckDBInstance } from '@duckdb/node-api';
 import { openDuckdbDatabase } from '../../src/duckdbParser';
 import { idsOf } from '../unit/filterCases';
 import { FILTER_UNKNOWN_TABLE_REASON } from '../../src/filter';
@@ -322,6 +325,208 @@ describe('DuckdbEditorProvider Integration', () => {
       const provider = new DuckdbEditorProvider({ extensionPath: process.cwd() } as vscode.ExtensionContext);
       const document = provider.openCustomDocument(fixtureUri('filter.duckdb'));
       assert.strictEqual(await provider.handleFilter(document, request(1, 'items', { column: 0, text: '1' })), undefined);
+    });
+  });
+  /**
+   * Live refresh: `handleReload` is what the file watcher, the toolbar button and
+   * `tablas.refresh` all end up calling. Tested directly for the same reason as
+   * `handleSelectTable`: a webview can't be driven from test code.
+   */
+  describe('handleReload (re-read the file from disk, no webview involved)', () => {
+    let workDir: string;
+    let target: string;
+
+    beforeEach(() => {
+      workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tablas-reload-'));
+      target = path.join(workDir, 'warehouse.duckdb');
+    });
+
+    afterEach(() => {
+      fs.rmSync(workDir, { recursive: true, force: true });
+    });
+
+    const copyFixture = (name: string) => fs.copyFileSync(path.join(fixturesDir, name), target);
+
+    async function openTarget() {
+      const provider = new DuckdbEditorProvider({ extensionPath: process.cwd() } as vscode.ExtensionContext);
+      const document = provider.openCustomDocument(vscode.Uri.file(target));
+      const opened = await openDuckdbDatabase(await vscode.workspace.fs.readFile(document.uri));
+      assert.ok(!('error' in opened), 'the copied fixture should open cleanly');
+      if (!('error' in opened)) {
+        document.handle = opened;
+      }
+      return { provider, document };
+    }
+
+    async function waitUntil(condition: () => boolean, what: string): Promise<void> {
+      for (let i = 0; i < 100 && !condition(); i++) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      assert.ok(condition(), what);
+    }
+
+    it('keeps the selected table, swaps the handle and closes the old one', async () => {
+      copyFixture('multi-table.duckdb');
+      const { provider, document } = await openTarget();
+      try {
+        await provider.handleSelectTable(document, 'orders');
+        const old = document.handle!;
+        const outcome = await provider.handleReload(document);
+        assert.strictEqual(outcome?.success, true);
+        if (outcome?.success) {
+          assert.strictEqual(outcome.data.selectedTable, 'orders');
+          assert.strictEqual(outcome.data.data.rowCount, 3);
+          assert.strictEqual(outcome.data.reload?.previousRowCount, 3);
+          assert.ok(!Number.isNaN(Date.parse(outcome.data.reload?.at ?? '')), 'reload.at is an ISO timestamp');
+          assert.deepStrictEqual(outcome.data.capabilities, { refresh: true });
+        }
+        assert.notStrictEqual(document.handle, old, 'a fresh handle replaces the old one');
+        await waitUntil(() => !fs.existsSync(old.tempFilePath), 'the old handle should be closed');
+        assert.ok(fs.existsSync(document.handle!.tempFilePath), 'the new handle stays open');
+      } finally {
+        document.dispose();
+      }
+    });
+
+    it('shows the new contents when the file changed, and falls back if the table vanished', async () => {
+      copyFixture('multi-table.duckdb');
+      const { provider, document } = await openTarget();
+      try {
+        await provider.handleSelectTable(document, 'orders');
+        copyFixture('simple.duckdb'); // a different warehouse: only `people`
+        const outcome = await provider.handleReload(document);
+        assert.strictEqual(outcome?.success, true);
+        if (outcome?.success) {
+          assert.deepStrictEqual(outcome.data.tables, [{ name: 'people', type: 'table' }]);
+          assert.strictEqual(outcome.data.selectedTable, 'people');
+          assert.strictEqual(outcome.data.reload?.previousRowCount, undefined, 'a different table has no previous count');
+        }
+      } finally {
+        document.dispose();
+      }
+    });
+
+    it('keeps the old handle and view when the file is unreadable right now', async () => {
+      copyFixture('multi-table.duckdb');
+      const { provider, document } = await openTarget();
+      try {
+        const old = document.handle!;
+        fs.copyFileSync(path.join(fixturesDir, 'corrupt.duckdb'), target);
+        const corrupt = await provider.handleReload(document);
+        assert.strictEqual(corrupt?.success, false);
+        fs.writeFileSync(target, new Uint8Array(0));
+        const empty = await provider.handleReload(document);
+        assert.strictEqual(empty?.success, false);
+        assert.match(empty?.success === false ? empty.errors[0].message : '', /empty/);
+        assert.strictEqual(document.handle, old, 'the working handle must survive a failed reload');
+        assert.ok(fs.existsSync(old.tempFilePath));
+        // ...and it still answers queries.
+        const stillWorks = await provider.handleSelectTable(document, 'orders');
+        assert.strictEqual(stillWorks?.success, true);
+      } finally {
+        document.dispose();
+      }
+    });
+
+    it('is a no-op when the database is not open yet', async () => {
+      copyFixture('multi-table.duckdb');
+      const provider = new DuckdbEditorProvider({ extensionPath: process.cwd() } as vscode.ExtensionContext);
+      const document = provider.openCustomDocument(vscode.Uri.file(target));
+      assert.strictEqual(await provider.handleReload(document), undefined);
+    });
+
+    it('does the first load when it had failed, e.g. a warehouse opened while dbt was still creating it', async () => {
+      fs.writeFileSync(target, new Uint8Array(0));
+      const provider = new DuckdbEditorProvider({ extensionPath: process.cwd() } as vscode.ExtensionContext);
+      const document = provider.openCustomDocument(vscode.Uri.file(target));
+      document.initialLoadDone = true; // the first load ran and found nothing usable
+      try {
+        const stillEmpty = await provider.handleReload(document);
+        assert.strictEqual(stillEmpty?.success, false);
+        assert.strictEqual(document.handle, undefined);
+
+        copyFixture('multi-table.duckdb'); // dbt finished
+        const outcome = await provider.handleReload(document);
+        assert.strictEqual(outcome?.success, true);
+        assert.ok(document.handle, 'the reload becomes the first load');
+        if (outcome?.success) {
+          assert.strictEqual(outcome.data.tables.length, 3);
+          assert.strictEqual(outcome.data.reload?.previousRowCount, undefined);
+          assert.deepStrictEqual(outcome.data.capabilities, { refresh: true });
+        }
+      } finally {
+        document.dispose();
+      }
+    });
+
+    it('keeps the old handle and view when the shown table cannot be read from the new file', async () => {
+      // A view over a parquet file that disappears, as a rebuild can leave it for a moment.
+      const parquetDir = path.join(workDir, 'sub');
+      fs.mkdirSync(parquetDir);
+      const instance = await DuckDBInstance.create(target);
+      const connection = await instance.connect();
+      try {
+        await connection.run(`COPY (SELECT 1 AS id) TO '${path.join(parquetDir, 'x.parquet')}' (FORMAT parquet)`);
+        await connection.run(`SET file_search_path = '${workDir}'`);
+        await connection.run("CREATE VIEW v AS SELECT * FROM read_parquet('sub/*.parquet')");
+      } finally {
+        connection.closeSync();
+        instance.closeSync();
+      }
+      const provider = new DuckdbEditorProvider({ extensionPath: process.cwd() } as vscode.ExtensionContext);
+      const document = provider.openCustomDocument(vscode.Uri.file(target));
+      const opened = await openDuckdbDatabase(await vscode.workspace.fs.readFile(document.uri), { searchDir: workDir });
+      assert.ok(!('error' in opened));
+      if ('error' in opened) {
+        return;
+      }
+      document.handle = opened;
+      document.initialLoadDone = true;
+      try {
+        const shown = await provider.handleSelectTable(document, 'v');
+        assert.strictEqual(shown?.success, true);
+        fs.rmSync(parquetDir, { recursive: true });
+
+        const outcome = await provider.handleReload(document);
+        assert.strictEqual(outcome?.success, false, 'a table that cannot be read is a failed reload, not a new view');
+        assert.match(outcome?.success === false ? outcome.errors[0].message : '', /Could not read "v"/);
+        assert.strictEqual(document.handle, opened, 'the working handle must survive');
+        assert.ok(fs.existsSync(opened.tempFilePath));
+        assert.strictEqual(document.selectedTable, 'v');
+      } finally {
+        document.dispose();
+      }
+    });
+
+    it('does not undo a table pick that lands while the reload is running', async () => {
+      copyFixture('multi-table.duckdb');
+      const { provider, document } = await openTarget();
+      try {
+        await provider.handleSelectTable(document, 'customers');
+        const reload = provider.handleReload(document);
+        await provider.handleSelectTable(document, 'orders');
+        const outcome = await reload;
+        assert.strictEqual(outcome?.success, true);
+        assert.strictEqual(document.selectedTable, 'orders', 'the host must not go back to the table the user left');
+        // A reload payload that arrives after the pick shows the picked table's rows.
+        if (outcome?.success && outcome.data.selectedTable === 'orders') {
+          assert.strictEqual(outcome.data.data.rowCount, 3);
+        }
+      } finally {
+        document.dispose();
+      }
+    });
+
+    it('does not leak a handle when the document is disposed while reloading', async () => {
+      copyFixture('multi-table.duckdb');
+      const { provider, document } = await openTarget();
+      const tempCopies = () => new Set(fs.readdirSync(os.tmpdir()).filter((f) => /^tablas-.*\.duckdb$/.test(f)));
+      const before = tempCopies();
+      const pending = provider.handleReload(document);
+      document.dispose();
+      assert.strictEqual(await pending, undefined);
+      const created = [...tempCopies()].filter((f) => !before.has(f));
+      assert.deepStrictEqual(created, [], 'the reload must close the handle it opened for a disposed document');
     });
   });
 });
