@@ -44,6 +44,7 @@
    * @property {string | undefined} distinctTag    "unique" | "constant"
    * @property {string | undefined} rangeText      "min → max" for date columns
    * @property {string} summary    accessible name for the profile button
+   * @property {string | undefined} description  the column's description (dbt docs), if the host has one
    */
 
   /**
@@ -72,6 +73,7 @@
    *          filterInputs: HTMLInputElement[], clearButton: HTMLButtonElement,
    *          filterSeq: number, filterTimer: number | undefined,
    *          pendingScroll?: { top: number, left: number },
+   *          descriptions: Array<string | undefined>,
    *          filter: 'none' | 'pending' | 'active' | 'invalid' | 'failed' } | undefined}
    */
   let currentView;
@@ -210,6 +212,7 @@
       return {
         index, name, column, info, nonNull, nullFrac, nullText, nullPct,
         distinctText, distinctRatio, distinctTag, rangeText, summary,
+        description: data.descriptions ? data.descriptions[index] : undefined,
       };
     });
   }
@@ -526,6 +529,11 @@
     const sub = el('p', { class: 'card-sub' });
     sub.textContent = model.info.name;
     card.appendChild(sub);
+    if (model.description) {
+      const about = el('p', { class: 'card-description' });
+      about.textContent = model.description;
+      card.appendChild(about);
+    }
 
     const grid = el('dl', { class: 'card-grid' });
     /** @param {string} label @param {string} text @param {SVGElement=} extra */
@@ -927,9 +935,11 @@
    * @param {{ headers: string[], rows: string[][], rowCount: number, columnCount: number, totalRowCount?: number }} data
    * @param {string=} tableName the selected table/sheet of a multi-table source; undefined for CSV/Parquet
    * @param {string=} tableError why reading `tableName` failed; shown instead of the table
-   * @param {{ host?: HTMLElement, result?: { truncated: boolean } }=} opts `host` is where to render
-   *   instead of #app; `result` marks the rows of a query: no filter row, no statistics (both are
-   *   keyed by a table the host knows, which a query result is not), and a note when it was cut.
+   * @param {{ host?: HTMLElement, result?: { truncated: boolean }, columnDescriptions?: Record<string, string> }=} opts
+   *   `host` is where to render instead of #app; `result` marks the rows of a query: no filter row, no
+   *   statistics (both are keyed by a table the host knows, which a query result is not), and a note when
+   *   it was cut; `columnDescriptions` (by column name, matched ignoring case) are shown in the header
+   *   tooltip and the detail card.
    */
   function renderTable(data, tableName, tableError, opts) {
     const app = opts && opts.host ? opts.host : document.getElementById('app');
@@ -989,12 +999,18 @@
 
     /** @type {HTMLElement[]} */
     const ths = [];
-    data.headers.forEach((header) => {
+    const descriptionByName = new Map(
+      Object.entries((opts && opts.columnDescriptions) || {}).map(([column, text]) => [column.toLowerCase(), text])
+    );
+    const descriptions = data.headers.map((header) => descriptionByName.get(header.toLowerCase()));
+    data.headers.forEach((header, i) => {
       const th = el('th');
       const name = el('span', { class: 'col-name' });
       name.textContent = header;
       th.appendChild(name);
-      th.title = header;
+      const description = descriptions[i];
+      th.title = description ? `${header}\n${description}` : header;
+      if (description) { th.classList.add('has-description'); }
       headerRow.appendChild(th);
       ths.push(th);
     });
@@ -1067,6 +1083,7 @@
       statsBar,
       tableName,
       headers: data.headers,
+      descriptions,
       rowCount: data.rowCount,
       totalRowCount: data.totalRowCount,
       coverNote,
@@ -1481,7 +1498,14 @@
     // from the host, so no stale-reply check and none of the reload handling.
     const rerender = !!(options && options.rerender);
     const isReload = !rerender && outcome.success && outcome.data.reload !== undefined;
-    if (outcome.success && !rerender) {
+    if (outcome.success && !rerender && outcome.data.hostSelected) {
+      // The host chose this table (dbt "Preview Model"): it is the user's pick from
+      // now on, wherever they were (a pick still in flight is stale, and the SQL box
+      // gives way to the table).
+      requestedTable = outcome.data.selectedTable;
+      queryMode = false;
+      savedTableState = undefined;
+    } else if (outcome.success && !rerender) {
       const selected = outcome.data.selectedTable;
       if (requestedTable !== undefined && selected !== requestedTable) {
         // A response to an older select-table request, superseded by a newer
@@ -1573,7 +1597,9 @@
       }
       return;
     }
-    renderTable(outcome.data.data, outcome.data.selectedTable, outcome.data.tableError);
+    renderTable(outcome.data.data, outcome.data.selectedTable, outcome.data.tableError, {
+      columnDescriptions: outcome.data.columnDescriptions,
+    });
     if (carried) {
       restoreReloadState(carried);
     } else if (rerender && savedTableState) {

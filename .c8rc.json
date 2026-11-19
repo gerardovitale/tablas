@@ -11,6 +11,7 @@
     "src/sqliteEditorProvider.ts",
     "src/xlsxEditorProvider.ts",
     "src/duckdbEditorProvider.ts",
+    "src/dbtCommands.ts",
     "src/webviewHtml.ts"
   ],
   "extension": [".ts", ".js"],

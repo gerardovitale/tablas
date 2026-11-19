@@ -137,6 +137,36 @@ Each statement is `prepare`d to learn its type (binding, which for `read_csv`/re
 
 A refresh re-runs the last query even if the previous run took most of the 30 s budget, and each run holds the connection queue (table switches, filters and stats wait behind it). Now at most one re-run waits behind a running query. Acceptance: skip the automatic re-run when the last run took longer than a few seconds and show a "Run again" hint instead.
 
+## dbt support
+
+### D-1 · No dbt model description, tests or run results in the viewer · P3 · M
+
+Only column descriptions are shown. The manifest also has the model `description`, `tests` and `depends_on`, and `target/run_results.json` has per-model status and timing of the last build. Candidates: the model description beside the table picker, a "last built 14:32, 3 s" note, a failing-test marker. Read `run_results.json` the same cached way as the manifest.
+
+### D-2 · Preview Model only knows `.sql` models · P3 · S
+
+Python models (`.py`) and seeds (`.csv`) have manifest nodes too. Extend the menu `when` clauses and the extension check, and map a seed's file to its node.
+
+### D-3 · The DuckDB file is found by name, not from `profiles.yml` · P3 · M
+
+dbt-duckdb's `path:` lives in `profiles.yml` (often outside the project) and can be relative to where dbt ran. Today the manifest's `database` (the catalog name, equal to the file name for the default setup) and a quick pick decide. Acceptance: read `profiles.yml` (`~/.dbt` or `DBT_PROFILES_DIR`) for the active profile and target to find the file directly; keep the current search as the fallback.
+
+### D-4 · Preview from the table back to the model · P3 · S
+
+The reverse direction: from a table in the picker, open the model's `.sql` file (`original_file_path` from the manifest).
+
+### D-5 · Reading a big manifest can stall the extension host · P2 · M
+
+`loadDbtManifest` reads the whole file and `JSON.parse`s it synchronously (cap 300 MB, far too high for a shared extension host), on every first load, table switch and reload after the manifest's mtime changes, and the table's first render waits for it. Concurrent callers each parse the same file (no in-flight sharing). Acceptance: lower the cap (around 50 MB), share one in-flight promise per file, and consider posting the rows before the descriptions arrive.
+
+### D-6 · Descriptions can be missing at startup · P3 · S
+
+`getDbtProjectRoots()` is empty until the first `findFiles` scan finishes, and `columnDescriptionsFor` uses it as the "workspace's only project" fallback, so a restored `.duckdb` tab outside the project can load without descriptions. Acceptance: `withColumnDescriptions` awaits the first scan (an exported promise from `registerDbtSupport`).
+
+### D-7 · `pendingReveals` lifecycle and the 15 s limit · P3 · S
+
+A second reveal for the same file overwrites the first (which then waits out its timer); a panel disposed before its handshake leaves its entry until the timer, so a manual reopen within that window opens on the previewed table; and 15 s is short for a multi-GB file that is read into memory and copied. Acceptance: settle a replaced entry at once, settle and delete the entry in the panel's `onDidDispose`, and tie the wait to the load rather than a fixed time.
+
 ## Packaging and marketplace
 
 ### P-1 · Internal docs probably ship in the `.vsix` · P2 · S

@@ -74,6 +74,9 @@ export type TableParseOutcome =
   | { success: true; data: ParsedTable; errors: ParseError[] }
   | { success: false; errors: ParseError[] };
 
+/** DuckDB's default schema: tables in it keep their bare name as `TableRef.name`. */
+export const MAIN_SCHEMA = 'main';
+
 /**
  * A single table or view inside a multi-table source (e.g. a SQLite
  * database). Distinct from `ParsedTable`, which is the *contents* of one
@@ -132,6 +135,18 @@ export interface MultiTableData {
   lastQuery?: string;
   /** A starter query for the selected table, when the source can run queries. */
   querySuggestion?: string;
+  /**
+   * Column descriptions for the selected table (from dbt's `manifest.json` when the
+   * file belongs to a dbt project), by column name; the webview shows them in the
+   * header tooltip and the detail card. Omitted when there are none.
+   */
+  columnDescriptions?: Record<string, string>;
+  /**
+   * The host chose this table (the dbt "Preview Model" command), as opposed to the
+   * user picking it in the picker. The webview adopts it even though it differs
+   * from the user's last pick, and leaves the SQL box.
+   */
+  hostSelected?: boolean;
 }
 
 export interface ReloadInfo {

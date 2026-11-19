@@ -1,0 +1,52 @@
+{
+  "metadata": { "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json" },
+  "nodes": {
+    "model.shop.orders": {
+      "resource_type": "model", "name": "orders", "package_name": "shop",
+      "original_file_path": "models/marts/orders.sql",
+      "database": "schemas", "schema": "main_marts", "alias": "orders",
+      "config": { "materialized": "table" },
+      "columns": {
+        "id": { "name": "id", "description": "Primary key of the order." },
+        "total": { "name": "total", "description": "Order total in euros, tax included." },
+        "empty": { "name": "empty", "description": "   " }
+      }
+    },
+    "model.shop.stg_orders": {
+      "resource_type": "model", "name": "stg_orders", "package_name": "shop",
+      "original_file_path": "models/staging/stg_orders.sql",
+      "database": "schemas", "schema": "main_staging", "alias": "orders",
+      "config": { "materialized": "view" },
+      "columns": { "STATUS": { "name": "STATUS", "description": "new | paid" } }
+    },
+    "model.shop.not_built": {
+      "resource_type": "model", "name": "not_built", "package_name": "shop",
+      "original_file_path": "models/marts/not_built.sql",
+      "database": "schemas", "schema": "main_marts",
+      "config": { "materialized": "table" }, "columns": {}
+    },
+    "model.shop.inline": {
+      "resource_type": "model", "name": "inline", "package_name": "shop",
+      "original_file_path": "models/staging/inline.sql",
+      "database": "schemas", "schema": "main_staging",
+      "config": { "materialized": "ephemeral" }, "columns": {}
+    },
+    "test.shop.singular": {
+      "resource_type": "test", "name": "singular", "package_name": "shop",
+      "original_file_path": "tests/singular.sql", "database": "schemas", "schema": "main_dbt_test__audit",
+      "config": { "materialized": "test" }
+    },
+    "model.other_pkg.orders": {
+      "resource_type": "model", "name": "orders", "package_name": "other_pkg",
+      "original_file_path": "models/marts/orders.sql",
+      "database": "schemas", "schema": "other", "config": { "materialized": "table" }, "columns": {}
+    }
+  },
+  "sources": {
+    "source.shop.raw.events": {
+      "resource_type": "source", "name": "events", "identifier": "raw_events", "package_name": "shop",
+      "original_file_path": "models/sources.yml", "database": "schemas", "schema": "main",
+      "columns": { "kind": { "name": "kind", "description": "click or view" } }
+    }
+  }
+}

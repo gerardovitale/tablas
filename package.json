@@ -30,7 +30,9 @@
     "viewer",
     "data"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "workspaceContains:**/dbt_project.yml"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
     "customEditors": [
@@ -99,6 +101,11 @@
         "command": "tablas.refresh",
         "title": "Tablas: Refresh",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "tablas.previewDbtModel",
+        "title": "Tablas: Preview dbt Model",
+        "icon": "$(table)"
       }
     ],
     "menus": {
@@ -107,12 +114,35 @@
           "command": "tablas.refresh",
           "when": "activeCustomEditorId == 'tablas.duckdbViewer'",
           "group": "navigation"
+        },
+        {
+          "command": "tablas.previewDbtModel",
+          "when": "resourceExtname == .sql && tablas.dbtProject",
+          "group": "navigation"
         }
       ],
       "commandPalette": [
         {
           "command": "tablas.refresh",
           "when": "activeCustomEditorId == 'tablas.duckdbViewer'"
+        },
+        {
+          "command": "tablas.previewDbtModel",
+          "when": "tablas.dbtProject && resourceExtname == .sql"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "tablas.previewDbtModel",
+          "when": "resourceExtname == .sql && tablas.dbtProject",
+          "group": "navigation"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "tablas.previewDbtModel",
+          "when": "resourceExtname == .sql && tablas.dbtProject",
+          "group": "navigation"
         }
       ]
     },

@@ -162,6 +162,20 @@ describe('DuckdbEditorProvider Integration', () => {
       }
     });
 
+    it('publishes only the newest of two quick switches, so the host and the webview end on the same table', async () => {
+      const { provider, document } = await openDocumentWithHandle('multi-table.duckdb');
+      try {
+        const older = provider.handleSelectTable(document, 'customers');
+        const newer = provider.handleSelectTable(document, 'orders');
+        assert.strictEqual(await older, undefined, 'a switch that a newer one overtook publishes nothing');
+        const outcome = await newer;
+        assert.ok(outcome?.success && outcome.data.selectedTable === 'orders');
+        assert.strictEqual(document.selectedTable, 'orders');
+      } finally {
+        document.dispose();
+      }
+    });
+
     it('falls back to the first table when asked for one that does not exist', async () => {
       const { provider, document } = await openDocumentWithHandle('multi-table.duckdb');
       try {
@@ -594,6 +608,33 @@ describe('DuckdbEditorProvider Integration', () => {
     });
   });
 
+  it('reads a view that names the file\'s own catalog, because the temp copy keeps the file name', async () => {
+    // qualified-views.duckdb stores `warehouse.main.stg_invoice` in a view, like a dbt-duckdb file called warehouse.duckdb.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tablas-catalog-'));
+    const file = path.join(dir, 'warehouse.duckdb');
+    fs.copyFileSync(path.join(fixturesDir, 'qualified-views.duckdb'), file);
+    try {
+      const provider = new DuckdbEditorProvider({ extensionPath: process.cwd() } as vscode.ExtensionContext);
+      const document = provider.openCustomDocument(vscode.Uri.file(file));
+      try {
+        await provider.loadInitial(document);
+        const switched = await provider.handleSelectTable(document, 'stg_invoice_line');
+        assert.ok(switched?.success);
+        if (switched?.success) {
+          assert.strictEqual(switched.data.tableError, undefined);
+          assert.strictEqual(switched.data.data.rowCount, 2);
+        }
+        // A refresh opens a new copy, which must keep the name too.
+        const reloaded = await provider.handleReload(document);
+        assert.ok(reloaded?.success && reloaded.data.tableError === undefined && reloaded.data.data.rowCount === 2);
+      } finally {
+        document.dispose();
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('lists tables in every schema through the real handshake', async () => {
     const outcome = await openDuckdbAndAwaitOutcome('schemas.duckdb');
     assert.strictEqual(outcome.success, true);
@@ -821,7 +862,7 @@ describe('DuckdbEditorProvider Integration', () => {
     it('does not leak a handle when the document is disposed while reloading', async () => {
       copyFixture('multi-table.duckdb');
       const { provider, document } = await openTarget();
-      const tempCopies = () => new Set(fs.readdirSync(os.tmpdir()).filter((f) => /^tablas-.*\.duckdb$/.test(f)));
+      const tempCopies = () => new Set(fs.readdirSync(os.tmpdir()).filter((f) => f.startsWith('tablas-db-')));
       const before = tempCopies();
       const pending = provider.handleReload(document);
       document.dispose();

@@ -4,6 +4,7 @@ import { ParquetEditorProvider } from './parquetEditorProvider';
 import { SqliteEditorProvider } from './sqliteEditorProvider';
 import { XlsxEditorProvider } from './xlsxEditorProvider';
 import { DuckdbEditorProvider } from './duckdbEditorProvider';
+import { registerDbtSupport } from './dbtCommands';
 import type { CsvParseOutcome } from './csvParser';
 import type { ParquetParseOutcome } from './parquetParser';
 import type { MultiTableParseOutcome } from './tableData';
@@ -40,6 +41,7 @@ export function activate(context: vscode.ExtensionContext): TablasApi {
     duckdb.disposable,
     duckdb.provider
   );
+  registerDbtSupport(context, duckdb.provider);
   return {
     onDidPostCsvData: csv.provider.onDidPostCsvData,
     onDidPostParquetData: parquet.provider.onDidPostParquetData,

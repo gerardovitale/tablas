@@ -1,4 +1,3 @@
-import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -44,6 +43,7 @@ import {
 import type { QueryOutcome } from './queryMessage';
 import {
   clampMaxRows,
+  MAIN_SCHEMA,
   type ColumnKind,
   type ColumnStats,
   type MultiTableData,
@@ -61,16 +61,18 @@ import {
  * unit-test style (fixtures loaded as bytes via `fs.readFileSync`), and
  * correctness over non-local `vscode.FileSystemProvider` filesystems -- the
  * bytes are written to a temp file first, and DuckDB is opened against that.
- * `DuckdbHandle.close()` deletes the temp file alongside closing the
- * connection/instance, so every caller that opens a handle also owns
- * cleaning up its temp file.
+ * The copy lives in its own private folder and keeps the *source file's name*
+ * (see `tempCopyName`: DuckDB derives the catalog name from it, and views can
+ * hard-code that catalog). `DuckdbHandle.close()` deletes the folder alongside
+ * closing the connection/instance, so every caller that opens a handle also
+ * owns cleaning up its temp copy.
  *
  * Known residual limitation: cleanup only happens if `close()` actually
  * runs. If the extension host process is killed (crash, forced quit)
- * between `openDuckdbDatabase` and disposal, the temp file -- a full copy
- * of the source database's bytes -- is orphaned in `os.tmpdir()`. Mode
- * 0o600 (see `openDuckdbDatabase`) limits who can read it while it exists,
- * but doesn't make it self-cleaning; OS temp-dir reaping is the only
+ * between `openDuckdbDatabase` and disposal, the temp folder -- holding a full
+ * copy of the source database's bytes -- is orphaned in `os.tmpdir()`. The
+ * folder (mode 0700) and file (0600) limit who can read it while it exists,
+ * but don't make it self-cleaning; OS temp-dir reaping is the only
  * backstop. SQLite/XLSX don't have this exposure at all, since they never
  * write the source bytes to disk in the first place.
  */
@@ -80,8 +82,23 @@ export interface DuckdbHandle {
   close(): void;
 }
 
-function makeTempFilePath(): string {
-  return path.join(os.tmpdir(), `tablas-${crypto.randomBytes(8).toString('hex')}.duckdb`);
+/** Used when the caller does not say what the source file is called. */
+const DEFAULT_TEMP_NAME = 'database.duckdb';
+
+/**
+ * The file name of the temp copy. It is the *source file's own name*, not a random
+ * one: DuckDB names a database's catalog after its file, and a view can hard-code
+ * that catalog (dbt-duckdb writes `"warehouse"."main"."stg_orders"` into view SQL
+ * for a file called `warehouse.duckdb`). A copy called `tablas-1a2b.duckdb` has a
+ * different catalog, so such a view fails with `schema "warehouse.main" does not
+ * exist`. Characters a file name cannot hold are replaced, so any name is safe.
+ */
+function tempCopyName(fileName: string | undefined): string {
+  const cleaned = Array.from(fileName ?? '')
+    .map((ch) => (ch.charCodeAt(0) < 32 || '\\/:*?"<>|'.includes(ch) ? '_' : ch))
+    .join('')
+    .trim();
+  return cleaned === '' || cleaned.startsWith('.') ? DEFAULT_TEMP_NAME : cleaned.slice(0, 200);
 }
 
 // Double-quotes an identifier for safe interpolation into SQL, doubling any
@@ -175,22 +192,38 @@ async function applyFileSearchPath(connection: DuckDBConnection, searchDir: stri
  * sniff -- DuckDB's own open call already rejects a non-database file with
  * a clear error, so hand-rolling a header check here would just duplicate
  * that validation. `options.searchDir` is where relative file paths inside
- * views resolve (see `applyFileSearchPath`). The one failure it does reword is a file from a newer
- * DuckDB than the bundled engine (see `describeDuckdbOpenError`).
+ * views resolve (see `applyFileSearchPath`); `options.fileName` is the source
+ * file's name, which the temp copy keeps so the database's catalog name is the
+ * same (see `tempCopyName`). The one failure it does reword is a file from a
+ * newer DuckDB than the bundled engine (see `describeDuckdbOpenError`).
  */
 export async function openDuckdbDatabase(
   bytes: Uint8Array,
-  options: { searchDir?: string } = {}
+  options: { searchDir?: string; fileName?: string } = {}
 ): Promise<DuckdbHandle | { error: ParseError }> {
-  const tempFilePath = makeTempFilePath();
+  // A private folder per open (mode 0700, from mkdtemp), holding the copy under the
+  // source file's name. os.tmpdir() is shared and world-readable on a multi-user
+  // machine, and this is a full copy of the source database for as long as the
+  // handle stays open; unlike sql.js/exceljs, which never touch disk, it would
+  // otherwise be readable by any other local user (the file is 0600 as well).
+  let tempDir: string | undefined;
+  const removeTemp = (): void => {
+    if (tempDir === undefined) {
+      return;
+    }
+    try {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    } catch {
+      // best-effort cleanup -- a leaked temp folder isn't worth failing the caller over
+    }
+  };
+  let tempFilePath: string;
   try {
-    // Mode 0o600 -- os.tmpdir() is a shared, world-readable directory on a
-    // multi-user machine, and this file is a full copy of the source
-    // database's bytes for as long as the handle stays open. Unlike
-    // sql.js/exceljs (which never touch disk), that copy would otherwise be
-    // readable by any other local user.
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tablas-db-'));
+    tempFilePath = path.join(tempDir, tempCopyName(options.fileName));
     fs.writeFileSync(tempFilePath, bytes, { mode: 0o600 });
   } catch (err) {
+    removeTemp();
     const message = err instanceof Error ? err.message : String(err);
     return { error: { type: 'DuckdbError', code: 'OpenFailed', message } };
   }
@@ -199,11 +232,7 @@ export async function openDuckdbDatabase(
   try {
     instance = await DuckDBInstance.create(tempFilePath, { access_mode: 'READ_ONLY' });
   } catch (err) {
-    try {
-      fs.unlinkSync(tempFilePath);
-    } catch {
-      // best-effort cleanup -- a leaked temp file isn't worth failing the caller over
-    }
+    removeTemp();
     const raw = err instanceof Error ? err.message : String(err);
     const message = describeDuckdbOpenError(raw, version());
     return { error: { type: 'DuckdbError', code: 'OpenFailed', message } };
@@ -226,11 +255,7 @@ export async function openDuckdbDatabase(
         } catch {
           // best-effort, same as above
         }
-        try {
-          fs.unlinkSync(tempFilePath);
-        } catch {
-          // best-effort cleanup -- a leaked temp file isn't worth failing the caller over
-        }
+        removeTemp();
       },
     };
   } catch (err) {
@@ -243,11 +268,7 @@ export async function openDuckdbDatabase(
     } catch {
       // best-effort, as above
     }
-    try {
-      fs.unlinkSync(tempFilePath);
-    } catch {
-      // best-effort, as above
-    }
+    removeTemp();
     const message = err instanceof Error ? err.message : String(err);
     return { error: { type: 'DuckdbError', code: 'OpenFailed', message } };
   }
@@ -289,7 +310,6 @@ function quotedTableName(handle: DuckdbHandle, name: string): string {
     : quoteIdentifier(name);
 }
 
-const MAIN_SCHEMA = 'main';
 
 /**
  * Lists the user tables and views of every schema in the database (not

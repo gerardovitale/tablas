@@ -351,6 +351,95 @@ describe('tables in several schemas (dbt-shaped warehouse)', () => {
   });
 });
 
+describe('views that name their own catalog (dbt-duckdb writes warehouse.main.t into view SQL)', () => {
+  // DuckDB names a database's catalog after its file. The viewer opens a temp copy, which
+  // must therefore keep the source file's name, or such a view fails with
+  // `schema "warehouse.main" does not exist`. qualified-views.duckdb is written by
+  // DuckDB 1.x (scripts/generate-duckdb-legacy-fixtures.py): 2.x rewrites the
+  // reference away when it creates the view, so a 2.x fixture cannot show the problem.
+  async function readView(fileName?: string) {
+    const opened = await openDuckdbDatabase(await fixtureBytes('qualified-views.duckdb'), { fileName });
+    if ('error' in opened) {
+      throw new Error(opened.error.message);
+    }
+    try {
+      return await readSelectedTable(opened, await listDuckdbTables(opened), 'stg_invoice_line');
+    } finally {
+      opened.close();
+    }
+  }
+
+  async function catalogOf(fileName?: string): Promise<string> {
+    const opened = await openDuckdbDatabase(await fixtureBytes('simple.duckdb'), { fileName });
+    if ('error' in opened) {
+      throw new Error(opened.error.message);
+    }
+    try {
+      return String((await opened.connection.runAndReadAll('SELECT current_database()')).getRowsJson()[0][0]);
+    } finally {
+      opened.close();
+    }
+  }
+
+  it('reads such a view when the copy keeps the source file name', async () => {
+    const result = await readView('warehouse.duckdb');
+    assert.strictEqual(result.tableError, undefined);
+    assert.deepStrictEqual(result.data.rows, [['1', 'a'], ['2', 'b']]);
+  });
+
+  it('fails with the exact error from the bug report when the copy has another name', async () => {
+    const result = await readView();
+    assert.match(
+      result.tableError ?? '',
+      /Table with name "warehouse\.main\.stg_invoice" does not exist because schema "warehouse\.main" does not exist/
+    );
+    assert.strictEqual(result.data.columnCount, 0);
+  });
+
+  it('gives the copy the catalog name DuckDB derives from the source file name', async () => {
+    assert.strictEqual(await catalogOf('warehouse.duckdb'), 'warehouse');
+    assert.strictEqual(await catalogOf('my warehouse.ddb'), 'my warehouse');
+    // DuckDB takes what precedes the first dot, whatever the extension: the same name gives the same catalog.
+    assert.strictEqual(await catalogOf('my.data.duckdb'), 'my');
+    assert.strictEqual(await catalogOf(undefined), 'database');
+  });
+
+  it('keeps every copy inside its own private folder, whatever the name contains', async () => {
+    const bytes = await fixtureBytes('simple.duckdb');
+    for (const fileName of ['a/b\\c:d*e?.duckdb', '../../escape.duckdb', '', '.hidden', 'x'.repeat(400) + '.duckdb', undefined]) {
+      const opened = await openDuckdbDatabase(bytes, { fileName });
+      if ('error' in opened) {
+        throw new Error(`${JSON.stringify(fileName)}: ${opened.error.message}`);
+      }
+      try {
+        const dir = path.dirname(opened.tempFilePath);
+        assert.ok(path.basename(dir).startsWith('tablas-db-'), `${opened.tempFilePath} is in a private tablas-db-* folder`);
+        assert.strictEqual(path.dirname(path.dirname(opened.tempFilePath)), path.dirname(dir));
+        assert.strictEqual((await readDuckdbTable(opened, 'people')).rowCount, 3);
+      } finally {
+        opened.close();
+      }
+    }
+  });
+
+  it('removes the whole folder on close, and when opening fails', async () => {
+    const before = () => fsSync.readdirSync(os.tmpdir()).filter((f) => f.startsWith('tablas-db-'));
+    const existing = new Set(before());
+    const opened = await openDuckdbDatabase(await fixtureBytes('simple.duckdb'), { fileName: 'simple.duckdb' });
+    if ('error' in opened) {
+      throw new Error(opened.error.message);
+    }
+    const dir = path.dirname(opened.tempFilePath);
+    assert.strictEqual(fsSync.existsSync(dir), true);
+    opened.close();
+    assert.strictEqual(fsSync.existsSync(dir), false, 'the folder goes with the file');
+
+    const failed = await openDuckdbDatabase(await fixtureBytes('corrupt.duckdb'), { fileName: 'corrupt.duckdb' });
+    assert.ok('error' in failed);
+    assert.deepStrictEqual(before().filter((f) => !existing.has(f)), [], 'a failed open leaves nothing behind');
+  });
+});
+
 describe('views over files read by a relative path', () => {
   // A view like read_parquet('../data/x.parquet') is stored with the path as
   // written. The database is opened from a temp copy, so without a search

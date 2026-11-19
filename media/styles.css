@@ -912,3 +912,19 @@ thead th.row-num {
 .message.error {
   color: var(--vscode-errorForeground);
 }
+
+/* A column with a description (dbt docs): a small mark after its name, the text in the tooltip and the card. */
+th.has-description .col-name::after {
+  content: ' ⓘ';
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.card-description {
+  max-height: 96px;
+  margin: 4px 0 8px;
+  overflow-y: auto;
+  font-size: 12px;
+  white-space: pre-wrap;
+  color: var(--vscode-foreground);
+}

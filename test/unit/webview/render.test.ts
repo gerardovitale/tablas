@@ -1111,6 +1111,157 @@ describe('webview main.js rendering', () => {
     });
   });
 
+  describe('dbt awareness', () => {
+    function payload(extra: Partial<MultiTableData> = {}, selectedTable = 'a'): MultiTableParseOutcome {
+      return {
+        success: true,
+        errors: [],
+        data: {
+          tables: [
+            { name: 'a', type: 'table' },
+            { name: 'b', type: 'table' },
+            { name: 'c', type: 'table' },
+          ],
+          selectedTable,
+          data: {
+            headers: ['id', 'Status', 'plain'],
+            rows: [['1', 'new', 'x']],
+            rowCount: 1,
+            columnCount: 3,
+          },
+          capabilities: { refresh: true, query: true },
+          ...extra,
+        },
+      };
+    }
+    const doc = (dom: JSDOM) => dom.window.document;
+    const headerTh = (dom: JSDOM, name: string) =>
+      Array.from(doc(dom).querySelectorAll<HTMLElement>('#csv-table thead tr:first-child th')).find(
+        (th) => th.querySelector('.col-name')?.textContent === name
+      )!;
+
+    describe('column descriptions', () => {
+      const descriptions = { id: 'Primary key of the order.', STATUS: 'new | paid' };
+
+      it('puts them in the header tooltip (matching column names ignoring case) and marks the header', () => {
+        const { dom } = loadWebview();
+        sendDuckdbData(dom, payload({ columnDescriptions: descriptions }));
+        assert.strictEqual(headerTh(dom, 'id').title, 'id\nPrimary key of the order.');
+        assert.strictEqual(headerTh(dom, 'Status').title, 'Status\nnew | paid');
+        assert.ok(headerTh(dom, 'id').classList.contains('has-description'));
+        assert.strictEqual(headerTh(dom, 'plain').title, 'plain');
+        assert.ok(!headerTh(dom, 'plain').classList.contains('has-description'));
+      });
+
+      it('leaves the header text itself untouched', () => {
+        const { dom } = loadWebview();
+        sendDuckdbData(dom, payload({ columnDescriptions: descriptions }));
+        assert.strictEqual(headerTh(dom, 'id').querySelector('.col-name')?.textContent, 'id');
+      });
+
+      it('shows the description in the detail card', () => {
+        const { dom } = loadWebview();
+        replyStats = {
+          columns: [
+            { type: 'integer', nullCount: 0, distinctCount: 1, min: '1', max: '1', mean: 1 },
+            { type: 'text', nullCount: 0, distinctCount: 1 },
+            { type: 'text', nullCount: 0, distinctCount: 1 },
+          ],
+        };
+        sendDuckdbData(dom, payload({ columnDescriptions: descriptions }));
+        const strips = doc(dom).querySelectorAll<HTMLButtonElement>('button.col-profile');
+        assert.strictEqual(strips.length, 3);
+        strips[0].click();
+        assert.strictEqual(doc(dom).querySelector('.stats-card .card-description')?.textContent, 'Primary key of the order.');
+        strips[2].click();
+        assert.strictEqual(doc(dom).querySelector('.stats-card .card-description'), null, 'no description, no paragraph');
+      });
+
+      it('treats the text as text, never markup', () => {
+        const { dom } = loadWebview();
+        sendDuckdbData(dom, payload({ columnDescriptions: { id: '<img src=x onerror=alert(1)>' } }));
+        assert.strictEqual(doc(dom).querySelector('#csv-table img'), null);
+        assert.strictEqual(headerTh(dom, 'id').title, 'id\n<img src=x onerror=alert(1)>');
+      });
+
+      it('shows none for a table without descriptions', () => {
+        const { dom } = loadWebview();
+        sendDuckdbData(dom, payload());
+        assert.strictEqual(doc(dom).querySelectorAll('th.has-description').length, 0);
+      });
+
+      it('does not decorate a query result', () => {
+        const { dom, postedMessages } = loadWebview();
+        sendDuckdbData(dom, payload({ columnDescriptions: descriptions }));
+        doc(dom).querySelector<HTMLButtonElement>('.mode-button[data-mode="sql"]')!.click();
+        doc(dom).querySelector<HTMLButtonElement>('.query-run')!.disabled = false;
+        (doc(dom).querySelector('.query-input') as HTMLTextAreaElement).value = 'SELECT 1';
+        (doc(dom).querySelector('.query-input') as HTMLTextAreaElement).dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+        doc(dom).querySelector<HTMLButtonElement>('.query-run')!.click();
+        const sent = postedMessages.filter((m) => (m as { type: string }).type === 'run-query') as Array<{ seq: number }>;
+        dom.window.dispatchEvent(
+          new dom.window.MessageEvent('message', {
+            data: {
+              type: 'query-data',
+              payload: { seq: sent[0].seq, data: { headers: ['id'], rows: [['1']], rowCount: 1, columnCount: 1 }, truncated: false, elapsedMs: 1 },
+            },
+          })
+        );
+        assert.strictEqual(doc(dom).querySelectorAll('.query-result th.has-description').length, 0);
+      });
+    });
+
+    describe('a table chosen by the host (Preview Model)', () => {
+      const pick = (dom: JSDOM, name: string) => {
+        const app = doc(dom).getElementById('app')!;
+        openPickerPopup(app);
+        Array.from(app.querySelectorAll<HTMLElement>('.table-picker-option'))
+          .find((o) => o.querySelector('.picker-name')?.textContent === name)!
+          .click();
+      };
+      const shown = (dom: JSDOM) => pickerCurrent(doc(dom).getElementById('app')!);
+
+      it('is shown even though it differs from the last pick still in flight, which then counts as stale', () => {
+        const { dom } = loadWebview();
+        sendDuckdbData(dom, payload());
+        pick(dom, 'b'); // the user's pick is on its way...
+        sendDuckdbData(dom, payload({ hostSelected: true }, 'c')); // ...when the command pushes c
+        assert.strictEqual(shown(dom), 'c');
+        sendDuckdbData(dom, payload({}, 'b')); // the reply to the pick arrives late
+        assert.strictEqual(shown(dom), 'c', 'the late reply must not undo the host choice');
+      });
+
+      it('is shown when the user had picked another table before, and later replies for that one are stale', () => {
+        const { dom } = loadWebview();
+        sendDuckdbData(dom, payload());
+        pick(dom, 'b');
+        sendDuckdbData(dom, payload({}, 'b'));
+        sendDuckdbData(dom, payload({ hostSelected: true }, 'a'));
+        assert.strictEqual(shown(dom), 'a');
+      });
+
+      it('leaves the SQL box for the table', () => {
+        const { dom } = loadWebview();
+        sendDuckdbData(dom, payload());
+        doc(dom).querySelector<HTMLButtonElement>('.mode-button[data-mode="sql"]')!.click();
+        assert.ok(doc(dom).querySelector('.query-input'));
+        sendDuckdbData(dom, payload({ hostSelected: true }, 'c'));
+        assert.strictEqual(doc(dom).querySelector('.query-input'), null);
+        assert.strictEqual(shown(dom), 'c');
+        assert.ok(doc(dom).querySelector('#csv-table'));
+        assert.strictEqual(doc(dom).querySelector('.mode-button[data-mode="table"]')?.getAttribute('aria-pressed'), 'true');
+      });
+
+      it('does not change how an ordinary stale reply is dropped', () => {
+        const { dom } = loadWebview();
+        sendDuckdbData(dom, payload());
+        pick(dom, 'b');
+        sendDuckdbData(dom, payload({}, 'a')); // not host-selected, not the pick
+        assert.strictEqual(shown(dom), 'b');
+      });
+    });
+  });
+
   describe('table picker', () => {
     const tableData = { headers: ['id'], rows: [['1']], rowCount: 1, columnCount: 1 };
 

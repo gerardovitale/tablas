@@ -34,6 +34,8 @@ import {
 } from './queryMessage';
 import type { MultiTableData, MultiTableParseOutcome } from './tableData';
 import { ReloadScheduler } from './reloadScheduler';
+import { columnDescriptionsFor, findTableRef, type TableTarget } from './dbt';
+import { getDbtProjectRoots } from './dbtCommands';
 import { buildWebviewHtml } from './webviewHtml';
 import { getAutoRefreshSetting, getMaxRowsSetting } from './config';
 
@@ -46,6 +48,9 @@ const RELOAD_MAX_WAIT_MS = 30_000;
 function lastTableKey(uri: vscode.Uri): string {
   return `tablas.lastTable:${uri.toString()}`;
 }
+
+/** How `revealTable` went: shown, or why not (see its doc). */
+export type RevealOutcome = 'shown' | 'missing' | 'unavailable';
 
 /** `workspaceState` key of the SQL last run from the query box for a file. */
 function lastQueryKey(uri: vscode.Uri): string {
@@ -67,6 +72,12 @@ class DuckdbDocument implements vscode.CustomDocument {
   filterSeq = 0;
   /** Same for `run-query`: a query still queued behind a newer one never runs. */
   querySeq = 0;
+  /**
+   * Counts table switches. One that finishes after a newer one started is
+   * superseded and publishes nothing: the host's idea of the shown table
+   * (`selectedTable`) must end up the same as the webview's.
+   */
+  selectSeq = 0;
   /**
    * True once the first load has been attempted (it may have failed or found an
    * empty file, leaving `handle` undefined). A reload may then do the load that
@@ -123,6 +134,60 @@ export class DuckdbEditorProvider
 
   /** Re-read triggers of the open panels, keyed by document URI (see `refreshActive`). */
   private readonly refreshers = new Map<string, () => Promise<void>>();
+
+  /** What the dbt "Preview Model" command can ask an open panel to do, keyed by document URI. */
+  private readonly selectors = new Map<
+    string,
+    { reveal: () => void; select: (target: TableTarget) => Promise<RevealOutcome> }
+  >();
+
+  /**
+   * A table to open on, for a file whose first load has not happened yet (the file
+   * is not open, or its panel has not finished its handshake). `loadInitial` takes
+   * it and settles the promise `revealTable` is waiting on.
+   */
+  private readonly pendingReveals = new Map<string, { target: TableTarget; settle: (outcome: RevealOutcome) => void }>();
+
+  /**
+   * Shows `target` (a table as dbt names it) in `uri`, opening the file if needed
+   * and bringing its panel forward: the dbt "Preview Model" command. `'missing'`
+   * = the file is open but has no such table (the model is not built yet, or is in
+   * another file); `'unavailable'` = the file could not be opened or read.
+   */
+  public async revealTable(uri: vscode.Uri, target: TableTarget): Promise<RevealOutcome> {
+    const open = this.selectors.get(uri.toString());
+    if (open) {
+      open.reveal();
+      return open.select(target);
+    }
+    return this.awaitFirstLoad(uri.toString(), target, () =>
+      vscode.commands.executeCommand('vscode.openWith', uri, DuckdbEditorProvider.viewType)
+    );
+  }
+
+  /** Registers `target` for the first load of `key` and resolves with how that went (or `'unavailable'` after 15 s). */
+  private awaitFirstLoad(key: string, target: TableTarget, start?: () => Thenable<unknown>): Promise<RevealOutcome> {
+    return new Promise<RevealOutcome>((resolve) => {
+      let done = false;
+      const entry = {
+        target,
+        settle: (outcome: RevealOutcome) => {
+          if (done) {
+            return;
+          }
+          done = true;
+          clearTimeout(timer);
+          if (this.pendingReveals.get(key) === entry) {
+            this.pendingReveals.delete(key);
+          }
+          resolve(outcome);
+        },
+      };
+      const timer = setTimeout(() => entry.settle('unavailable'), 15_000);
+      this.pendingReveals.set(key, entry);
+      start?.().then(undefined, () => entry.settle('unavailable'));
+    });
+  }
 
   /** `tablas.refresh`: re-reads the DuckDB file shown in the active editor tab. */
   public async refreshActive(): Promise<void> {
@@ -231,6 +296,54 @@ export class DuckdbEditorProvider
     const key = document.uri.toString();
     this.refreshers.set(key, runReload);
 
+    // The dbt "Preview Model" command: switch this panel to a table of the host's choosing.
+    const selectTable = async (target: TableTarget): Promise<RevealOutcome> => {
+      if (panelDisposed) {
+        return 'unavailable';
+      }
+      if (!initialLoading && !document.handle && !document.initialLoadDone) {
+        // The webview has not said 'ready' yet: the first load will open on it.
+        return this.awaitFirstLoad(key, target);
+      }
+      try {
+        if (initialLoading) {
+          await initialLoading.then(undefined, () => undefined);
+        }
+        if (panelDisposed || !document.handle) {
+          return 'unavailable';
+        }
+        const ref = findTableRef(await listDuckdbTables(document.handle), target);
+        if (!ref) {
+          return 'missing';
+        }
+        if (document.selectedTable === ref.name && document.shownRowCount !== undefined) {
+          // Already on screen: bringing the panel forward is all there is to do. Re-posting
+          // it would throw away the user's filters, scroll position and query result.
+          return 'shown';
+        }
+        const outcome = await this.handleSelectTable(document, ref.name);
+        if (!outcome || panelDisposed) {
+          return 'unavailable';
+        }
+        if (!outcome.success) {
+          // Not pushed: an error page would replace what the user is looking at.
+          return 'unavailable';
+        }
+        // `hostSelected`: not the user's pick, so the webview must not drop it as a stale reply.
+        // Posted whatever table it turned out to be, so the webview and the host agree.
+        const pushed: MultiTableParseOutcome = { ...outcome, data: { ...outcome.data, hostSelected: true } };
+        post({ type: 'duckdb-data', payload: pushed });
+        this._onDidPostDuckdbData.fire(pushed);
+        // A reload can swap the handle between the lookup and the read; the table asked for
+        // may be gone from the new one, and the read then falls back to another.
+        return outcome.data.selectedTable === ref.name ? 'shown' : 'missing';
+      } catch {
+        return 'unavailable';
+      }
+    };
+    const selectorEntry = { reveal: () => webviewPanel.reveal(), select: selectTable };
+    this.selectors.set(key, selectorEntry);
+
     let scheduler: ReloadScheduler | undefined;
     let watcher: vscode.FileSystemWatcher | undefined;
     if (document.uri.scheme === 'file') {
@@ -269,6 +382,10 @@ export class DuckdbEditorProvider
       watcher?.dispose();
       if (this.refreshers.get(key) === runReload) {
         this.refreshers.delete(key);
+      }
+      // Like `refreshers`: a newer panel for the same file may have registered before this one's dispose fires.
+      if (this.selectors.get(key) === selectorEntry) {
+        this.selectors.delete(key);
       }
     });
 
@@ -376,21 +493,38 @@ export class DuckdbEditorProvider
       // Relative paths inside views resolve next to the source file, which only
       // means something for a local file.
       const searchDir = document.uri.scheme === 'file' ? path.dirname(document.uri.fsPath) : undefined;
-      const opened = await openDuckdbDatabase(bytes, { searchDir });
+      const opened = await openDuckdbDatabase(bytes, { searchDir, fileName: path.posix.basename(document.uri.path) });
       if ('error' in opened) {
         return { success: false, errors: [opened.error] };
       }
 
       let data: MultiTableData;
+      let revealed: RevealOutcome | undefined;
+      let revealedTable: string | undefined;
       try {
         const tables = await listDuckdbTables(opened);
-        data = await readSelectedTable(opened, tables, this.rememberedTable(document), getMaxRowsSetting());
+        // A table the dbt command asked for beats the remembered one.
+        const pending = this.pendingReveals.get(document.uri.toString());
+        const wanted = pending ? findTableRef(tables, pending.target) : undefined;
+        if (pending) {
+          revealed = wanted ? 'shown' : 'missing';
+          revealedTable = wanted?.name;
+        }
+        data = await readSelectedTable(opened, tables, wanted?.name ?? this.rememberedTable(document), getMaxRowsSetting());
+        data = await this.withColumnDescriptions(document, data);
       } catch (err) {
         opened.close();
         throw err;
       }
       // Only now: a reload must not swap in while this first read is running.
       document.handle = opened;
+      if (revealedTable !== undefined && data.tableError === undefined && data.selectedTable === revealedTable) {
+        // Like a pick in the picker: reopening the file later lands on the previewed model.
+        this.rememberTable(document, revealedTable);
+      }
+      if (revealed) {
+        this.pendingReveals.get(document.uri.toString())?.settle(revealed);
+      }
       return { success: true, data: this.publish(document, data), errors: [] };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -400,6 +534,29 @@ export class DuckdbEditorProvider
       };
     } finally {
       document.initialLoadDone = true;
+      // Whoever asked for a table and is still waiting: the file could not be opened.
+      this.pendingReveals.get(document.uri.toString())?.settle('unavailable');
+    }
+  }
+
+  /**
+   * Adds dbt's column descriptions for the selected table, when the file belongs to
+   * a dbt project whose manifest knows it. Never throws and never delays a table by
+   * more than reading (and, once, parsing) the manifest.
+   */
+  private async withColumnDescriptions(document: DuckdbDocument, data: MultiTableData): Promise<MultiTableData> {
+    if (document.uri.scheme !== 'file' || data.tableError !== undefined) {
+      return data;
+    }
+    const ref = data.tables.find((t) => t.name === data.selectedTable);
+    if (!ref) {
+      return data;
+    }
+    try {
+      const columnDescriptions = await columnDescriptionsFor(document.uri.fsPath, ref, getDbtProjectRoots());
+      return columnDescriptions ? { ...data, columnDescriptions } : data;
+    } catch {
+      return data;
     }
   }
 
@@ -466,7 +623,7 @@ export class DuckdbEditorProvider
         return failed('ReloadFailed', 'The file is empty right now (it may still be being written).');
       }
       const searchDir = document.uri.scheme === 'file' ? path.dirname(document.uri.fsPath) : undefined;
-      const result = await openDuckdbDatabase(bytes, { searchDir });
+      const result = await openDuckdbDatabase(bytes, { searchDir, fileName: path.posix.basename(document.uri.path) });
       if ('error' in result) {
         return { success: false, errors: [result.error] };
       }
@@ -481,6 +638,9 @@ export class DuckdbEditorProvider
         do {
           target = wanted();
           data = await readSelectedTable(opened, tables, target, getMaxRowsSetting());
+          // Inside the loop: this await takes real time (project and manifest files), and a pick
+          // that lands during it must send the loop round again, not be overwritten by `publish`.
+          data = await this.withColumnDescriptions(document, data);
         } while (wanted() !== target && ++attempts < 3);
       } catch (err) {
         opened.close();
@@ -526,9 +686,18 @@ export class DuckdbEditorProvider
     if (!document.handle) {
       return undefined;
     }
+    const seq = ++document.selectSeq;
     try {
       const tables = await listDuckdbTables(document.handle);
-      const data = await readSelectedTable(document.handle, tables, table, getMaxRowsSetting());
+      const data = await this.withColumnDescriptions(
+        document,
+        await readSelectedTable(document.handle, tables, table, getMaxRowsSetting())
+      );
+      if (document.selectSeq !== seq) {
+        // A newer switch started meanwhile (the manifest read above takes real time);
+        // publishing this one afterwards would leave `selectedTable` on the wrong table.
+        return undefined;
+      }
       if (data.tableError === undefined && data.selectedTable !== '') {
         this.rememberTable(document, data.selectedTable);
       }
