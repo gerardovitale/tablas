@@ -5,11 +5,13 @@ test/**
 out/**
 esbuild.js
 tsconfig.json
-*.map
+**/*.map
 BACKLOG.md
+PUBLISHING.md
 .gitignore
 node_modules/**
-!node_modules/papaparse/**
+# papaparse, hyparquet and exceljs are bundled into dist/extension.js (esbuild.js), so
+# nothing of theirs is listed here. Only what cannot be bundled is re-included below.
 # Only sql.js's WASM runtime is needed at runtime (loaded via
 # require.resolve('sql.js/dist/sql-wasm.wasm') in sqliteParser.ts) --
 # excluding its many other dist variants (asm.js, debug, browser, worker
@@ -24,17 +26,11 @@ node_modules/**
 !node_modules/sql.js/package.json
 !node_modules/sql.js/dist/sql-wasm.js
 !node_modules/sql.js/dist/sql-wasm.wasm
-# @duckdb/node-api is pure JS (its lib/**/*.js), needed at runtime.
-# @duckdb/node-bindings is a thin platform dispatcher; the actual native
-# engine (duckdb.node + libduckdb.{dylib,so}/duckdb.dll) ships in a
-# per-platform @duckdb/node-bindings-<platform-arch> package that npm only
-# installs the matching one of (see esbuild.js's comment on why both
-# packages are kept external instead of bundled). Same flat-negate caveat
-# as sql.js above -- list exactly what's needed, no broad re-include.
-!node_modules/@duckdb/node-api/package.json
-!node_modules/@duckdb/node-api/lib/**/*.js
-!node_modules/@duckdb/node-bindings/package.json
-!node_modules/@duckdb/node-bindings/duckdb.js
+# DuckDB: @duckdb/node-api and @duckdb/node-bindings' dispatcher (plus detect-libc) are bundled
+# into dist/extension.js. What cannot be bundled is the native engine, which ships in a
+# per-platform @duckdb/node-bindings-<platform-arch> package (duckdb.node + libduckdb.{dylib,so}/
+# duckdb.dll) that npm only installs the matching one of; the bundled dispatcher requires it at
+# runtime (see esbuild.js). Same flat-negate caveat as sql.js above -- list exactly what is needed.
 !node_modules/@duckdb/node-bindings-*/package.json
 !node_modules/@duckdb/node-bindings-*/duckdb.node
 !node_modules/@duckdb/node-bindings-*/*.dylib

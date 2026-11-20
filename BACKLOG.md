@@ -9,41 +9,22 @@ Current milestone: **first Marketplace publish** (re-prioritised 2026-11-20).
 
 ## Release order
 
-1. **P-2** bundle the extension and trim the `.vsix`.
-2. **P-3** per-platform `.vsix` builds (touches the same `.vscodeignore` lines, so after P-2).
-3. **D-5** manifest stall and **F-6** uncached re-parse stall (both can freeze the extension host).
-4. Publish (see `PUBLISHING.md`). Then **T-1** column sort and **T-2** in-table find.
+1. **P-3** per-platform `.vsix` builds.
+2. **D-5** manifest stall and **F-6** uncached re-parse stall (both can freeze the extension host).
+3. Publish (see `PUBLISHING.md`). Then **T-1** column sort and **T-2** in-table find.
 
 The real-window smoke test (V-1) passed on 2026-11-20 in the installed extension: type icons, virtualization, selection and copy, filtering, the SQL box under the strict CSP and undo/redo all behaved. It found one bug (SQL colours taken from the wrong theme with an auto-detected colour scheme, fixed in `9011d97`) and nothing else.
 
 ## Packaging and marketplace
 
-### P-2 · `vsce package` warns: "217 files, 186 are JavaScript, you should bundle your extension" · P1 · M
+### P-3 · Verify the per-platform `.vsix` builds on real platforms · P1 · M
 
-Warning text: `This extension consists of 217 files, out of which 186 are JavaScript files. For performance reasons, you should bundle your extension: https://aka.ms/vscode-bundle-extension. You should also exclude unnecessary files by adding them to your .vscodeignore: https://aka.ms/vscode-vscodeignore.`
-
-Where the files come from (`vsce ls`, local darwin-arm64 build, 229 files on 2026-11-20):
-- `@duckdb/node-api`: ~174 files. The `!node_modules/@duckdb/node-api/lib/**/*.js` line ships its whole `lib/` tree unbundled. This is nearly all of the warning.
-- `papaparse`: ~23 files (`tests/`, `player/`, `.github/`, ...). `papaparse` is already bundled into `dist/extension.js`, so the `!node_modules/papaparse/**` line is dead weight.
-- `media/webview.js.map` and `dist/extension.js.map` ship (`*.map` in `.vscodeignore` only matches at the root).
-- `PUBLISHING.md` ships. (`CLAUDE.md` and `BACKLOG.md` are already excluded.)
+`scripts/package-targets.sh` already builds one `.vsix` per target (`darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `alpine-x64`, `alpine-arm64`, `win32-x64`, `win32-arm64`) by swapping in exactly that target's `@duckdb/node-bindings-<arch>` package before each `vsce package --target`; `scripts/install-local.sh` still runs a plain `vsce package` for the dev machine. The script predates P-2 (bundling `@duckdb/node-api` and the `node-bindings` dispatcher into `dist/extension.js`), so it needs a fresh run, and nothing has loaded a non-macOS `.vsix` yet.
 
 Acceptance:
-- Remove the `!node_modules/papaparse/**` line from `.vscodeignore`.
-- Bundle `@duckdb/node-api`'s JS into `dist/extension.js`: drop it from `external` in `esbuild.js`, keep only `@duckdb/node-bindings` external (the native `.node` must stay a separate file), and drop the `@duckdb/node-api` negate lines. Check that `@duckdb/node-bindings`' `duckdb.js` still resolves its platform package at runtime.
-- Exclude `**/*.map` and `PUBLISHING.md`.
-- `vsce ls` shows well under 20 files and `vsce package` prints no warning.
-- `npm test` passes and a DuckDB file opens in the installed extension (`npm run install:local:quick`).
-- Update the `.vscodeignore` notes and the DuckDB section of `CLAUDE.md` ("both ... are `external`") to match.
-
-### P-3 · Per-platform `.vsix` builds · P1 · L
-
-`scripts/install-local.sh` runs a plain `vsce package`, which ships only the dev machine's `@duckdb/node-bindings-<platform-arch>`. A Marketplace `.vsix` must be built per target. Moved here from the Roadmap.
-
-Acceptance:
-- A script (or CI workflow) runs `vsce package --target <t>` for `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64` and `win32-x64`, each with only its own `@duckdb/node-bindings-<t>` package installed/included.
-- `vsce ls` per target shows exactly one platform binding; at least one non-host target is opened on a matching machine (or VM) and loads a DuckDB file.
-- `vsce publish` flow in `PUBLISHING.md` and the Packaging note in `CLAUDE.md` updated. Touches the same `.vscodeignore` lines as P-2, so do P-2 first.
+- Re-run `scripts/package-targets.sh` with the P-2 layout: each `.vsix` has about 16 files and exactly one `@duckdb/node-bindings-*` package (`vsce ls --target`/the unzipped listing), and its size is plausible per platform.
+- At least `linux-x64`, `alpine-x64` (this is the one the bundled `detect-libc` fix is for) and `win32-x64` are opened on a matching machine, VM or CI runner and load a DuckDB file; macOS x64 if a machine is at hand.
+- Decide whether `PUBLISHING.md` publishes all 8 targets or only the common ones, and update its publish steps and the Packaging note in `CLAUDE.md` to what was verified.
 
 ## Column filtering follow-ups
 

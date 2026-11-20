@@ -11,11 +11,15 @@ const extensionConfig = {
   format: 'cjs',
   platform: 'node',
   target: 'node20',
-  // '@duckdb/node-api' and '@duckdb/node-bindings' both ship native .node
-  // binaries under the hood -- esbuild can't bundle a native binary, so
-  // both stay external like sql.js's .wasm, and are resolved from
-  // node_modules at runtime instead.
-  external: ['vscode', 'sql.js', '@duckdb/node-api', '@duckdb/node-bindings'],
+  // Kept external because they are not JS text: sql.js's .wasm (located with require.resolve
+  // in sqliteParser.ts) and DuckDB's per-platform native packages
+  // (@duckdb/node-bindings-<platform-arch>/duckdb.node + libduckdb). Everything else is bundled,
+  // including @duckdb/node-api and @duckdb/node-bindings' duckdb.js dispatcher with its
+  // detect-libc dependency: the dispatcher's `require('@duckdb/node-bindings-<p>/duckdb.node')`
+  // calls stay as plain requires resolved from node_modules at runtime. (Shipping the dispatcher
+  // unbundled would also need detect-libc in the .vsix; without it an Alpine build silently falls
+  // back to the glibc binding it does not contain.)
+  external: ['vscode', 'sql.js', '@duckdb/node-bindings-*'],
   sourcemap: !production,
   minify: production,
 };
