@@ -36,7 +36,7 @@ import type { MultiTableData, MultiTableParseOutcome } from './tableData';
 import { ReloadScheduler } from './reloadScheduler';
 import { columnDescriptionsFor, findTableRef, type TableTarget } from './dbt';
 import { sqlThemeMessage } from './sqlTheme';
-import { loadSqlColors } from './sqlThemeHost';
+import { loadSqlColors, SQL_THEME_SETTINGS } from './sqlThemeHost';
 import { getDbtProjectRoots } from './dbtCommands';
 import { buildWebviewHtml } from './webviewHtml';
 import { getAutoRefreshSetting, getMaxRowsSetting } from './config';
@@ -393,7 +393,7 @@ export class DuckdbEditorProvider
     const themeSubscriptions = [
       vscode.window.onDidChangeActiveColorTheme(() => void sendSqlTheme()),
       vscode.workspace.onDidChangeConfiguration((event) => {
-        if (event.affectsConfiguration('workbench.colorTheme') || event.affectsConfiguration('editor.tokenColorCustomizations')) {
+        if (SQL_THEME_SETTINGS.some((setting) => event.affectsConfiguration(setting))) {
           void sendSqlTheme();
         }
       }),

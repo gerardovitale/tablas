@@ -13,6 +13,54 @@
  * groups are ignored. That is enough for how themes colour SQL in practice.
  */
 
+/** The active theme's brightness class, as `vscode.ColorThemeKind` names it. */
+export type ThemeKind = 'light' | 'dark' | 'high-contrast' | 'high-contrast-light';
+
+/** The `workbench.*` / `window.*` settings that decide which theme is active. */
+export interface ThemeSettings {
+  colorTheme?: unknown;
+  preferredDarkColorTheme?: unknown;
+  preferredLightColorTheme?: unknown;
+  preferredHighContrastColorTheme?: unknown;
+  preferredHighContrastLightColorTheme?: unknown;
+  autoDetectColorScheme?: unknown;
+  autoDetectHighContrast?: unknown;
+}
+
+/**
+ * Names of the themes that may be the active one, most likely first. `workbench.colorTheme` is
+ * only the active theme when the colour scheme is not auto-detected: with
+ * `window.autoDetectColorScheme` (or `autoDetectHighContrast`, on by default) VS Code switches to
+ * the matching `workbench.preferred*ColorTheme` and leaves `colorTheme` holding the *other* one.
+ * The host takes the first candidate whose own brightness (`uiTheme`) equals the active `kind`.
+ */
+export function candidateThemeNames(settings: ThemeSettings, kind: ThemeKind): string[] {
+  const preferred = {
+    dark: settings.preferredDarkColorTheme,
+    light: settings.preferredLightColorTheme,
+    'high-contrast': settings.preferredHighContrastColorTheme,
+    'high-contrast-light': settings.preferredHighContrastLightColorTheme,
+  }[kind];
+  const autoDetect =
+    kind === 'dark' || kind === 'light' ? settings.autoDetectColorScheme === true : settings.autoDetectHighContrast !== false;
+  const ordered = autoDetect ? [preferred, settings.colorTheme] : [settings.colorTheme];
+  const names: string[] = [];
+  for (const name of ordered) {
+    if (typeof name === 'string' && name !== '' && !names.includes(name)) {
+      names.push(name);
+    }
+  }
+  return names;
+}
+
+/** The `uiTheme` a theme contribution declares for each kind. */
+export const UI_THEME_OF_KIND: Record<ThemeKind, string> = {
+  light: 'vs',
+  dark: 'vs-dark',
+  'high-contrast': 'hc-black',
+  'high-contrast-light': 'hc-light',
+};
+
 /** The kinds of token the SQL box colours. */
 export type SqlTokenClass =
   | 'keyword'

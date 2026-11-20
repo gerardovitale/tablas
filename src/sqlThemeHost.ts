@@ -1,7 +1,16 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { customizationRules, parseJsonc, resolveSqlColors, type SqlColors, type TokenRule } from './sqlTheme';
+import {
+  candidateThemeNames,
+  customizationRules,
+  parseJsonc,
+  resolveSqlColors,
+  UI_THEME_OF_KIND,
+  type SqlColors,
+  type ThemeKind,
+  type TokenRule,
+} from './sqlTheme';
 
 /**
  * The vscode-dependent half of `sqlTheme.ts`: finds the active colour theme's file among the
@@ -10,24 +19,86 @@ import { customizationRules, parseJsonc, resolveSqlColors, type SqlColors, type 
  * the providers; the logic that can be tested lives in `sqlTheme.ts`.
  */
 
+/** Settings whose change can change the SQL colours (a webview re-requests them on any of these). */
+export const SQL_THEME_SETTINGS: readonly string[] = [
+  'workbench.colorTheme',
+  'workbench.preferredDarkColorTheme',
+  'workbench.preferredLightColorTheme',
+  'workbench.preferredHighContrastColorTheme',
+  'workbench.preferredHighContrastLightColorTheme',
+  'window.autoDetectColorScheme',
+  'window.autoDetectHighContrast',
+  'editor.tokenColorCustomizations',
+];
+
 const MAX_THEME_BYTES = 5 * 1024 * 1024;
 const MAX_INCLUDE_DEPTH = 6;
 
-/** The file of the theme called `name` (its label or id), from any installed extension. */
-function findThemeFile(name: string): string | undefined {
+/** The theme called `name` (its label or id) from any installed extension: its file and declared brightness. */
+function findTheme(name: string): { file: string; uiTheme: string | undefined } | undefined {
   for (const extension of vscode.extensions.all) {
     const themes: unknown = (extension.packageJSON as { contributes?: { themes?: unknown } } | undefined)?.contributes?.themes;
     if (!Array.isArray(themes)) {
       continue;
     }
     for (const theme of themes) {
-      const entry = theme as { id?: unknown; label?: unknown; path?: unknown } | null;
+      const entry = theme as { id?: unknown; label?: unknown; path?: unknown; uiTheme?: unknown } | null;
       if (entry && (entry.id === name || entry.label === name) && typeof entry.path === 'string') {
-        return path.join(extension.extensionPath, entry.path);
+        return {
+          file: path.join(extension.extensionPath, entry.path),
+          uiTheme: typeof entry.uiTheme === 'string' ? entry.uiTheme : undefined,
+        };
       }
     }
   }
   return undefined;
+}
+
+function activeThemeKind(): ThemeKind {
+  switch (vscode.window.activeColorTheme.kind) {
+    case vscode.ColorThemeKind.Light:
+      return 'light';
+    case vscode.ColorThemeKind.HighContrast:
+      return 'high-contrast';
+    case vscode.ColorThemeKind.HighContrastLight:
+      return 'high-contrast-light';
+    default:
+      return 'dark';
+  }
+}
+
+/**
+ * The active theme. VS Code has no API for its name, and `workbench.colorTheme` is not it when the
+ * scheme is auto-detected, so try the candidates from the settings and take the first whose
+ * declared brightness is the active kind (else the first one that exists at all).
+ */
+function findActiveTheme(): { name: string; file: string } | undefined {
+  const workbench = vscode.workspace.getConfiguration('workbench');
+  const kind = activeThemeKind();
+  const names = candidateThemeNames(
+    {
+      colorTheme: workbench.get('colorTheme'),
+      preferredDarkColorTheme: workbench.get('preferredDarkColorTheme'),
+      preferredLightColorTheme: workbench.get('preferredLightColorTheme'),
+      preferredHighContrastColorTheme: workbench.get('preferredHighContrastColorTheme'),
+      preferredHighContrastLightColorTheme: workbench.get('preferredHighContrastLightColorTheme'),
+      autoDetectColorScheme: vscode.workspace.getConfiguration('window').get('autoDetectColorScheme'),
+      autoDetectHighContrast: vscode.workspace.getConfiguration('window').get('autoDetectHighContrast'),
+    },
+    kind,
+  );
+  let fallback: { name: string; file: string } | undefined;
+  for (const name of names) {
+    const theme = findTheme(name);
+    if (!theme) {
+      continue;
+    }
+    if (theme.uiTheme === undefined || theme.uiTheme === UI_THEME_OF_KIND[kind]) {
+      return { name, file: theme.file };
+    }
+    fallback ??= { name, file: theme.file };
+  }
+  return fallback;
 }
 
 /**
@@ -73,14 +144,14 @@ let cached: { key: string; colors: SqlColors } | undefined;
  */
 export async function loadSqlColors(): Promise<SqlColors> {
   try {
-    const name = vscode.workspace.getConfiguration('workbench').get<string>('colorTheme');
+    const active = findActiveTheme();
+    const name = active?.name;
     const customizations = vscode.workspace.getConfiguration('editor').get<unknown>('tokenColorCustomizations');
-    const key = `${name ?? ''}\n${JSON.stringify(customizations ?? null)}`;
+    const key = `${name ?? ''}\n${active?.file ?? ''}\n${JSON.stringify(customizations ?? null)}`;
     if (cached && cached.key === key) {
       return cached.colors;
     }
-    const file = name ? findThemeFile(name) : undefined;
-    const themeRules = file ? await readThemeRules(file) : [];
+    const themeRules = active ? await readThemeRules(active.file) : [];
     const colors = resolveSqlColors([...themeRules, ...customizationRules(customizations, name)]);
     cached = { key, colors };
     return colors;

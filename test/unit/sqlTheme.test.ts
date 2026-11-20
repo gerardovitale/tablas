@@ -1,5 +1,6 @@
 import * as assert from 'assert';
 import {
+  candidateThemeNames,
   customizationRules,
   isHexColor,
   parseJsonc,
@@ -213,5 +214,44 @@ describe('sqlThemeMessage', () => {
     const message = sqlThemeMessage({ keyword: '#c586c0' });
     assert.deepStrictEqual(message, { type: 'sql-theme', colors: { keyword: '#c586c0' } });
     assert.deepStrictEqual(JSON.parse(JSON.stringify(message)), message);
+  });
+});
+
+describe('candidateThemeNames', () => {
+  const base = {
+    colorTheme: 'Light 2026',
+    preferredDarkColorTheme: 'Dark 2026',
+    preferredLightColorTheme: 'Light 2026',
+    preferredHighContrastColorTheme: 'Default High Contrast',
+    preferredHighContrastLightColorTheme: 'Default High Contrast Light',
+  };
+
+  it('uses the setting itself when the scheme is not auto-detected', () => {
+    assert.deepStrictEqual(candidateThemeNames({ ...base, autoDetectColorScheme: false }, 'dark'), ['Light 2026']);
+    assert.deepStrictEqual(candidateThemeNames({ colorTheme: 'One Dark Pro' }, 'dark'), ['One Dark Pro']);
+  });
+
+  it('prefers the matching preferred theme when auto-detecting (colorTheme holds the other one)', () => {
+    // The bug: a dark window with colorTheme still "Light 2026" must resolve Dark 2026 first.
+    assert.deepStrictEqual(candidateThemeNames({ ...base, autoDetectColorScheme: true }, 'dark'), ['Dark 2026', 'Light 2026']);
+    assert.deepStrictEqual(candidateThemeNames({ ...base, autoDetectColorScheme: true }, 'light'), ['Light 2026']);
+  });
+
+  it('treats autoDetectColorScheme as off unless it is exactly true', () => {
+    assert.deepStrictEqual(candidateThemeNames({ ...base, autoDetectColorScheme: 'yes' }, 'dark'), ['Light 2026']);
+  });
+
+  it('uses the high-contrast preferences unless autoDetectHighContrast is turned off', () => {
+    assert.deepStrictEqual(candidateThemeNames(base, 'high-contrast'), ['Default High Contrast', 'Light 2026']);
+    assert.deepStrictEqual(candidateThemeNames(base, 'high-contrast-light'), ['Default High Contrast Light', 'Light 2026']);
+    assert.deepStrictEqual(candidateThemeNames({ ...base, autoDetectHighContrast: false }, 'high-contrast'), ['Light 2026']);
+  });
+
+  it('drops missing, empty and non-string names and duplicates', () => {
+    assert.deepStrictEqual(candidateThemeNames({ autoDetectColorScheme: true, preferredDarkColorTheme: '', colorTheme: 5 }, 'dark'), []);
+    assert.deepStrictEqual(
+      candidateThemeNames({ autoDetectColorScheme: true, preferredDarkColorTheme: 'X', colorTheme: 'X' }, 'dark'),
+      ['X'],
+    );
   });
 });
