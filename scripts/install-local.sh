@@ -26,26 +26,20 @@ if $PUBLISH_HELP; then
 ║           Tablas — VS Code Marketplace Publishing Guide          ║
 ╚══════════════════════════════════════════════════════════════════╝
 
-Prerequisites (one-time setup):
-  1. Create a publisher account at https://marketplace.visualstudio.com/manage
-     Publisher ID must match package.json → "publisher": "gerardovitale"
+Publishing is done by GitHub Actions, not from this machine (see PUBLISHING.md):
 
-  2. Generate a Personal Access Token (PAT):
-     Azure DevOps → User Settings → Personal Access Tokens
-     Scope: Marketplace → Manage
-
-  3. Log in once:
-       vsce login gerardovitale
-     (paste your PAT when prompted — stored in system keychain)
+  - Publisher account: https://marketplace.visualstudio.com/manage, publisher id
+    must match package.json -> "publisher": "gerardovitale".
+  - Trusted Publishing policy on that publisher (Trusted Publishing tab): GitHub
+    Actions, repository gerardovitale/tablas, workflow publish.yml. No Personal
+    Access Token is needed (global Azure DevOps PATs are retired on 2026-12-01).
 
 To publish a new version:
-  a. Bump version in package.json (e.g. 0.1.0 → 0.2.0)
+  a. Bump version in package.json (e.g. 0.1.0 -> 0.2.0)
   b. Update CHANGELOG.md (required by vsce)
-  c. Run:
-       npm run compile:production
-       vsce publish
-     Or publish a pre-built vsix:
-       vsce publish --packagePath tablas-0.2.0.vsix
+  c. Push main and wait for the "Package" workflow to be green
+  d. GitHub -> Actions -> "Publish" -> Run workflow, first with "publish"
+     unticked (build + test only), then ticked.
 
 Marketplace assets to prepare before first publish:
   - README.md        (shown on the extension's Marketplace page)

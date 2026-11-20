@@ -1,0 +1,55 @@
+name: Publish
+
+# Publishes the per-platform .vsix files to the Visual Studio Marketplace with Trusted Publishing
+# (GitHub OIDC; no stored token). The Marketplace policy "Release workflow" on publisher
+# `gerardovitale` names THIS file, so the `vsce publish --oidc` step must stay in it: the policy
+# does not accept a token minted by a different workflow.
+#
+# Manual only. A run always builds and smoke-tests every target (package.yml); it publishes only
+# when `publish` is ticked and the run is on main. Leave it unticked to rehearse. A published
+# version cannot be replaced, so bump "version" in package.json first and keep CHANGELOG.md in step.
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish to the Marketplace (leave unticked to only build and test)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/package.yml
+
+  publish:
+    name: publish to the Marketplace
+    needs: build
+    if: ${{ inputs.publish && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # lets vsce exchange GitHub's OIDC token for a short-lived Marketplace one
+    env:
+      EXPECTED_TARGETS: '8'
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: vsix-*
+          merge-multiple: true
+          path: vsix
+      - name: check every target was built
+        run: |
+          ls -l vsix
+          count=$(ls vsix/*.vsix | wc -l)
+          if [ "$count" -ne "$EXPECTED_TARGETS" ]; then
+            echo "expected $EXPECTED_TARGETS .vsix files, found $count; not publishing" >&2
+            exit 1
+          fi
+      - name: publish
+        run: npx --yes @vscode/vsce@4.1.0 publish --oidc --packagePath vsix/*.vsix

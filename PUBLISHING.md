@@ -6,8 +6,8 @@ Tracks remaining work before first `vsce publish`. See `scripts/install-local.sh
 
 - [x] **`icon.png`** — 256×256 PNG at repo root, generated via `scripts/generate-icon.py` (placeholder table-grid glyph; swap for real branding before publish if wanted).
 - [ ] **Push `main` to GitHub** — `origin` is `git@github.com:gerardovitale/tablas.git` but local commits are unpushed. `package.json`'s `repository.url` points there, and `.github/workflows/package.yml` (per-platform builds) only runs once it is pushed.
-- [ ] **Publisher account** — create at https://marketplace.visualstudio.com/manage, publisher id `gerardovitale` (must match `package.json`).
-- [ ] **PAT + login** — Azure DevOps PAT (scope: Marketplace → Manage), then `vsce login gerardovitale`.
+- [x] **Publisher account** — publisher id `gerardovitale` exists (matches `package.json`; the id cannot be changed).
+- [x] **Trusted Publishing policy** — "Release workflow" on that publisher: GitHub Actions, owner `gerardovitale`, repository `tablas`, workflow `publish.yml`, no environment. No PAT is used: Azure DevOps retires global PATs on 2026-12-01, and `.github/workflows/publish.yml` publishes with `vsce publish --oidc` (a short-lived token exchanged from GitHub's OIDC token). The policy only accepts tokens from *that* workflow file, so do not move the publish step to another file or rename it without editing the policy. (If the repo is private, the policy must be used within 48 hours of creation.)
 - [ ] **DuckDB multi-platform strategy** — `.github/workflows/package.yml` builds each target on a runner of its own platform (the two Alpine targets in a `node:20-alpine` container), runs `scripts/smoke-package.js` (layout check plus opening a DuckDB and a SQLite file from the packaged layout) and uploads `tablas-<target>.vsix` as an artifact; it does not publish. Needs a green run on all 8 targets (runner labels `macos-15-intel`, `windows-11-arm`, `ubuntu-24.04-arm` have not been exercised yet, and the arm runners are only free for public repositories). `scripts/package-targets.sh` remains the local cross-packaging alternative, but it cannot prove a foreign `.vsix` loads.
 
 ## Before hitting publish
@@ -20,16 +20,14 @@ Tracks remaining work before first `vsce publish`. See `scripts/install-local.sh
 
 ## Publish
 
-Take the per-target `.vsix` files from the package workflow's artifacts (or build them with `scripts/package-targets.sh`), then publish each:
+Nothing is published from a laptop. A published version cannot be replaced, so before the run:
 
-```bash
-scripts/package-targets.sh          # writes dist-vsix/tablas-<version>-<target>.vsix
-vsce publish --packagePath dist-vsix/tablas-0.1.0-darwin-arm64.vsix
-vsce publish --packagePath dist-vsix/tablas-0.1.0-darwin-x64.vsix
-# ...repeat per target in dist-vsix/
-```
+1. Bump `version` in `package.json` and give `CHANGELOG.md` a dated section for it (the first publish is `0.1.0`: turn `[Unreleased]` into `[0.1.0]`).
+2. Push `main`, and wait for the **Package** workflow to be green on all 8 targets.
+3. Actions -> **Publish** -> *Run workflow* on `main`. First run it with **publish unticked**: it rebuilds and smoke-tests every target (and uploads the `.vsix` files as artifacts) without publishing.
+4. Run it again with **publish ticked**. It checks that all 8 `.vsix` files exist, then runs `npx @vscode/vsce publish --oidc --packagePath vsix/*.vsix`.
 
-`scripts/package-targets.sh --skip-build` reuses an existing `dist/` (skips `compile:production`); pass specific targets (e.g. `scripts/package-targets.sh linux-x64 win32-x64`) to build a subset.
+Not yet exercised: whether `vsce publish --oidc` accepts `--packagePath` with several platform-specific `.vsix` files (the docs only show `publish --oidc` building the package itself). If the first real run rejects it, change that one step, for example to one `--packagePath` call per file or `vsce publish --oidc --target <t>` per target after a build.
 
 ## Later / nice-to-have
 

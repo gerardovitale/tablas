@@ -10,6 +10,8 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # publish.yml calls this to build the .vsix files it publishes.
+  workflow_call:
 
 permissions:
   contents: read
