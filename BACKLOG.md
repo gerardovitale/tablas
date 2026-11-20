@@ -9,22 +9,20 @@ Current milestone: **first Marketplace publish** (re-prioritised 2026-11-20).
 
 ## Release order
 
-1. **P-3** per-platform `.vsix` builds.
+1. **P-3** open a non-macOS `.vsix` in a real VS Code window (CI already builds and smoke-tests all 8 targets).
 2. Publish (see `PUBLISHING.md`). Then **T-1** column sort and **T-2** in-table find.
 
 The real-window smoke test (V-1) passed on 2026-11-20 in the installed extension: type icons, virtualization, selection and copy, filtering, the SQL box under the strict CSP and undo/redo all behaved. It found one bug (SQL colours taken from the wrong theme with an auto-detected colour scheme, fixed in `9011d97`) and nothing else.
 
 ## Packaging and marketplace
 
-### P-3 · Get the per-platform package workflow green on real runners · P1 · S
+### P-3 · Open a non-macOS `.vsix` in a real VS Code window before publishing · P1 · S
 
-`.github/workflows/package.yml` builds one `.vsix` per target on a runner of its own platform (the two Alpine targets inside `node:20-alpine`), runs `scripts/smoke-package.js` (layout check, then opening a DuckDB and a SQLite file from the packaged layout, which covers the bundled `detect-libc` and musl binding choice) and uploads each `.vsix`. It has only been run through the smoke script on darwin-arm64; the workflow itself has never run.
+`.github/workflows/package.yml` builds one `.vsix` per target on a runner of its own platform (the two Alpine targets inside `node:20-alpine`) and smoke-tests each: layout (about 16 files, one native package matching the OS/arch/libc) and opening a DuckDB and a SQLite file from the packaged layout. The first run (2026-11-20, commit a604f14) was green on all 8 targets, so the runner labels (`macos-15-intel`, `windows-11-arm`, `ubuntu-24.04-arm`) work and the bundled `detect-libc` picks the musl binding on Alpine. What no CI step does is start VS Code.
 
 Acceptance:
-- Push `main`, run the workflow, and fix what the real runners show. Runner labels `macos-15-intel` (darwin-x64), `windows-11-arm` and `ubuntu-24.04-arm` are unverified, and the arm runners are free only for public repositories; drop or replace a target if its runner is not available.
-- All kept targets are green, with `vsix-<target>` artifacts.
-- One non-macOS `.vsix` artifact (for example `linux-x64` or `win32-x64`) is installed in a real VS Code window and opens a DuckDB file; the CI smoke test does not start VS Code.
-- Decide which targets `PUBLISHING.md` publishes (all 8, or only the common ones) and update its steps.
+- Download one non-macOS artifact (for example `vsix-linux-x64` or `vsix-win32-x64`) from a Package run, install it in a real VS Code on that platform (or a VM / dev container), and open a DuckDB file and a CSV.
+- The first `Publish` run (see `PUBLISHING.md`) shows whether `vsce publish --oidc` accepts `--packagePath` with the 8 platform `.vsix` files; fix that step if not.
 
 ## Column filtering follow-ups
 
