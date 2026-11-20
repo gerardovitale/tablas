@@ -148,6 +148,36 @@ Each statement is `prepare`d to learn its type (binding, which for `read_csv`/re
 
 A refresh re-runs the last query even if the previous run took most of the 30 s budget, and each run holds the connection queue (table switches, filters and stats wait behind it). Now at most one re-run waits behind a running query. Acceptance: skip the automatic re-run when the last run took longer than a few seconds and show a "Run again" hint instead.
 
+### Q-12 · The SQL box should open on `select * from <table> limit 5` · P2 · S
+
+Today the box opens on the remembered query (`MultiTableData.lastQuery`, kept per file in `workspaceState`), and only when there is none on `suggestQuery()` in `src/duckdbParser.ts`, which is `SELECT * FROM <table> LIMIT 100`. Wanted: the first time the box opens it always holds `select * from <the table the file was opened on> limit 5` (qualified/quoted as `quotedTableName` does).
+
+Decide first (open question): "first time" per panel open (every reopen of the file starts from the suggestion, remembered queries then only survive refreshes), or only the very first time ever for that file. Per panel open is the simpler reading.
+
+Acceptance:
+- Change `suggestQuery` to the `LIMIT 5` form (lower-case keywords if the user wants that exact casing; the highlighter does not care) and update its unit test and the README/CLAUDE.md "SQL box" text.
+- Apply the chosen "first time" rule in `main.js` (`queryText = lastQuery || querySuggestion`, ~line 2388) and in the host's `rememberedQuery`; if remembered queries stop being restored, drop `tablas.lastQuery:*` or keep it for the refresh path only (see Q-7).
+- If the shown table changes before the user typed anything, the suggestion follows it; once the user edited the text it does not.
+
+### Q-13 · The SQL colors do not match VS Code's `.sql` editor · P2 · M
+
+The palette resolved from the theme (`src/sqlTheme.ts`, `SQL_TOKEN_SCOPES`, the fallbacks in `media/styles.css`) looks off next to a real `.sql` file. Probable causes to check, in this order:
+- The tokenizer's classes are coarser than the SQL grammar's: VS Code (the `sql` grammar) colors DML/DDL keywords (`keyword.other.DML.sql`, `keyword.other.DDL.create.II.sql`, `storage.type.sql`), data types, `constant.language`, operators, numbers and `variable`/`entity.name.function` differently, and plain identifiers/columns keep the editor foreground. Compare token by token with the same query in a `.sql` file (Developer: Inspect Editor Tokens and Scopes) and list which scope each of our classes should really use.
+- Scope matching is a simplification of TextMate's (no parent selectors beyond `source.sql`, no `-`/`|`); a theme rule like `source.sql keyword.other` or an exclusion may pick a different color in VS Code.
+- Semantic highlighting and `editor.semanticTokenColorCustomizations` are not read; the built-in SQL has no semantic provider, so this is probably not it.
+- The dark/light fallbacks (used when no theme file resolves, e.g. built-in themes in the app bundle) may not equal Dark+/Light+; verify `findThemeFile` finds built-in themes (`vscode.extensions.all` includes the `theme-defaults` extensions), and that the high-contrast variants fall back correctly.
+
+Acceptance: for Dark+, Light+, One Dark Pro and a high-contrast theme, a sample query (keywords, functions, types, strings, numbers, comments, quoted identifiers, operators) shows the same colors as a `.sql` editor tab, checked side by side in a real VS Code window (V-1). Add the finer token classes if needed (extend `SQL_TOKEN_CLASSES`, the tokenizer, the CSS variables and the tests together).
+
+### Q-14 · Cmd/Ctrl+Z and Cmd/Ctrl+Shift+Z must work in the SQL box · P2 · S
+
+The box is a native `<textarea>`, so undo/redo is expected to work, but it does not in the installed extension (not yet reproduced; check in a real window first). Suspects:
+- VS Code intercepts the key in the webview and runs its own undo (the editor's, not the textarea's); the keydown handler (`main.js` ~2490) may need to let the key through, or call `document.execCommand('undo'|'redo')` itself on Cmd/Ctrl+Z and Cmd/Ctrl+Shift+Z (Ctrl+Y on Windows/Linux).
+- The textarea's value is replaced from script (a refresh rebuilding the box in `renderQueryPanel`, the suggestion, any `input.value = ...`), which clears the browser's undo stack; keep the same element across re-renders or keep our own history.
+- Any future completion insertion (Q-3) must go through `execCommand('insertText')` (or `setRangeText` plus an input event) so accepted suggestions stay undoable.
+
+Acceptance: type, Cmd+Z undoes by word/chunk and Cmd+Shift+Z redoes, also after a refresh of the file and after Run; test what can be tested in jsdom (the handler), and verify the rest in the installed extension (V-1).
+
 ### Q-10 · The comment-stripping regex is quadratic on an unterminated `/*` · P3 · S
 
 The statement splitter/classifier in the SQL path strips comments with a regex that backtracks on a `/*` that never closes: a 100k-character paste blocks the extension host for about 0.8 s per Run. Acceptance: replace it with a single forward scan (like `tokenizeSql` in the webview), with a test on a 100k `/*` input that finishes in milliseconds.
@@ -237,6 +267,25 @@ A right-click menu on the selection (Copy, Copy with headers, Copy as CSV/JSON/M
 ### S-3 · A selection is lost when a refresh re-applies a filter · P3 · S
 
 `restoreReloadState` restores the cell selection only when no filter is active, because the rows are swapped again when the filter answers (`showRows` resets the selection). Acceptance: carry it through that swap when the table, headers and the filter text are unchanged.
+
+## Activity bar and side view
+
+### A-1 · Design a first version of an activity bar icon and a Primary Side Bar view · P3 · M · design first, then build
+
+Tablas has no presence in the Activity Bar today; it only appears when a data file is opened. Wanted: an icon in the Activity Bar that opens a Tablas view in the Primary Side Bar (the one VS Code toggles with Cmd/Ctrl+B).
+
+Design questions to settle before building (write the answers into this item or a short design note):
+- **What the view shows.** Candidates: the data files found in the workspace (`.csv`, `.parquet`, `.xlsx`, `.db`/`.sqlite`, `.duckdb`) grouped by folder or format, with a filter box; for a file that is open, its tables/sheets and columns with type icons (reusing the badges), so one can jump to a table or copy a column name; recent files; for dbt projects, the models with their built tables (ties into D-1/D-4). Pick a small first slice, not all of them.
+- **Tree view or webview view.** A native `TreeView` (`contributes.views`, `TreeDataProvider`) is cheap, themed and accessible, and fits a file/table list. A `WebviewView` allows the same rendering as the editor but costs CSP, theming and state work. Likely: tree view first.
+- **Scanning cost.** Use `workspace.findFiles` with exclusions (`node_modules`, `.git`, `target`), a file watcher for changes, and never open or parse a file just to list it; a table list for an open DuckDB/SQLite file comes from the live handle the editor already holds.
+- **Actions.** Click opens the file with the right viewer (`vscode.openWith`), a table node opens/selects it (the reveal flow in `DuckdbEditorProvider.revealTable`), context menu: Reveal in Explorer, Copy path, Refresh.
+- **Icon.** A monochrome 24x24 SVG that follows the theme (single `currentColor` path, like codicons), plus the colored `icon.png` the Marketplace still needs (see Packaging); a table/grid glyph that is distinct from the built-in Explorer and Search icons. Check it at 16/24 px in dark, light and high-contrast.
+- **Empty and large workspaces.** Message with a "Open a data file" action when nothing is found; a cap and a "N more" node for huge trees; no activation cost (activate on view open, not at startup).
+
+Acceptance for this task (design, not the full feature):
+- A short written design (content of the view, tree vs webview, data sources, actions, empty states) with a mockup or ASCII sketch.
+- A draft icon SVG checked in the three theme kinds.
+- A follow-up build task, sized, with `package.json` contribution points named (`viewsContainers.activitybar`, `views`, `commands`, `menus`, `activationEvents`).
 
 ## Checks not done yet
 
