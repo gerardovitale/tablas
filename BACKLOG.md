@@ -10,8 +10,7 @@ Current milestone: **first Marketplace publish** (re-prioritised 2026-11-20).
 ## Release order
 
 1. **P-3** per-platform `.vsix` builds.
-2. **F-6** uncached re-parse stall (can freeze the extension host).
-3. Publish (see `PUBLISHING.md`). Then **T-1** column sort and **T-2** in-table find.
+2. Publish (see `PUBLISHING.md`). Then **T-1** column sort and **T-2** in-table find.
 
 The real-window smoke test (V-1) passed on 2026-11-20 in the installed extension: type icons, virtualization, selection and copy, filtering, the SQL box under the strict CSP and undo/redo all behaved. It found one bug (SQL colours taken from the wrong theme with an auto-detected colour scheme, fixed in `9011d97`) and nothing else.
 
@@ -45,15 +44,6 @@ Acceptance:
 Acceptance:
 - A filter-specific reader uses `findRow`/`findCell` and treats a missing cell as `''`, with the same text as `stringifyXlsxCell` for existing cells.
 - A test on a sparse sheet shows the workbook's cell count is unchanged after filtering.
-
-### F-6 · Uncached CSV and Parquet re-parse the whole file on every keystroke pause · P1 · M
-
-Tables above `maxCachedCells` (5M) are re-read and re-parsed on each debounced request, synchronously for CSV. `maxCells` (20M) was sized for stats, not for parse plus filter, so one request can block the extension host for seconds.
-
-Acceptance:
-- Measure parse plus filter time at 5M, 10M and 20M cells.
-- Pick caps (lower the uncached limit, raise the cache limit, or yield during the work) so the worst case is near the SQLite budget of about 1.3 s.
-- Update `filterLimits` and its comment with the measurements.
 
 ### F-7 · DuckDB filtering runs four statements and scans twice · P3 · M
 

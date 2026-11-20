@@ -30,12 +30,22 @@ import type { FilterError, FilterMessage, FilterPayload, FilterRequest } from '.
  * huge fixtures. Production code never writes to it.
  */
 export const filterLimits = {
-  /** rows x columns above which CSV/XLSX/Parquet filtering refuses (same as the stats cap). */
-  maxCells: 20_000_000,
+  /**
+   * rows x columns above which CSV/XLSX/Parquet filtering refuses. Parsing is the cost, not
+   * filtering: reading a table into string rows is synchronous on the shared extension host and
+   * measured at ~0.13 us per cell for both CSV (Papa) and Parquet (hyparquet), 10 columns:
+   * 5M cells 0.7 s / ~250-300 MB heap, 10M 1.3-1.4 s / ~600-860 MB, 20M 2.7-2.8 s / ~1.6-1.8 GB,
+   * while the filter itself is under 0.1 s even at 20M. A table above `maxCachedCells` is
+   * re-parsed on every debounced request, so this is the worst stall one request can cause: 10M
+   * keeps it near the SQLite budget below (~1.3 s). (Stats use a higher cap because they run once.)
+   */
+  maxCells: 10_000_000,
   /**
    * Tables up to this many cells keep their parsed string rows on the document
    * while a filter is active, so typing in a filter box doesn't re-parse the
-   * file on every keystroke. Larger ones are re-parsed per request.
+   * file on every keystroke (the first request pays the parse once, then each
+   * request is ~25 ms at 5M cells). Larger ones are re-parsed per request.
+   * Raising it trades heap held for as long as a filter is set (see above).
    */
   maxCachedCells: 5_000_000,
   /**
