@@ -12,7 +12,7 @@
   },
   "engines": {
     "node": ">=20",
-    "vscode": "^1.74.0"
+    "vscode": "^1.90.0"
   },
   "categories": [
     "Data Science",
@@ -33,6 +33,15 @@
   "activationEvents": [
     "workspaceContains:**/dbt_project.yml"
   ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Files open the same way in an untrusted workspace (their content is always treated as untrusted). A workspace cannot change how many rows are loaded.",
+      "restrictedConfigurations": [
+        "tablas.maxRows"
+      ]
+    }
+  },
   "main": "./dist/extension.js",
   "contributes": {
     "customEditors": [

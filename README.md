@@ -26,7 +26,7 @@ VS Code has no first-class way to *look at* structured data files. JetBrains edi
 
 ## Current status
 
-CSV, Parquet, SQLite, DuckDB, and Excel (`.xlsx`), read-only, installed locally (not yet on the Marketplace). Publishing there is the near-term goal — see `scripts/install-local.sh --publish-help` for the checklist. See `CLAUDE.md` for architecture and how the pieces fit together if you're changing code here.
+CSV, Parquet, SQLite, DuckDB, and Excel (`.xlsx`), read-only. Requires VS Code 1.90 or newer. Install it from the Visual Studio Marketplace (search for **Tablas**, publisher `gerardovitale`); it works in untrusted workspaces too, except that a workspace cannot change `tablas.maxRows`. To build from source, `npm run install:local` packages the extension and installs it into your VS Code. See `CLAUDE.md` for architecture and how the pieces fit together if you're changing code here.
 
 ## Development
 
@@ -38,12 +38,14 @@ npm run test:unit    # fast unit tests + c8 coverage report, no Electron
 npm test             # full suite: compile + typecheck + vscode-test (unit + integration)
 ```
 
-`npm run install:local` builds, tests, packages, and installs the extension into your local VS Code. See `scripts/install-local.sh --publish-help` for Marketplace publishing steps.
+`npm run install:local` builds, tests, packages, and installs the extension into your local VS Code. Releases are built per platform and published from GitHub Actions; see `PUBLISHING.md` (or `scripts/install-local.sh --publish-help`) for the steps.
 
 ### Test gates
 
-`npm install` installs [husky](https://typicode.github.io/husky/) git hooks (no GitHub remote is configured yet, so this is the enforcement point until CI is wired up):
+`npm install` installs [husky](https://typicode.github.io/husky/) git hooks:
 - **pre-commit**: `lint` + `check-types` + `test:unit` — fast, no Electron.
 - **pre-push**: full `npm test`, including the Electron-backed integration suite.
+
+On GitHub, `.github/workflows/package.yml` runs lint, type checks and the unit tests on every push, and builds and smoke-tests one `.vsix` per platform.
 
 Coverage (`npm run test:unit`, via `c8`, config in `.c8rc.json`) only instruments the unit suite. `src/csvEditorProvider.ts` and `src/extension.ts` are explicitly excluded from it: both `import 'vscode'`, a module that only exists inside a real Extension Development Host, so they can only ever be exercised by the integration suite (which `c8` can't instrument — it runs in a separate Electron process). Everything else under `src/` uses `all: true`, so a new unit-testable file with no tests shows up as 0% rather than being silently absent from the report.

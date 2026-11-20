@@ -259,6 +259,12 @@ Acceptance for this task (design, not the full feature):
 - A draft icon SVG checked in the three theme kinds.
 - A follow-up build task, sized, with `package.json` contribution points named (`viewsContainers.activitybar`, `views`, `commands`, `menus`, `activationEvents`).
 
+## Dependencies
+
+### DEP-1 · `npm audit` reports 3 issues in `exceljs`'s transitive dependencies · P3 · S · accepted, revisit on an `exceljs` update
+
+`npm audit --omit=dev` (2026-11-20): `brace-expansion` (high, via `exceljs` -> `archiver` -> `glob`/`minimatch`) and `uuid` (moderate, `exceljs` -> `uuid`). Neither is reachable: those are zip-writing and `uuid.v4()` code paths (the `uuid` advisory is about v3/v5/v6 with a `buf` argument), Tablas never writes zips, and file contents never reach a glob. The only audit fix is `--force`, which downgrades `exceljs` to 3.4.0. Acceptance: when a newer `exceljs` (or a replacement) drops them, update and re-run the audit; until then do not "fix" it with `--force`.
+
 ## Ideas for later (not started, ranked)
 
 Column sort and in-table find were promoted to T-1 and T-2.
