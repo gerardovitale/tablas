@@ -142,24 +142,13 @@ If the host never answers (for example `document.handle` is missing), the status
 
 Each statement is `prepare`d to learn its type (binding, which for `read_csv`/remote sources can mean sniffing or fetching), then `streamAndReadUntil(sql)` parses and binds the whole text again. A refused `EXPORT DATABASE '<dir>'` still creates `<dir>` while binding. Acceptance: classify without binding, or run the prepared statements instead of re-parsing, and refuse by leading keyword before preparing.
 
-### Q-7 · Per-file query and last-table entries are never pruned · P3 · S
+### Q-7 · Per-file last-table entries are never pruned · P3 · S
 
-`tablas.lastQuery:<uri>` (up to 100k characters) and `tablas.lastTable:<uri>` stay in `workspaceState` for every file ever opened. Q-12 removes the `lastQuery` persistence, so this shrinks to `lastTable` (plus clearing any old `lastQuery:*` keys once). Acceptance: cap the number of remembered files (drop the least recently used) or drop entries for files that no longer exist.
+`tablas.lastTable:<uri>` stays in `workspaceState` for every file ever opened. (The SQL box no longer stores query text, so there are no `tablas.lastQuery:*` keys to prune; no build that wrote them was ever published.) Acceptance: cap the number of remembered files (drop the least recently used) or drop entries for files that no longer exist.
 
 ### Q-8 · The auto re-run after a refresh ignores how slow the query is · P3 · S
 
 A refresh re-runs the last query even if the previous run took most of the 30 s budget, and each run holds the connection queue (table switches, filters and stats wait behind it). Now at most one re-run waits behind a running query. Acceptance: skip the automatic re-run when the last run took longer than a few seconds and show a "Run again" hint instead.
-
-### Q-12 · The SQL box should open on `select * from <table> limit 5` · P2 · S
-
-Today the box opens on the remembered query (`MultiTableData.lastQuery`, kept per file in `workspaceState`), and only when there is none on `suggestQuery()` in `src/duckdbParser.ts`, which is `SELECT * FROM <table> LIMIT 100`. Wanted: the first time the box opens it always holds `select * from <the table the file was opened on> limit 5` (qualified/quoted as `quotedTableName` does).
-
-Decided (2026-11-20): **every panel open** starts from the suggestion; a remembered query only survives refreshes of the open panel (the webview already keeps its text in module state across re-renders).
-
-Acceptance:
-- Change `suggestQuery` to `select * from <table> limit 5` (lower-case keywords as written above; the highlighter does not care) and update its unit test and the README/CLAUDE.md "SQL box" text and the CHANGELOG line that says `LIMIT 100`.
-- Stop restoring `tablas.lastQuery:<uri>` on open: drop `rememberedQuery`/`MultiTableData.lastQuery` and the `workspaceState` writes (`main.js` `queryText = lastQuery || querySuggestion`, ~line 2388), unless a test shows the refresh path needs them.
-- If the shown table changes before the user typed anything, the suggestion follows it; once the user edited the text it does not.
 
 ### Q-13 · The SQL colours are coarser than VS Code's `.sql` editor · P3 · M
 

@@ -1474,14 +1474,14 @@ describe('duckdbRunQuery (the read-only SQL box)', () => {
   describe('suggestQuery', () => {
     it('selects from the table as the file needs it written', async () => {
       await withQueryHandle('schemas.duckdb', async (handle) => {
-        assert.strictEqual(suggestQuery(handle, 'raw_events'), 'SELECT * FROM "raw_events" LIMIT 100');
+        assert.strictEqual(suggestQuery(handle, 'raw_events'), 'select * from "raw_events" limit 5');
         assert.strictEqual(
           suggestQuery(handle, 'main_marts.orders'),
-          'SELECT * FROM "main_marts"."orders" LIMIT 100'
+          'select * from "main_marts"."orders" limit 5'
         );
         assert.strictEqual(
           suggestQuery(handle, 'my schema.odd "name"'),
-          'SELECT * FROM "my schema"."odd ""name""" LIMIT 100'
+          'select * from "my schema"."odd ""name""" limit 5'
         );
       });
     });

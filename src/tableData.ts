@@ -137,9 +137,10 @@ export interface MultiTableData {
    * these flags, never on the file format, so it stays format-agnostic.
    */
   capabilities?: SourceCapabilities;
-  /** The SQL last run from the query box for this file; prefills it. */
-  lastQuery?: string;
-  /** A starter query for the selected table, when the source can run queries. */
+  /**
+   * A starter query for the selected table, when the source can run queries. The SQL box opens
+   * on it (and follows the table until the user edits the text); no query text is remembered.
+   */
   querySuggestion?: string;
   /**
    * Column descriptions for the selected table (from dbt's `manifest.json` when the

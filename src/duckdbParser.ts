@@ -753,9 +753,9 @@ function refusal(statementType: StatementType): string {
   );
 }
 
-/** `SELECT * FROM <table> LIMIT 100`, with the table qualified as the file needs it. */
+/** `select * from <table> limit 5`, with the table qualified as the file needs it. */
 export function suggestQuery(handle: DuckdbHandle, tableName: string): string {
-  return `SELECT * FROM ${quotedTableName(handle, tableName)} LIMIT 100`;
+  return `select * from ${quotedTableName(handle, tableName)} limit 5`;
 }
 
 /**

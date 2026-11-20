@@ -1735,6 +1735,9 @@
   const MAX_QUERY_LENGTH = 100000; // mirrors queryLimits.maxSqlLength in src/duckdbParser.ts
   let queryMode = false;
   let queryText = '';
+  // Whether the user has changed the box. Until then it holds the host's suggestion for the table
+  // being viewed (re-read every time the box opens); after that the text is theirs and is kept.
+  let queryTextEdited = false;
   /** The SQL that produced `queryResult`; what a refresh re-runs (not half-typed edits). */
   let queryRunSql;
   /** Webview-wide `run-query` counter; only a reply carrying the newest number is applied. */
@@ -2384,8 +2387,8 @@
     if (queryMode === on || !lastMultiOutcome || !lastMultiOutcome.success) { return; }
     if (on) {
       savedTableState = captureReloadState();
-      if (queryText === '') {
-        queryText = lastMultiOutcome.data.lastQuery || lastMultiOutcome.data.querySuggestion || '';
+      if (!queryTextEdited) {
+        queryText = lastMultiOutcome.data.querySuggestion || '';
       }
       focusQueryInput = true;
     }
@@ -2482,7 +2485,7 @@
     const status = el('span', { class: 'query-status', role: 'status' });
     const sync = () => { run.disabled = input.value.trim() === ''; };
     sync();
-    input.addEventListener('input', () => { queryText = input.value; sync(); highlight(); });
+    input.addEventListener('input', () => { queryText = input.value; queryTextEdited = true; sync(); highlight(); });
     input.addEventListener('scroll', () => {
       layer.scrollTop = input.scrollTop;
       layer.scrollLeft = input.scrollLeft;

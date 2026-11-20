@@ -525,43 +525,41 @@ describe('DuckdbEditorProvider Integration', () => {
       assert.strictEqual(await closed.handleRunQuery(unopened, { type: 'run-query', seq: 1, sql: 'SELECT 1' }), undefined);
     });
 
-    it('remembers the query, and offers it again with a suggestion for the shown table', async () => {
+    it('offers a suggestion for the shown table and stores no query text', async () => {
       const { store, context } = stubContext();
       const first = await open('multi-table.duckdb', context);
       try {
         assert.ok(first.outcome.success);
         if (first.outcome.success) {
           assert.deepStrictEqual(first.outcome.data.capabilities, { refresh: true, query: true });
-          assert.strictEqual(first.outcome.data.querySuggestion, 'SELECT * FROM "customer_totals" LIMIT 100');
-          assert.strictEqual(first.outcome.data.lastQuery, undefined);
+          assert.strictEqual(first.outcome.data.querySuggestion, 'select * from "customer_totals" limit 5');
+          assert.ok(!('lastQuery' in first.outcome.data), 'no remembered query is sent');
         }
         await first.provider.handleRunQuery(first.document, { type: 'run-query', seq: 1, sql: 'SELECT count(*) FROM orders' });
-        assert.strictEqual(store.get(queryKey('multi-table.duckdb')), 'SELECT count(*) FROM orders');
+        assert.strictEqual(store.get(queryKey('multi-table.duckdb')), undefined, 'a run is not written to the workspace state');
       } finally {
         first.document.dispose();
       }
       const second = await open('multi-table.duckdb', context);
       try {
-        assert.ok(second.outcome.success && second.outcome.data.lastQuery === 'SELECT count(*) FROM orders');
+        assert.ok(second.outcome.success && !('lastQuery' in second.outcome.data));
+        assert.ok(second.outcome.success && second.outcome.data.querySuggestion === 'select * from "customer_totals" limit 5');
       } finally {
         second.document.dispose();
       }
     });
 
-    it('keeps the last query that ran when a later text is too long to run', async () => {
-      const { store, context } = stubContext();
-      const { provider, document } = await open('multi-table.duckdb', context);
+    it('still refuses a text that is too long to run', async () => {
+      const { provider, document } = await open('multi-table.duckdb');
       const original = queryLimits.maxSqlLength;
       try {
-        await provider.handleRunQuery(document, { type: 'run-query', seq: 1, sql: 'SELECT 1' });
         queryLimits.maxSqlLength = 20;
         const payload = await provider.handleRunQuery(document, {
           type: 'run-query',
-          seq: 2,
+          seq: 1,
           sql: 'SELECT * FROM orders WHERE 1 = 1',
         });
         assert.match(payload?.error ?? '', /too long/);
-        assert.strictEqual(store.get(queryKey('multi-table.duckdb')), 'SELECT 1', 'the good query is not replaced or cleared');
       } finally {
         queryLimits.maxSqlLength = original;
         document.dispose();
@@ -592,7 +590,7 @@ describe('DuckdbEditorProvider Integration', () => {
         const outcome = await provider.handleSelectTable(document, 'main_marts.orders');
         assert.ok(outcome?.success);
         if (outcome?.success) {
-          assert.strictEqual(outcome.data.querySuggestion, 'SELECT * FROM "main_marts"."orders" LIMIT 100');
+          assert.strictEqual(outcome.data.querySuggestion, 'select * from "main_marts"."orders" limit 5');
         }
       } finally {
         document.dispose();

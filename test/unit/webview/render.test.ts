@@ -937,7 +937,7 @@ describe('webview main.js rendering', () => {
             columnCount: 2,
           },
           capabilities: { refresh: true, query: true },
-          querySuggestion: 'SELECT * FROM "a" LIMIT 100',
+          querySuggestion: 'select * from "a" limit 5',
           ...extra,
         },
       };
@@ -987,16 +987,41 @@ describe('webview main.js rendering', () => {
     it('switches to a query box prefilled with the host suggestion, without running anything', () => {
       const { dom, postedMessages } = inSqlMode();
       assert.strictEqual(toggle(dom, 'sql').getAttribute('aria-pressed'), 'true');
-      assert.strictEqual(queryInput(dom).value, 'SELECT * FROM "a" LIMIT 100');
+      assert.strictEqual(queryInput(dom).value, 'select * from "a" limit 5');
       assert.strictEqual(doc(dom).activeElement, queryInput(dom), 'the box is ready to type in');
       assert.strictEqual(doc(dom).querySelector('#csv-table'), null);
       assert.strictEqual(doc(dom).querySelector('.table-picker-trigger'), null, 'the table picker does not apply to SQL');
       assert.strictEqual(runQueries(postedMessages).length, 0);
     });
 
-    it('prefers the last query the user ran over the suggestion', () => {
-      const { dom } = inSqlMode({ lastQuery: 'SELECT count(*) FROM a' });
-      assert.strictEqual(queryInput(dom).value, 'SELECT count(*) FROM a');
+    it('follows the table being viewed until the user edits the box, then keeps their text', () => {
+      const { dom } = loadWebview();
+      sendDuckdbData(dom, warehouse());
+      toggle(dom, 'sql').click();
+      assert.strictEqual(queryInput(dom).value, 'select * from "a" limit 5');
+
+      // Back to Table, on another table: the untouched box offers that table's suggestion.
+      toggle(dom, 'table').click();
+      sendDuckdbData(dom, warehouse({ selectedTable: 'b', querySuggestion: 'select * from "b" limit 5' }));
+      toggle(dom, 'sql').click();
+      assert.strictEqual(queryInput(dom).value, 'select * from "b" limit 5');
+
+      // Once edited, the text is theirs, whatever table is shown later.
+      queryInput(dom).value = 'select count(*) from b';
+      queryInput(dom).dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+      toggle(dom, 'table').click();
+      sendDuckdbData(dom, warehouse({ selectedTable: 'a', querySuggestion: 'select * from "a" limit 5' }));
+      toggle(dom, 'sql').click();
+      assert.strictEqual(queryInput(dom).value, 'select count(*) from b');
+    });
+
+    it('keeps a box the user emptied empty, instead of refilling the suggestion', () => {
+      const { dom } = inSqlMode();
+      queryInput(dom).value = '';
+      queryInput(dom).dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+      toggle(dom, 'table').click();
+      toggle(dom, 'sql').click();
+      assert.strictEqual(queryInput(dom).value, '');
     });
 
     it('runs the text with the Run button and with Ctrl+Enter, numbering each request', () => {
@@ -1006,7 +1031,7 @@ describe('webview main.js rendering', () => {
       queryInput(dom).dispatchEvent(new dom.window.Event('input', { bubbles: true }));
       ctrlEnter(dom, queryInput(dom));
       const sent = runQueries(postedMessages);
-      assert.deepStrictEqual(sent.map((q) => q.sql), ['SELECT * FROM "a" LIMIT 100', 'SELECT 2']);
+      assert.deepStrictEqual(sent.map((q) => q.sql), ['select * from "a" limit 5', 'SELECT 2']);
       assert.ok(sent[1].seq > sent[0].seq);
       assert.strictEqual(queryStatus(dom), 'Running…');
     });
@@ -1049,7 +1074,7 @@ describe('webview main.js rendering', () => {
       const message = doc(dom).querySelector('.query-result p.message.error');
       assert.strictEqual(message?.textContent, 'Catalog Error: Table "x" does not exist');
       assert.strictEqual(queryStatus(dom), 'Failed');
-      assert.strictEqual(queryInput(dom).value, 'SELECT * FROM "a" LIMIT 100');
+      assert.strictEqual(queryInput(dom).value, 'select * from "a" limit 5');
     });
 
     it('ignores a reply that a newer run overtook', () => {
@@ -1111,7 +1136,7 @@ describe('webview main.js rendering', () => {
 
       const sent = runQueries(postedMessages);
       assert.strictEqual(sent.length, 2);
-      assert.strictEqual(sent[1].sql, 'SELECT * FROM "a" LIMIT 100', 'the query behind the result, not the unsent edit');
+      assert.strictEqual(sent[1].sql, 'select * from "a" limit 5', 'the query behind the result, not the unsent edit');
       assert.strictEqual(queryInput(dom).value, 'SELECT 99 -- not run yet');
       assert.ok(doc(dom).querySelector('.query-result #csv-table'), 'the old result stays until the new one arrives');
       assert.strictEqual(queryStatus(dom), 'Running…');

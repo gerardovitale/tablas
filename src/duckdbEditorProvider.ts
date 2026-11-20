@@ -10,7 +10,6 @@ import {
   openDuckdbDatabase,
   readSelectedTable,
   duckdbRunQuery,
-  queryLimits,
   runExclusive,
   suggestQuery,
   type DuckdbHandle,
@@ -53,11 +52,6 @@ function lastTableKey(uri: vscode.Uri): string {
 
 /** How `revealTable` went: shown, or why not (see its doc). */
 export type RevealOutcome = 'shown' | 'missing' | 'unavailable';
-
-/** `workspaceState` key of the SQL last run from the query box for a file. */
-function lastQueryKey(uri: vscode.Uri): string {
-  return `tablas.lastQuery:${uri.toString()}`;
-}
 
 class DuckdbDocument implements vscode.CustomDocument {
   constructor(public readonly uri: vscode.Uri) {}
@@ -481,27 +475,6 @@ export class DuckdbEditorProvider
     }
   }
 
-  private rememberedQuery(document: DuckdbDocument): string | undefined {
-    try {
-      return this.context.workspaceState?.get<string>(lastQueryKey(document.uri));
-    } catch {
-      return undefined;
-    }
-  }
-
-  private rememberQuery(document: DuckdbDocument, sql: string): void {
-    // An over-long text is refused by the runner; it must not replace (or clear)
-    // the last query that did run.
-    if (sql.length > queryLimits.maxSqlLength) {
-      return;
-    }
-    try {
-      void this.context.workspaceState?.update(lastQueryKey(document.uri), sql)?.then(undefined, () => undefined);
-    } catch {
-      // best effort
-    }
-  }
-
   /**
    * First load: reads the file, opens the database, stashes the handle, reads
    * the remembered table (else the first one). Public so an integration test
@@ -613,11 +586,9 @@ export class DuckdbEditorProvider
         : undefined;
     // Without a handle (an empty file so far) there is nothing to query yet.
     const handle = document.handle;
-    const lastQuery = this.rememberedQuery(document);
     return {
       ...data,
       capabilities: { refresh: true, query: handle !== undefined },
-      ...(lastQuery !== undefined && lastQuery !== '' && { lastQuery }),
       ...(handle !== undefined && data.selectedTable !== '' && { querySuggestion: suggestQuery(handle, data.selectedTable) }),
       ...(reloadAt !== undefined && {
         reload: { at: reloadAt, ...(previousRowCount !== undefined && { previousRowCount }) },
@@ -785,9 +756,9 @@ export class DuckdbEditorProvider
    * database (reads only, capped at `tablas.maxRows` rows; see `duckdbRunQuery`)
    * and answers with the rows or the error text. Returns `undefined` (nothing
    * to post) when the database is not open or a newer request overtook this one
-   * while it waited in the connection's queue. The text is kept in the workspace
-   * state so the box can be prefilled next time; it is never run unless the user
-   * asks, except that a refresh re-runs the last query the webview itself sent.
+   * while it waited in the connection's queue. The text is not kept anywhere: the box
+   * opens on a suggestion each time, and the query is never run unless the user asks,
+   * except that a refresh re-runs the last query the webview itself sent.
    * Public so an integration test can call it without a real webview.
    */
   public async handleRunQuery(document: DuckdbDocument, message: RunQueryMessage): Promise<QueryPayload | undefined> {
@@ -795,7 +766,6 @@ export class DuckdbEditorProvider
       return undefined;
     }
     document.querySeq = message.seq;
-    this.rememberQuery(document, message.sql);
     const outcome = await duckdbRunQuery(document.handle, message.sql, getMaxRowsSetting(), {
       shouldRun: () => document.querySeq === message.seq,
     });
