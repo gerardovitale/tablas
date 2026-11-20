@@ -23,7 +23,7 @@ Tracks remaining work before first `vsce publish`. See `scripts/install-local.sh
 
 Nothing is published from a laptop. A published version cannot be replaced, so before the run:
 
-1. Bump `version` in `package.json` and give `CHANGELOG.md` a dated section for it (the first publish is `0.1.0`: turn `[Unreleased]` into `[0.1.0]`).
+1. Bump `version` in `package.json` and give `CHANGELOG.md` a dated section for it. The first release is `0.1.0`, and its section (dated 2026-11-20) is already written: change that date to the day you publish. For later releases, move `[Unreleased]` into a new dated section.
 2. Push `main`, and wait for the **Package** workflow to be green on all 8 targets.
 3. Actions -> **Publish** -> *Run workflow* on `main`. First run it with **publish unticked**: it rebuilds and smoke-tests every target (and uploads the `.vsix` files as artifacts) without publishing.
 4. Run it again with **publish ticked**. It checks that all 8 `.vsix` files exist, then runs `npx @vscode/vsce publish --oidc --packagePath vsix/*.vsix`.
