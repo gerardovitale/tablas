@@ -11,8 +11,9 @@ VS Code has no first-class way to *look at* structured data files. JetBrains edi
 **For dbt + DuckDB (dbt-duckdb) developers:** the build-and-look loop works inside VS Code. A DuckDB file refreshes by itself when `dbt build` finishes (your table, filters and scroll stay), tables in every schema (`staging`, `marts`, …) are in the picker with approximate row counts, a **Table | SQL** switch runs read-only queries against the file, and on a model's `.sql` file **Tablas: Preview dbt Model** (editor title bar, right-click menu, or the command palette) opens the DuckDB file on the table that model built. When the project has a `target/manifest.json`, column descriptions from your dbt docs show in the header tooltips and the column details card.
 
 **Where we're going**, roughly in order:
-1. **Find within a file** — locate matching cells in the currently open table (JetBrains-style in-table search, not just VS Code's text-based Ctrl+F, which doesn't work well on a rendered table). Per-column filtering is already here.
-2. **Basic in-place editing** — edit a cell and persist it back to the source file. This is the point where the editor stops being `CustomReadonlyEditorProvider` and needs real document/edit-model semantics (undo/redo, dirty state, save).
+1. **Column sorting** — click a header to sort the whole table, not just the rows on screen.
+2. **Find within a file** — locate matching cells in the currently open table (JetBrains-style in-table search, not just VS Code's text-based Ctrl+F, which doesn't work well on a rendered table). Per-column filtering is already here.
+3. **Basic in-place editing** — edit a cell and persist it back to the source file. This is the point where the editor stops being `CustomReadonlyEditorProvider` and needs real document/edit-model semantics (undo/redo, dirty state, save).
 
 ## Settings and commands
 

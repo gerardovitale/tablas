@@ -6,11 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Tablas aims to become a JetBrains-style data-file editor for VS Code (think DataGrip's/IntelliJ's built-in table viewer): open a data file, see a real table, search it, edit a cell, done. See `README.md` for the user-facing pitch.
 
-Current stage: local install only (`npm run install:local`, unpublished). Target: publish to the VS Code Marketplace under publisher `gerardovitale`. Keep marketplace-readiness in mind for anything packaging/metadata-related — `package.json` fields (`displayName`, `description`, `categories`, `keywords`, `icon`), `CHANGELOG.md` (required by `vsce`; exists, keep its `[Unreleased]` section current), and an `icon.png` are still outstanding before a first `vsce publish`. See `scripts/install-local.sh --publish-help` for the full publishing checklist.
+Current stage: local install only (`npm run install:local`, unpublished). Target: publish to the VS Code Marketplace under publisher `gerardovitale`. Keep marketplace-readiness in mind for anything packaging/metadata-related. The `package.json` metadata (`displayName`, `description`, `categories`, `keywords`, `icon`), `icon.png` and `CHANGELOG.md` (required by `vsce`; keep its `[Unreleased]` section current) exist. Still outstanding before a first `vsce publish`, in `BACKLOG.md`'s release order: a real-window smoke test (V-1), a stable DuckDB pin (V-2), bundling and trimming the `.vsix` (P-2) and per-platform `.vsix` builds (P-3). See `scripts/install-local.sh --publish-help` for the full publishing checklist.
 
 Today: CSV, Parquet, SQLite (`.db`/`.sqlite`/`.sqlite3`), DuckDB (`.duckdb`/`.ddb`; with live refresh, a read-only SQL box and light dbt support), and Excel (`.xlsx`), read-only. Planned, roughly in order:
-1. **In-table find** — search within the rendered table (not VS Code's plain-text Ctrl+F). Per-column *filtering* has already shipped; see "Column filtering" below.
-2. **Basic cell editing** — writes back to the source file; requires moving off `CustomReadonlyEditorProvider` to a real edit model (dirty state, undo/redo, save).
+1. **Column sort** (`BACKLOG.md` T-1) — host-side over the whole table, like filters.
+2. **In-table find** (T-2) — search within the rendered table (not VS Code's plain-text Ctrl+F). Per-column *filtering* has already shipped; see "Column filtering" below.
+3. **Basic cell editing** — writes back to the source file; requires moving off `CustomReadonlyEditorProvider` to a real edit model (dirty state, undo/redo, save).
 
 Open follow-ups (known gaps in shipped features, perf/cleanup, manual checks not yet done) live in `BACKLOG.md`; when one ships, delete it there and note it in `CHANGELOG.md`.
 
