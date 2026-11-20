@@ -10,7 +10,7 @@ Current milestone: **first Marketplace publish** (re-prioritised 2026-11-20).
 ## Release order
 
 1. **P-3** per-platform `.vsix` builds.
-2. **D-5** manifest stall and **F-6** uncached re-parse stall (both can freeze the extension host).
+2. **F-6** uncached re-parse stall (can freeze the extension host).
 3. Publish (see `PUBLISHING.md`). Then **T-1** column sort and **T-2** in-table find.
 
 The real-window smoke test (V-1) passed on 2026-11-20 in the installed extension: type icons, virtualization, selection and copy, filtering, the SQL box under the strict CSP and undo/redo all behaved. It found one bug (SQL colours taken from the wrong theme with an auto-detected colour scheme, fixed in `9011d97`) and nothing else.
@@ -209,10 +209,6 @@ dbt-duckdb's `path:` lives in `profiles.yml` (often outside the project) and can
 ### D-4 · Preview from the table back to the model · P3 · S
 
 The reverse direction: from a table in the picker, open the model's `.sql` file (`original_file_path` from the manifest).
-
-### D-5 · Reading a big manifest can stall the extension host · P1 · M
-
-`loadDbtManifest` reads the whole file and `JSON.parse`s it synchronously (cap 300 MB, far too high for a shared extension host), on every first load, table switch and reload after the manifest's mtime changes, and the table's first render waits for it. Concurrent callers each parse the same file (no in-flight sharing). Acceptance: lower the cap (around 50 MB), share one in-flight promise per file, and consider posting the rows before the descriptions arrive.
 
 ### D-6 · Descriptions can be missing at startup · P3 · S
 

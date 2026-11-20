@@ -191,6 +191,38 @@ describe('dbt', () => {
       assert.ok('error' in result && result.error === 'too-large');
     });
 
+    it('shares one read between callers that ask while it is running', async () => {
+      const file = path.join(dir, 'manifest.json');
+      fs.writeFileSync(file, JSON.stringify({ nodes: { n: { resource_type: 'model', name: 'a', schema: 's', original_file_path: 'models/a.sql' } } }));
+      const reads: string[] = [];
+      const original = fs.promises.readFile;
+      (fs.promises as { readFile: unknown }).readFile = (...args: unknown[]) => {
+        reads.push(String(args[0]));
+        return (original as (...a: unknown[]) => Promise<unknown>)(...args);
+      };
+      try {
+        const results = await Promise.all([loadDbtManifest(file), loadDbtManifest(file), loadDbtManifest(file)]);
+        assert.ok(results.every((r) => 'index' in r));
+        assert.strictEqual(reads.filter((r) => r === file).length, 1, 'parsed once for three callers');
+        const first = results[0];
+        assert.ok(results.every((r) => 'index' in r && 'index' in first && r.index === first.index), 'all get the same index');
+      } finally {
+        (fs.promises as { readFile: unknown }).readFile = original;
+      }
+    });
+
+    it('does not let an in-flight read of an older version answer for a newer file', async () => {
+      const file = path.join(dir, 'manifest.json');
+      const write = (name: string) =>
+        fs.writeFileSync(file, JSON.stringify({ nodes: { n: { resource_type: 'model', name, schema: 's', original_file_path: `models/${name}.sql` } } }));
+      write('old');
+      const older = loadDbtManifest(file);
+      write('a_newer_and_longer_name'); // different size: a different version
+      const newer = await loadDbtManifest(file);
+      await older;
+      assert.ok('index' in newer && newer.index.byFile.has('models/a_newer_and_longer_name.sql'));
+    });
+
     it('reuses the parsed index until the file changes', async () => {
       const file = path.join(dir, 'manifest.json');
       const write = (name: string) =>

@@ -15,8 +15,13 @@ const DEFAULT_TARGET_PATH = 'target';
 
 /** Longest description kept, so one verbose doc block cannot bloat every payload. */
 const MAX_DESCRIPTION_LENGTH = 2000;
-/** A manifest larger than this is not parsed (it would stall the extension host). */
-export const MANIFEST_MAX_BYTES = 300 * 1024 * 1024;
+/**
+ * A manifest larger than this is not parsed: `JSON.parse` runs synchronously on the extension
+ * host shared with every other extension. Measured at about 1.5 ms per MB to parse plus 0.4 ms per
+ * MB to index (so ~0.1 s at the limit) and several times the file size in heap while parsing; a
+ * 300 MB manifest would hold the host for seconds and take around a gigabyte.
+ */
+export const MANIFEST_MAX_BYTES = 50 * 1024 * 1024;
 
 /** Resource types that end up as a table or view the viewer can show. */
 const RELATION_TYPES: ReadonlySet<string> = new Set(['model', 'seed', 'snapshot', 'source']);
@@ -261,8 +266,25 @@ export type ManifestResult =
   | { error: 'missing' | 'too-large' | 'invalid'; message: string };
 
 const manifestCache = new Map<string, { mtimeMs: number; size: number; index: DbtManifestIndex }>();
+/** A read in progress, so callers that ask for the same file version share one parse. */
+const manifestReads = new Map<string, { version: string; promise: Promise<ManifestResult> }>();
 
-/** Reads and indexes a manifest, remembering it until the file changes (size or mtime). */
+async function readManifest(file: string, stat: fs.Stats): Promise<ManifestResult> {
+  try {
+    const index = indexManifest(JSON.parse(await fs.promises.readFile(file, 'utf8')));
+    manifestCache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, index });
+    return { index };
+  } catch (err) {
+    manifestCache.delete(file);
+    return { error: 'invalid', message: `The manifest at ${file} could not be read: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+/**
+ * Reads and indexes a manifest, remembering it until the file changes (size or mtime). Callers
+ * that arrive while a read of the same version is running (a first load, a table switch and a
+ * reload of several panels all want it) wait for that one read instead of parsing it again.
+ */
 export async function loadDbtManifest(file: string): Promise<ManifestResult> {
   let stat: fs.Stats;
   try {
@@ -277,13 +299,20 @@ export async function loadDbtManifest(file: string): Promise<ManifestResult> {
   if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
     return { index: cached.index };
   }
+  const version = `${stat.mtimeMs}:${stat.size}`;
+  const running = manifestReads.get(file);
+  if (running && running.version === version) {
+    return running.promise;
+  }
+  const promise = readManifest(file, stat);
+  manifestReads.set(file, { version, promise });
   try {
-    const index = indexManifest(JSON.parse(await fs.promises.readFile(file, 'utf8')));
-    manifestCache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, index });
-    return { index };
-  } catch (err) {
-    manifestCache.delete(file);
-    return { error: 'invalid', message: `The manifest at ${file} could not be read: ${err instanceof Error ? err.message : String(err)}` };
+    return await promise;
+  } finally {
+    // Only the entry this call made: a newer version may have replaced it meanwhile.
+    if (manifestReads.get(file)?.promise === promise) {
+      manifestReads.delete(file);
+    }
   }
 }
 
