@@ -9,13 +9,12 @@ Current milestone: **first Marketplace publish** (re-prioritised 2026-11-20).
 
 ## Release order
 
-1. **V-1** smoke test in a real VS Code window (also reproduces Q-14 and eyeballs Q-13).
-2. **V-2** pin a stable DuckDB release.
-3. **P-2** bundle the extension and trim the `.vsix`.
-4. **P-3** per-platform `.vsix` builds.
-5. **Q-14** undo/redo in the SQL box (if V-1 reproduces it).
-6. **D-5** manifest stall and **F-6** uncached re-parse stall (both can freeze the extension host).
-7. Publish (see `PUBLISHING.md`). Then **T-1** column sort and **T-2** in-table find.
+1. **V-2** pin a stable DuckDB release.
+2. **P-3** per-platform `.vsix` builds, after **P-2** bundle the extension and trim the `.vsix` (P-2 first: they touch the same `.vscodeignore` lines).
+3. **D-5** manifest stall and **F-6** uncached re-parse stall (both can freeze the extension host).
+4. Publish (see `PUBLISHING.md`). Then **T-1** column sort and **T-2** in-table find.
+
+The real-window smoke test (V-1) passed on 2026-11-20 in the installed extension: type icons, virtualization, selection and copy, filtering, the SQL box under the strict CSP and undo/redo all behaved. It found one bug (SQL colours taken from the wrong theme with an auto-detected colour scheme, fixed in `9011d97`) and nothing else.
 
 ## Packaging and marketplace
 
@@ -49,20 +48,6 @@ Acceptance:
 ### V-2 · Engine version: CLAUDE.md text vs the installed package, and a pre-release pin · P1 · S
 
 CLAUDE.md talks about a bundled `@duckdb/node-api` "1.5"/storage versions, while `package.json` pins `^2.0.0-r.1` (a pre-release tag; `node_modules` has `2.0.0-r.1`). Acceptance: pin a stable release before publishing (or record why not), check which engine and storage versions it reads, and fix the CLAUDE.md text.
-
-## Checks before release
-
-### V-1 · The 2026-11 UI work was never seen in a real VS Code window · P1 · S
-
-Type icons, row virtualization, selection + copy, SQL highlighting and column filtering were verified with unit/integration tests and in real Chrome with scratch pages (permissive CSP, stub host), never in an installed extension. Run `npm run install:local:quick` and check, in Dark+, Light+ and a high-contrast theme:
-- Type badges and their colours (also with a forced-dark extension off).
-- A 200k-row DuckDB table: scrolling, row numbers, a filter, then Cmd+C of a big selection into a spreadsheet.
-- Selection: click, shift/cmd ranges, row/column select, arrows, Escape order with the stats card and a filter box.
-- SQL box under the **strict webview CSP** (no inline styles): overlay alignment, scroll sync, and a live theme switch (the `sql-theme` colours), plus One Dark / Dracula for the resolved palette. Note any gross mismatch with a `.sql` tab for Q-13.
-- SQL box undo/redo (Cmd+Z / Cmd+Shift+Z), also after a refresh and after Run: reproduce Q-14.
-- Filtering: a CSV with more than 5000 rows finds matches past row 5000 with an exact count; SQLite and DuckDB switch tables with a filter active; XLSX switches sheets with a filter active; Alt+click on an empty cell gives the "is empty" filter; Esc, the `×` in the gutter, and the statistics card opening below the filter row.
-
-Anything found becomes its own item; fix P1-level breakage before publishing.
 
 ## Column filtering follow-ups
 
@@ -208,27 +193,15 @@ Acceptance:
 - Stop restoring `tablas.lastQuery:<uri>` on open: drop `rememberedQuery`/`MultiTableData.lastQuery` and the `workspaceState` writes (`main.js` `queryText = lastQuery || querySuggestion`, ~line 2388), unless a test shows the refresh path needs them.
 - If the shown table changes before the user typed anything, the suggestion follows it; once the user edited the text it does not.
 
-### Q-13 · The SQL colors do not match VS Code's `.sql` editor · P3 · M
+### Q-13 · The SQL colours are coarser than VS Code's `.sql` editor · P3 · M
 
-Cosmetic; promote to P2 if V-1 shows a gross mismatch.
+Cosmetic. The big mismatch seen in the V-1 smoke test (a dark window painted with the light theme's palette) was the theme lookup ignoring `window.autoDetectColorScheme`, fixed in `9011d97`; with the right theme the keywords, strings, numbers and comments match a `.sql` tab. What is left is that the tokenizer's classes are coarser than the SQL grammar's (`src/sqlTheme.ts` `SQL_TOKEN_SCOPES`, the fallbacks in `media/styles.css`):
+- Plain identifiers (`b.id`, `main.big`) keep the default colour; the `.sql` editor colours them (`variable`/`meta.*` rules of the theme).
+- Operators: our `keyword.operator.sql` scope does not exist in the grammar (it has `keyword.operator.star.sql`, `.math.sql`, `.comparison.sql`, `.concatenator.sql`), so `*` and `::` take the fallback.
+- Types (`DECIMAL(12,2)`, `TIMESTAMP`) and DML/DDL keywords (`keyword.other.DML.sql`, `keyword.other.DDL.create.II.sql`, `storage.type.sql`) can differ from the editor in themes that colour them separately.
+- Scope matching is a simplification of TextMate's (no parent selectors beyond `source.sql`, no `-`/`|`); semantic highlighting is not read (the built-in SQL has no semantic provider).
 
-
-The palette resolved from the theme (`src/sqlTheme.ts`, `SQL_TOKEN_SCOPES`, the fallbacks in `media/styles.css`) looks off next to a real `.sql` file. Probable causes to check, in this order:
-- The tokenizer's classes are coarser than the SQL grammar's: VS Code (the `sql` grammar) colors DML/DDL keywords (`keyword.other.DML.sql`, `keyword.other.DDL.create.II.sql`, `storage.type.sql`), data types, `constant.language`, operators, numbers and `variable`/`entity.name.function` differently, and plain identifiers/columns keep the editor foreground. Compare token by token with the same query in a `.sql` file (Developer: Inspect Editor Tokens and Scopes) and list which scope each of our classes should really use.
-- Scope matching is a simplification of TextMate's (no parent selectors beyond `source.sql`, no `-`/`|`); a theme rule like `source.sql keyword.other` or an exclusion may pick a different color in VS Code.
-- Semantic highlighting and `editor.semanticTokenColorCustomizations` are not read; the built-in SQL has no semantic provider, so this is probably not it.
-- The dark/light fallbacks (used when no theme file resolves, e.g. built-in themes in the app bundle) may not equal Dark+/Light+; verify `findThemeFile` finds built-in themes (`vscode.extensions.all` includes the `theme-defaults` extensions), and that the high-contrast variants fall back correctly.
-
-Acceptance: for Dark+, Light+, One Dark Pro and a high-contrast theme, a sample query (keywords, functions, types, strings, numbers, comments, quoted identifiers, operators) shows the same colors as a `.sql` editor tab, checked side by side in a real VS Code window (V-1). Add the finer token classes if needed (extend `SQL_TOKEN_CLASSES`, the tokenizer, the CSS variables and the tests together).
-
-### Q-14 · Cmd/Ctrl+Z and Cmd/Ctrl+Shift+Z must work in the SQL box · P1 · S
-
-The box is a native `<textarea>`, so undo/redo is expected to work, but it does not in the installed extension (not yet reproduced; check in a real window first). Suspects:
-- VS Code intercepts the key in the webview and runs its own undo (the editor's, not the textarea's); the keydown handler (`main.js` ~2490) may need to let the key through, or call `document.execCommand('undo'|'redo')` itself on Cmd/Ctrl+Z and Cmd/Ctrl+Shift+Z (Ctrl+Y on Windows/Linux).
-- The textarea's value is replaced from script (a refresh rebuilding the box in `renderQueryPanel`, the suggestion, any `input.value = ...`), which clears the browser's undo stack; keep the same element across re-renders or keep our own history.
-- Any future completion insertion (Q-3) must go through `execCommand('insertText')` (or `setRangeText` plus an input event) so accepted suggestions stay undoable.
-
-Acceptance: type, Cmd+Z undoes by word/chunk and Cmd+Shift+Z redoes, also after a refresh of the file and after Run; test what can be tested in jsdom (the handler), and verify the rest in the installed extension (V-1).
+Acceptance: for Dark+, Light+, One Dark Pro and a high-contrast theme, a sample query (keywords, functions, types, strings, numbers, comments, quoted identifiers, operators, plain identifiers) shows the same colors as a `.sql` editor tab, side by side (Developer: Inspect Editor Tokens and Scopes lists each token's scope). Add the finer token classes if needed (extend `SQL_TOKEN_CLASSES`, the tokenizer, the CSS variables and the tests together).
 
 ### Q-10 · The comment-stripping regex is quadratic on an unterminated `/*` · P3 · S
 
@@ -297,7 +270,7 @@ Acceptance:
 Cmd/Ctrl+F inside the table (not VS Code's text find): a find bar that highlights matching cells across the whole table and jumps between them.
 
 Acceptance:
-- First check in the installed extension (V-1) how a webview receives Cmd/Ctrl+F, so the find bar opens without fighting VS Code's own binding.
+- V-1 found that Cmd/Ctrl+F does nothing in the installed viewer (no VS Code find widget opens over the table or the SQL box), so the key is free to use. Not yet confirmed: whether the webview's own `keydown` receives it (log it from the Webview Developer Tools before relying on it), and the same for Cmd+G / F3 for next/previous.
 - Host-side search over the whole table, reusing the filter engines' "contains" semantics (`compileCellPredicate`, `filterPredicateSql`); the reply is the match count and the first N positions (row index in the shown rows + column), capped.
 - Next/previous (Enter / Shift+Enter) moves the selection cursor and scrolls with `revealCell`; highlighting is painted only on drawn cells (virtualization), like `paintSelection`.
 - Works together with active filters and sort (positions are indices into the rows being shown). Esc closes the bar.
