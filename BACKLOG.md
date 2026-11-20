@@ -16,14 +16,15 @@ The real-window smoke test (V-1) passed on 2026-11-20 in the installed extension
 
 ## Packaging and marketplace
 
-### P-3 · Verify the per-platform `.vsix` builds on real platforms · P1 · M
+### P-3 · Get the per-platform package workflow green on real runners · P1 · S
 
-`scripts/package-targets.sh` already builds one `.vsix` per target (`darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `alpine-x64`, `alpine-arm64`, `win32-x64`, `win32-arm64`) by swapping in exactly that target's `@duckdb/node-bindings-<arch>` package before each `vsce package --target`; `scripts/install-local.sh` still runs a plain `vsce package` for the dev machine. The script predates P-2 (bundling `@duckdb/node-api` and the `node-bindings` dispatcher into `dist/extension.js`), so it needs a fresh run, and nothing has loaded a non-macOS `.vsix` yet.
+`.github/workflows/package.yml` builds one `.vsix` per target on a runner of its own platform (the two Alpine targets inside `node:20-alpine`), runs `scripts/smoke-package.js` (layout check, then opening a DuckDB and a SQLite file from the packaged layout, which covers the bundled `detect-libc` and musl binding choice) and uploads each `.vsix`. It has only been run through the smoke script on darwin-arm64; the workflow itself has never run.
 
 Acceptance:
-- Re-run `scripts/package-targets.sh` with the P-2 layout: each `.vsix` has about 16 files and exactly one `@duckdb/node-bindings-*` package (`vsce ls --target`/the unzipped listing), and its size is plausible per platform.
-- At least `linux-x64`, `alpine-x64` (this is the one the bundled `detect-libc` fix is for) and `win32-x64` are opened on a matching machine, VM or CI runner and load a DuckDB file; macOS x64 if a machine is at hand.
-- Decide whether `PUBLISHING.md` publishes all 8 targets or only the common ones, and update its publish steps and the Packaging note in `CLAUDE.md` to what was verified.
+- Push `main`, run the workflow, and fix what the real runners show. Runner labels `macos-15-intel` (darwin-x64), `windows-11-arm` and `ubuntu-24.04-arm` are unverified, and the arm runners are free only for public repositories; drop or replace a target if its runner is not available.
+- All kept targets are green, with `vsix-<target>` artifacts.
+- One non-macOS `.vsix` artifact (for example `linux-x64` or `win32-x64`) is installed in a real VS Code window and opens a DuckDB file; the CI smoke test does not start VS Code.
+- Decide which targets `PUBLISHING.md` publishes (all 8, or only the common ones) and update its steps.
 
 ## Column filtering follow-ups
 

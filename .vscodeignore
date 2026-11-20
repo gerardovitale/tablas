@@ -38,6 +38,7 @@ node_modules/**
 !node_modules/@duckdb/node-bindings-*/*.dll
 coverage/**
 .husky/**
+.github/**
 .claude/**
 .c8rc.json
 .nvmrc

@@ -53,7 +53,12 @@ async function build() {
   }
 }
 
-build().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+// `scripts/smoke-package.js` requires this file for the extension's real bundling options.
+if (require.main === module) {
+  build().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
+
+module.exports = { extensionConfig };

@@ -1,0 +1,97 @@
+name: Package
+
+# Builds one .vsix per platform on a runner of that platform and proves each one can open a
+# DuckDB and a SQLite file from the packaged layout (scripts/smoke-package.js). Nothing here
+# publishes: the .vsix files are uploaded as workflow artifacts, and `vsce publish` stays manual
+# (see PUBLISHING.md).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # `npm ci` runs the `prepare` script, which installs the git hooks; not wanted in CI.
+  HUSKY: '0'
+  VSCE_VERSION: '4.1.0'
+
+jobs:
+  check:
+    name: lint, types, unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run check-types
+      - run: npm run test:unit
+
+  package:
+    name: package (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: darwin-arm64, os: macos-latest }
+          - { target: darwin-x64, os: macos-15-intel }
+          - { target: linux-x64, os: ubuntu-latest }
+          - { target: linux-arm64, os: ubuntu-24.04-arm }
+          - { target: win32-x64, os: windows-latest }
+          - { target: win32-arm64, os: windows-11-arm }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      # npm installs only this runner's @duckdb/node-bindings-* (an optional dependency with
+      # os/cpu/libc fields), so the .vsix ships exactly the binding for its own target.
+      - run: npm ci
+      - run: npm install -g @vscode/vsce@${{ env.VSCE_VERSION }}
+      - run: npm run compile:production
+      - run: node scripts/smoke-package.js
+      - run: vsce package --target ${{ matrix.target }} -o tablas-${{ matrix.target }}.vsix
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vsix-${{ matrix.target }}
+          path: tablas-${{ matrix.target }}.vsix
+          retention-days: 14
+
+  # Alpine (musl) needs its own container: the runner images are glibc, and the musl DuckDB
+  # binding is only picked by npm, and by the bundled dispatcher's detect-libc, inside musl.
+  package-alpine:
+    name: package (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: alpine-x64, os: ubuntu-latest }
+          - { target: alpine-arm64, os: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v4
+      - name: build, smoke-test and package in node:20-alpine
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e HUSKY=0 \
+            -v "$PWD":/work -w /work node:20-alpine sh -ec '
+              npm ci --ignore-scripts
+              npm install -g --prefix /tmp/npm-global @vscode/vsce@${{ env.VSCE_VERSION }}
+              export PATH=/tmp/npm-global/bin:$PATH
+              npm run compile:production
+              node scripts/smoke-package.js
+              vsce package --target ${{ matrix.target }} -o tablas-${{ matrix.target }}.vsix
+            '
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vsix-${{ matrix.target }}
+          path: tablas-${{ matrix.target }}.vsix
+          retention-days: 14

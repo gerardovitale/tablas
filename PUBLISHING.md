@@ -5,22 +5,22 @@ Tracks remaining work before first `vsce publish`. See `scripts/install-local.sh
 ## Blocking
 
 - [x] **`icon.png`** — 256×256 PNG at repo root, generated via `scripts/generate-icon.py` (placeholder table-grid glyph; swap for real branding before publish if wanted).
-- [ ] **Push repo to GitHub** — `git remote -v` is empty. `package.json`'s `repository.url` points at `github.com/gerardovitale/tablas`, which doesn't exist yet. Add remote, push.
+- [ ] **Push `main` to GitHub** — `origin` is `git@github.com:gerardovitale/tablas.git` but local commits are unpushed. `package.json`'s `repository.url` points there, and `.github/workflows/package.yml` (per-platform builds) only runs once it is pushed.
 - [ ] **Publisher account** — create at https://marketplace.visualstudio.com/manage, publisher id `gerardovitale` (must match `package.json`).
 - [ ] **PAT + login** — Azure DevOps PAT (scope: Marketplace → Manage), then `vsce login gerardovitale`.
-- [x] **DuckDB multi-platform strategy** — `scripts/package-targets.sh` builds one `.vsix` per platform. Note: `vsce package --target <x>` does **not** prune `node_modules` by target on its own (verified empirically — packaging `--target linux-x64` while both `darwin-arm64` and `linux-x64` bindings were installed shipped both, ~180MB). The script works around this by swapping in exactly one `@duckdb/node-bindings-<arch>` package per target before each `vsce package` call, and pruning back anything npm silently re-adds (npm re-resolves the lockfile and restores the dev machine's own matching optionalDependency on every `npm install`, even a scoped `--force` one). Builds all 8 targets DuckDB ships bindings for (`darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `alpine-x64`, `alpine-arm64`, `win32-x64`, `win32-arm64`; no `win32-ia32`/`linux-armhf` — DuckDB has no bindings for either). Each `.vsix` drops from ~58MB (both platforms present) to ~15–36MB (one). Packaging-only: doesn't prove a foreign-platform `.vsix` actually loads — a linux `.so`/win32 `.dll` can't be exercised on this macOS dev machine, so still needs a real smoke test per platform (or CI runners) before publish.
+- [ ] **DuckDB multi-platform strategy** — `.github/workflows/package.yml` builds each target on a runner of its own platform (the two Alpine targets in a `node:20-alpine` container), runs `scripts/smoke-package.js` (layout check plus opening a DuckDB and a SQLite file from the packaged layout) and uploads `tablas-<target>.vsix` as an artifact; it does not publish. Needs a green run on all 8 targets (runner labels `macos-15-intel`, `windows-11-arm`, `ubuntu-24.04-arm` have not been exercised yet, and the arm runners are only free for public repositories). `scripts/package-targets.sh` remains the local cross-packaging alternative, but it cannot prove a foreign `.vsix` loads.
 
 ## Before hitting publish
 
 - [x] Dry-run all 8 targets locally via `scripts/package-targets.sh`, inspected `.vsix` contents/size — confirmed exactly one `@duckdb/node-bindings-*` per package.
-- [ ] Smoke-test at least one non-macOS `.vsix` on its real platform (or CI) — packaging-only dry-run above doesn't prove the native binding loads.
+- [ ] Package workflow green on all 8 targets, and one non-macOS `.vsix` artifact opened in a real VS Code window (the CI smoke test does not start VS Code).
 - [ ] `CHANGELOG.md` entry for the version being published (0.1.0 draft already in place).
 - [ ] `npm test` green (compile + tsc + vscode-test, unit + integration).
 - [ ] DuckDB engine: `npm view @duckdb/node-api dist-tags`; if `latest` moved past the exact pin in `package.json` (`2.0.0-r.1`), bump it and re-run `npm test` before building the `.vsix`s.
 
 ## Publish
 
-Build all platform `.vsix`s, then publish each:
+Take the per-target `.vsix` files from the package workflow's artifacts (or build them with `scripts/package-targets.sh`), then publish each:
 
 ```bash
 scripts/package-targets.sh          # writes dist-vsix/tablas-<version>-<target>.vsix
