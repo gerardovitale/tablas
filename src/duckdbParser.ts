@@ -15,6 +15,7 @@ import {
   type Json,
 } from '@duckdb/node-api';
 import {
+  clipNativeType,
   clipStat,
   histogramFromCounts,
   planHistogram,
@@ -481,6 +482,7 @@ async function computeDuckdbStats(handle: DuckdbHandle, tableName: string): Prom
     return undefined;
   }
   const typeIds = headers.map((_, i) => schemaReader.columnTypeId(i));
+  const nativeTypes = headers.map((_, i) => clipNativeType(schemaReader.columnType(i).toString()));
 
   const quotedColumns = headers.map(quoteIdentifier);
   const selectList = quotedColumns.flatMap((q, i) => statsSelectList(q, typeIds[i]));
@@ -495,16 +497,18 @@ async function computeDuckdbStats(handle: DuckdbHandle, tableName: string): Prom
   const columns: ColumnStats[] = [];
   for (let i = 0; i < headers.length; i++) {
     const offset = 1 + i * DUCKDB_STATS_VALUES_PER_COLUMN;
-    columns.push(
-      await buildDuckdbColumn(
-        handle,
-        quotedTable,
-        quotedColumns[i],
-        typeIds[i],
-        total,
-        row.slice(offset, offset + DUCKDB_STATS_VALUES_PER_COLUMN)
-      )
+    const column = await buildDuckdbColumn(
+      handle,
+      quotedTable,
+      quotedColumns[i],
+      typeIds[i],
+      total,
+      row.slice(offset, offset + DUCKDB_STATS_VALUES_PER_COLUMN)
     );
+    if (nativeTypes[i] !== '') {
+      column.nativeType = nativeTypes[i];
+    }
+    columns.push(column);
   }
   return { columns };
 }
@@ -801,7 +805,13 @@ export function duckdbRunQuery(
     try {
       const statements = await handle.connection.extractStatements(sql);
       for (let i = 0; i < statements.count; i++) {
-        const { statementType } = await statements.prepare(i);
+        const prepared = await statements.prepare(i);
+        const { statementType } = prepared;
+        try {
+          prepared.destroySync();
+        } catch {
+          // best effort: only the type was wanted, and GC frees it anyway
+        }
         if (!READ_STATEMENT_TYPES.has(statementType)) {
           return { error: refusal(statementType) };
         }

@@ -40,6 +40,12 @@ export interface HistogramStats {
 export interface ColumnStats {
   type: ColumnKind;
   nullCount: number;
+  /**
+   * The source's own type for the column (`BIGINT`, `DECIMAL(10,2)`, `INT64`, a SQLite
+   * declared type), shown beside the inferred kind. Omitted when the format has none
+   * (CSV, XLSX) or it is unknown (a SQLite expression column).
+   */
+  nativeType?: string;
   /** Omitted for `'other'` columns (nested/binary values). */
   distinctCount?: number;
   /** True when distinct tracking hit its cap, so `distinctCount` is a floor. */

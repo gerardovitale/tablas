@@ -11,6 +11,14 @@ describe('isGetStatsMessage', () => {
     assert.strictEqual(isGetStatsMessage({ type: 'get-stats', table: '' }), true);
   });
 
+  it('accepts a numeric seq, and rejects any other kind', () => {
+    assert.strictEqual(isGetStatsMessage({ type: 'get-stats', seq: 7 }), true);
+    assert.strictEqual(isGetStatsMessage({ type: 'get-stats', table: 't', seq: 0 }), true);
+    for (const seq of ['1', null, {}, true]) {
+      assert.strictEqual(isGetStatsMessage({ type: 'get-stats', seq }), false, JSON.stringify(seq));
+    }
+  });
+
   it('rejects a table that is not a string', () => {
     for (const table of [1, null, {}, ['a'], true]) {
       assert.strictEqual(isGetStatsMessage({ type: 'get-stats', table }), false, JSON.stringify(table));
@@ -28,6 +36,12 @@ describe('statsDataMessage', () => {
   it('wraps the payload under the stats-data type', () => {
     const payload = { table: 't', stats: { columns: [] } };
     assert.deepStrictEqual(statsDataMessage(payload), { type: 'stats-data', payload });
+  });
+
+  it("echoes the request's seq in the payload, and adds nothing when there is none", () => {
+    assert.deepStrictEqual(statsDataMessage({ table: 't' }, 5), { type: 'stats-data', payload: { table: 't', seq: 5 } });
+    assert.deepStrictEqual(statsDataMessage({ table: 't' }, 0), { type: 'stats-data', payload: { table: 't', seq: 0 } });
+    assert.deepStrictEqual(statsDataMessage({ table: 't' }), { type: 'stats-data', payload: { table: 't' } });
   });
 
   it('survives a JSON round-trip (it crosses postMessage)', () => {

@@ -143,7 +143,7 @@ export class SqliteEditorProvider
       } else if (isGetStatsMessage(message)) {
         const payload = await this.handleGetStats(document, message.table);
         if (payload) {
-          await webview.postMessage(statsDataMessage(payload));
+          await webview.postMessage(statsDataMessage(payload, message.seq));
         }
       } else if (isFilterMessage(message)) {
         const payload = await this.handleFilter(document, message);

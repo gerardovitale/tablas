@@ -13,6 +13,12 @@ import type { TableStats } from './tableData';
 export interface GetStatsMessage {
   type: 'get-stats';
   table?: string;
+  /**
+   * One webview-wide counter, never reset, echoed in the answer. The table name
+   * alone cannot tell a reply for the view on screen from a slower one for the
+   * same table's previous view (a refresh re-renders it while the old scan runs).
+   */
+  seq?: number;
 }
 
 /**
@@ -23,6 +29,8 @@ export interface GetStatsMessage {
  */
 export interface StatsPayload {
   table?: string;
+  /** Echo of `GetStatsMessage.seq`. */
+  seq?: number;
   stats?: TableStats;
 }
 
@@ -37,10 +45,15 @@ export function isGetStatsMessage(message: unknown): message is GetStatsMessage 
   if (typeof message !== 'object' || message === null) {
     return false;
   }
-  const candidate = message as { type?: unknown; table?: unknown };
-  return candidate.type === 'get-stats' && (candidate.table === undefined || typeof candidate.table === 'string');
+  const candidate = message as { type?: unknown; table?: unknown; seq?: unknown };
+  return (
+    candidate.type === 'get-stats' &&
+    (candidate.table === undefined || typeof candidate.table === 'string') &&
+    (candidate.seq === undefined || typeof candidate.seq === 'number')
+  );
 }
 
-export function statsDataMessage(payload: StatsPayload): StatsDataMessage {
-  return { type: 'stats-data', payload };
+/** The answer to a request; `seq` is the request's, so the webview can tell whose it is. */
+export function statsDataMessage(payload: StatsPayload, seq?: number): StatsDataMessage {
+  return { type: 'stats-data', payload: seq === undefined ? payload : { ...payload, seq } };
 }

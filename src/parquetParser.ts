@@ -6,6 +6,7 @@ import type {
   SchemaTree,
 } from 'hyparquet' with { 'resolution-mode': 'import' };
 import {
+  clipNativeType,
   ColumnStatsAccumulator,
   DistinctBudget,
   exceedsStatsCellCap,
@@ -121,6 +122,34 @@ export function declaredKind(column: SchemaTree): ColumnKind {
   }
 }
 
+/**
+ * The file's own name for a column's type: the logical type when there is one
+ * (`STRING`, `TIMESTAMP(MICROS)`, `DECIMAL(10,2)`, `INT(32)`), else the converted or
+ * physical type (`INT64`, `DOUBLE`), with a trailing `[]` for a repeated column and
+ * `STRUCT`/`LIST`/`MAP` for nested ones.
+ */
+export function parquetNativeType(column: SchemaTree): string {
+  const { element, children } = column;
+  const logical = element.logical_type;
+  let base: string;
+  if (logical?.type === 'DECIMAL') {
+    base = `DECIMAL(${logical.precision},${logical.scale})`;
+  } else if (logical?.type === 'TIMESTAMP' || logical?.type === 'TIME') {
+    base = `${logical.type}(${logical.unit})`;
+  } else if (logical?.type === 'INTEGER') {
+    base = `${logical.isSigned ? 'INT' : 'UINT'}(${logical.bitWidth})`;
+  } else if (children.length > 0) {
+    base = logical?.type === 'LIST' || logical?.type === 'MAP' ? logical.type : 'STRUCT';
+  } else if (logical) {
+    base = logical.type;
+  } else if (element.converted_type === 'UTF8') {
+    base = 'STRING';
+  } else {
+    base = element.converted_type ?? element.type ?? 'UNKNOWN';
+  }
+  return clipNativeType(element.repetition_type === 'REPEATED' && children.length === 0 ? `${base}[]` : base);
+}
+
 function addParquetValue(acc: ColumnStatsAccumulator, value: unknown, declared: ColumnKind): void {
   if (value === null || value === undefined) {
     acc.addNull();
@@ -224,7 +253,11 @@ async function computeParquetStats(
         }
       );
     }
-    return { columns: accs.map((acc) => acc.finalize()) };
+    const stats = accs.map((acc) => acc.finalize());
+    columns.forEach((column, i) => {
+      stats[i].nativeType = parquetNativeType(column);
+    });
+    return { columns: stats };
   } catch (err) {
     // A stats failure must never break showing the table.
     reportStatsFailure(err);

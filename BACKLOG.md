@@ -105,6 +105,10 @@ If VS Code re-resolves the same document with a new panel (not verified that it 
 
 ## SQL box (DuckDB)
 
+### Q-9 · A reload while the SQL box shows still reads and posts the hidden table · P3 · M
+
+The host does `COUNT(*)`, a `maxRows` read and the dbt descriptions for the selected table on every reload even when the webview is in SQL mode and draws none of it. Skipping it needs the webview to tell the host its mode and to ask for the table (a `select-table`) when the user switches back, with filters/scroll restored after that reply. Measure first: it is small next to re-copying the file (R-2).
+
 ### Q-1 · A running query cannot be cancelled by the user · P2 · S
 
 A slow query blocks the connection's queue (stats, filters and table switches wait behind it) until it ends or hits the 30 s limit. A Cancel button would send `{type:'cancel-query'}` and call `interrupt()`, but `interrupt()` is connection-wide: it must only fire while *that query* is the one running, so track which request holds the connection.
@@ -113,9 +117,16 @@ A slow query blocks the connection's queue (stats, filters and table switches wa
 
 `COPY .. TO` is refused on purpose (see CLAUDE.md, "SQL box"). A result export (CSV) would be its own button: host-side write to a path the user picks in a save dialog, never from SQL text.
 
-### Q-3 · Table names are not offered while typing · P3 · M
+### Q-3 · Nothing is offered while typing a query · P3 · L
 
-The box is a plain `<textarea>`: no completion, no highlighting. Candidates: insert the picked table's qualified name from a picker, or a small completion list from `TableRef`s.
+Highlighting shipped (see CLAUDE.md, "SQL highlighting and theme colours"). Still missing: completion of table names (schema-qualified, quoted when needed), column names (after `alias.` / `table.` and in the statement's tables), keywords and functions, as a popup that follows the caret. Needs a host `get-catalog` request (columns of every table, `duckdb_functions()`), memoized per handle and dropped on a reload swap.
+
+Plan (next session can start here):
+- **Protocol:** `{type:'get-catalog'}` → `{type:'catalog-data', payload:{tables:[{name,schema,table,columns:[{name,type}]}], keywords, functions}}` in `src/queryMessage.ts` (guards + unit tests). Request once when SQL mode opens.
+- **Host:** build in `duckdbParser.ts` under `runExclusive`: `information_schema.columns` for the file's own catalog with the same filter as `listDuckdbTables`, plus `duckdb_keywords()` and `SELECT DISTINCT function_name FROM duckdb_functions()`. Memoize per handle like `tableRefs`; a reload swap gets a new handle, so it drops by itself.
+- **Context (webview, inside `main.js`):** after `FROM`/`JOIN`/`INTO` → tables; after `schema.` → that schema's tables; after `alias.`/`table.` → columns (resolve aliases from `FROM x [AS] a` with a light scan); otherwise columns of the statement's tables + keywords + functions (a function inserts `name(`). Prefix match then fuzzy, case-insensitive, keywords inserted upper-case.
+- **Popup:** reuse the table picker's listbox pattern (`renderTableSelector`, `appendHighlighted`): `role=listbox`, `aria-activedescendant` on the textarea, positioned at the caret by measuring a mirror span in `.query-highlight`. Ctrl+Space opens, typing filters, ↑/↓/Tab/Enter accept, Esc closes; Enter without a popup stays a newline, Cmd+Enter still runs.
+- **Tests:** completion context (FROM/JOIN/`alias.`/`schema.`), popup keyboard, catalog guards, catalog SQL against `schemas.duckdb`. Delete this item when it ships.
 
 ### Q-4 · A query with unsent edits and a stuck "Running…" · P3 · S
 
@@ -136,6 +147,18 @@ Each statement is `prepare`d to learn its type (binding, which for `read_csv`/re
 ### Q-8 · The auto re-run after a refresh ignores how slow the query is · P3 · S
 
 A refresh re-runs the last query even if the previous run took most of the 30 s budget, and each run holds the connection queue (table switches, filters and stats wait behind it). Now at most one re-run waits behind a running query. Acceptance: skip the automatic re-run when the last run took longer than a few seconds and show a "Run again" hint instead.
+
+### Q-10 · The comment-stripping regex is quadratic on an unterminated `/*` · P3 · S
+
+The statement splitter/classifier in the SQL path strips comments with a regex that backtracks on a `/*` that never closes: a 100k-character paste blocks the extension host for about 0.8 s per Run. Acceptance: replace it with a single forward scan (like `tokenizeSql` in the webview), with a test on a 100k `/*` input that finishes in milliseconds.
+
+### Q-11 · An empty or half-written DuckDB file has no refresh button · P3 · S
+
+If the first load finds no tables (empty file, or a build still writing), the panel shows "No tables found" without the toolbar, so the user must close and reopen the tab. The file watcher usually recovers it, but not with `tablas.autoRefresh` off. Acceptance: render the toolbar (`capabilities.refresh`) on the empty and failed first-load states too.
+
+### W-1 · The table picker hard-codes DuckDB's `main` schema in the webview · P3 · S
+
+The webview treats a ref without `schema` as `main` when grouping (CLAUDE.md, "Table/view listing and schemas"), which is format knowledge in the renderer. Acceptance: the host sends the group label (or a `defaultSchema`) and the webview only groups by what it is given.
 
 ## dbt support
 
@@ -167,6 +190,14 @@ The reverse direction: from a table in the picker, open the model's `.sql` file 
 
 A second reveal for the same file overwrites the first (which then waits out its timer); a panel disposed before its handshake leaves its entry until the timer, so a manual reopen within that window opens on the previewed table; and 15 s is short for a multi-GB file that is read into memory and copied. Acceptance: settle a replaced entry at once, settle and delete the entry in the panel's `onDidDispose`, and tie the wait to the load rather than a fixed time.
 
+### D-8 · Files with dots in the name never get dbt descriptions · P3 · S
+
+The catalog name DuckDB derives from `warehouse.v2.duckdb` is not the manifest's `database` (the file name without the last extension, as dbt-duckdb reports it), so `relationForFile` finds no node. Acceptance: compare against both the DuckDB catalog name and the stem, with a fixture or a unit test on a dotted name.
+
+### D-9 · The dbt integration tests depend on state left by earlier tests · P3 · S
+
+They share the fixture project, the provider's `pendingReveals`/`selectors` and the dbt caches, so reordering or running one alone can fail. Acceptance: each test sets up and clears its own state (`clearDbtProjectCache()`, fresh provider), and each passes when run alone (`--grep`).
+
 ## Packaging and marketplace
 
 ### P-1 · Internal docs probably ship in the `.vsix` · P2 · S
@@ -192,6 +223,42 @@ Acceptance:
 - Update the `.vscodeignore` notes and the DuckDB section of `CLAUDE.md` ("both ... are `external`") to match.
 
 Related: the per-platform `.vsix` work (see Roadmap) touches the same `@duckdb/node-bindings-*` lines.
+
+## Selection
+
+### S-1 · No auto-scroll while dragging a selection past the edge · P3 · S
+
+A drag only extends over cells that are drawn and under the pointer, so sweeping beyond the visible rows needs Shift+click or the keyboard. Acceptance: while the button is down and the pointer is within a few pixels of (or past) the wrapper's top/bottom/left/right edge, scroll that way on a timer and keep extending.
+
+### S-2 · No context menu, and no "copy as ..." beyond TSV · P3 · M
+
+A right-click menu on the selection (Copy, Copy with headers, Copy as CSV/JSON/Markdown) and "filter by this value" next to Alt+click. Needs a menu widget that follows the theme and the strict CSP.
+
+### S-3 · A selection is lost when a refresh re-applies a filter · P3 · S
+
+`restoreReloadState` restores the cell selection only when no filter is active, because the rows are swapped again when the filter answers (`showRows` resets the selection). Acceptance: carry it through that swap when the table, headers and the filter text are unchanged.
+
+## Checks not done yet
+
+### V-1 · The 2026-11 UI work was never seen in a real VS Code window · P2 · S
+
+Type icons, row virtualization, selection + copy and SQL highlighting were verified in real Chrome with scratch pages (permissive CSP, stub host), never in an installed extension. Run `npm run install:local:quick` and check, in Dark+, Light+ and a high-contrast theme:
+- Type badges and their colours (also with a forced-dark extension off).
+- A 200k-row DuckDB table: scrolling, row numbers, a filter, then Cmd+C of a big selection into a spreadsheet.
+- Selection: click, shift/cmd ranges, row/column select, arrows, Escape order with the stats card and a filter box.
+- SQL box under the **strict webview CSP** (no inline styles): overlay alignment, scroll sync, and a live theme switch (the `sql-theme` colours), plus One Dark / Dracula for the resolved palette.
+
+### V-2 · CLAUDE.md DuckDB version text vs the installed package · P3 · S
+
+CLAUDE.md talks about a bundled `@duckdb/node-api` "1.5"/storage versions, while `package.json` pins `^2.0.0-r.1` (a pre-release tag). Check which engine and storage versions are really installed, fix the text, and decide whether to pin a stable release before publishing.
+
+## Ideas for later (not started, ranked)
+
+1. **Column sort**: click a header to sort, host-side over the whole table like filters (all five engines, one meaning, parity test). Biggest gap against DataGrip and every other viewer.
+2. **In-table find**: Cmd+F highlighting across the whole table, host-side like filters (already on the roadmap below).
+3. **Column resize and freeze**: drag the header edge, persist widths per file, freeze the first column.
+4. **Value viewer**: a side panel for long or JSON cells (cells clip at 400px today).
+5. **Test gap**: `runReload` coalescing, `selectTable`, the watcher path filter and `refreshActive` are closures inside `resolveCustomEditor` (excluded from coverage, untested). Extract them into a small testable class (for example `DuckdbPanelController`).
 
 ## Roadmap items (not started)
 

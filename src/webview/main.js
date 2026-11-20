@@ -9,24 +9,71 @@
   // better (columns hug their actual content) and the pass is cheap
   // enough not to matter.
   const LARGE_TABLE_ROW_THRESHOLD = 500;
+  // Row virtualization: a table with more rows than this draws only the rows around the
+  // viewport (plus ROW_OVERSCAN beyond each edge) between two spacer rows that stand in for the
+  // rest, so a 200k-row table costs a screenful of DOM, not 200k x columns of it. The window is
+  // redrawn once the viewport gets within ROW_WINDOW_MARGIN rows of an edge of what is drawn.
+  const VIRTUALIZE_ABOVE_ROWS = LARGE_TABLE_ROW_THRESHOLD;
+  const ROW_OVERSCAN = 30;
+  const ROW_WINDOW_MARGIN = 10;
+  /** Rows drawn to measure how tall one is (every row is one line, so they are all alike). */
+  const ROW_MEASURE_SAMPLE = 20;
 
   const SVG_NS = 'http://www.w3.org/2000/svg';
 
   /**
-   * How each ColumnStats.type is shown. Types are told apart by glyph, not
-   * colour (no icon font is available in the webview, and colour-only
-   * distinctions fail high-contrast themes).
-   * @type {Record<string, { glyph: string, name: string }>}
+   * How each ColumnStats.type is shown: a 16x16 outline icon (stroked with
+   * currentColor by `.type-icon`, so it follows the theme) and a name. Kinds are
+   * told apart by shape first; the per-kind colour in styles.css only adds to
+   * that, so high-contrast themes and colour-blind users lose nothing. Each
+   * shape is `[tag, attributes]`; `solid: '1'` marks a filled dot.
+   * @typedef {{ icon: Array<[string, Record<string, string>]>, name: string }} KindInfo
+   * @type {Record<string, KindInfo>}
    */
   const KIND_INFO = {
-    integer: { glyph: '123', name: 'integer' },
-    float: { glyph: '1.5', name: 'float' },
-    boolean: { glyph: 'T/F', name: 'boolean' },
-    date: { glyph: 'date', name: 'date/time' },
-    text: { glyph: 'Abc', name: 'text' },
-    mixed: { glyph: 'mix', name: 'mixed types' },
-    other: { glyph: '{ }', name: 'nested or binary' },
-    empty: { glyph: '∅', name: 'no values' },
+    // #
+    integer: { name: 'integer', icon: [['path', { d: 'M6.5 2.5 5.5 13.5M11 2.5 10 13.5M3 6h10.5M2.5 10h10.5' }]] },
+    // # with a decimal point
+    float: {
+      name: 'float',
+      icon: [
+        ['path', { d: 'M5.5 2.5 4.5 11.5M10 2.5 9 11.5M2.5 5.5h9M2 9h9' }],
+        ['circle', { cx: '13', cy: '12.5', r: '1.3', solid: '1' }],
+      ],
+    },
+    // a switch
+    boolean: {
+      name: 'boolean',
+      icon: [
+        ['rect', { x: '1.5', y: '4.5', width: '13', height: '7', rx: '3.5' }],
+        ['circle', { cx: '10.5', cy: '8', r: '1.6', solid: '1' }],
+      ],
+    },
+    // a calendar
+    date: {
+      name: 'date/time',
+      icon: [
+        ['rect', { x: '2.5', y: '3.5', width: '11', height: '10', rx: '1.5' }],
+        ['path', { d: 'M2.5 6.5h11M5.5 2v3M10.5 2v3' }],
+      ],
+    },
+    // lines of text
+    text: { name: 'text', icon: [['path', { d: 'M2.5 4h11M2.5 8h11M2.5 12h6.5' }]] },
+    // two arrows crossing
+    mixed: { name: 'mixed types', icon: [['path', { d: 'M2 4.5h2.5L11 11.5h3M2 11.5h2.5L11 4.5h3M12 2.5l2 2-2 2M12 9.5l2 2-2 2' }]] },
+    // { }
+    other: {
+      name: 'nested or binary',
+      icon: [['path', { d: 'M6 2.5c-1.5 0-2 .8-2 2v2c0 1-.6 1.5-1.5 1.5.9 0 1.5.5 1.5 1.5v2c0 1.2.5 2 2 2M10 2.5c1.5 0 2 .8 2 2v2c0 1 .6 1.5 1.5 1.5-.9 0-1.5.5-1.5 1.5v2c0 1.2-.5 2-2 2' }]],
+    },
+    // a crossed-out circle
+    empty: {
+      name: 'no values',
+      icon: [
+        ['circle', { cx: '8', cy: '8', r: '5.5' }],
+        ['path', { d: 'M4.2 11.8 11.8 4.2' }],
+      ],
+    },
   };
 
   /**
@@ -34,7 +81,7 @@
    * @property {number} index
    * @property {string} name
    * @property {import('../../src/tableData').ColumnStats} column
-   * @property {{ glyph: string, name: string }} info
+   * @property {KindInfo} info
    * @property {number} nonNull
    * @property {number} nullFrac
    * @property {string} nullText   "0", or "N (P%)"
@@ -73,6 +120,10 @@
    *          filterInputs: HTMLInputElement[], clearButton: HTMLButtonElement,
    *          filterSeq: number, filterTimer: number | undefined,
    *          pendingScroll?: { top: number, left: number },
+   *          rowsHidden?: boolean, statsSeq?: number,
+   *          rowHeight?: number, scrollQueued?: boolean,
+   *          shownRows?: string[][], sel?: Selection, selectionEl?: HTMLElement,
+   *          win?: { rows: string[][], rowHeight: number, start: number, end: number, top: HTMLElement, bottom: HTMLElement },
    *          descriptions: Array<string | undefined>,
    *          filter: 'none' | 'pending' | 'active' | 'invalid' | 'failed' } | undefined}
    */
@@ -82,6 +133,8 @@
   // and only a reply carrying the newest one is applied. Never reset, so a
   // reply for a table that has since been replaced can't collide with a new one.
   let filterSeqCounter = 0;
+  // The same for `get-stats` requests.
+  let statsSeqCounter = 0;
   const FILTER_DEBOUNCE_MS = 250;
   // Mirrors filterLimits.maxTextLength in src/filter.ts: the host rejects longer text.
   const MAX_FILTER_TEXT_LENGTH = 1000;
@@ -205,7 +258,8 @@
         ? `${column.min} → ${column.max}`
         : undefined;
 
-      const summary = `Details for ${name}: ${info.name}, `
+      const typeName = column.nativeType ? `${info.name}, ${column.nativeType}` : info.name;
+      const summary = `Details for ${name}: ${typeName}, `
         + (column.nullCount > 0 ? `${nullText} nulls` : 'no nulls')
         + (column.distinctCount !== undefined ? `, ${distinctText} distinct` : '');
 
@@ -317,9 +371,26 @@
 
   /** @param {ColumnModel} model */
   function renderTypeBadge(model) {
-    const badge = el('span', { class: `type-badge type-${model.column.type}`, title: model.info.name });
-    badge.textContent = model.info.glyph;
+    const label = typeLabel(model);
+    const badge = el('span', {
+      class: `type-badge type-${model.column.type}`,
+      'data-kind': model.column.type,
+      role: 'img',
+      'aria-label': label,
+      title: label,
+    });
+    const svg = svgEl('svg', { class: 'type-icon', width: '14', height: '14', viewBox: '0 0 16 16', 'aria-hidden': 'true' });
+    for (const [tag, attrs] of model.info.icon) {
+      const { solid, ...rest } = attrs;
+      svg.appendChild(svgEl(tag, solid ? { ...rest, class: 'type-icon-solid' } : rest));
+    }
+    badge.appendChild(svg);
     return badge;
+  }
+
+  /** "integer", or "integer · BIGINT" when the source names its own type. @param {ColumnModel} model */
+  function typeLabel(model) {
+    return model.column.nativeType ? `${model.info.name} · ${model.column.nativeType}` : model.info.name;
   }
 
   /**
@@ -458,9 +529,11 @@
     const view = currentView;
     if (!view || view.stats !== 'idle') { return; }
     view.stats = 'pending';
+    const seq = ++statsSeqCounter;
+    view.statsSeq = seq;
     applyStatsStatus();
     vscode.postMessage(
-      view.tableName !== undefined ? { type: 'get-stats', table: view.tableName } : { type: 'get-stats' }
+      view.tableName !== undefined ? { type: 'get-stats', seq, table: view.tableName } : { type: 'get-stats', seq }
     );
   }
 
@@ -472,7 +545,9 @@
    */
   function handleStatsData(payload) {
     const view = currentView;
-    if (!view || view.stats !== 'pending' || !payload || payload.table !== view.tableName) { return; }
+    // The seq is what tells this view's reply from a slower one for the same table's previous view
+    // (a refresh re-renders the table while the old handle's scan may still be running).
+    if (!view || view.stats !== 'pending' || !payload || payload.table !== view.tableName || payload.seq !== view.statsSeq) { return; }
     const stats = payload.stats;
     if (!stats || (!stats.skippedReason && (!Array.isArray(stats.columns) || stats.columns.length !== view.headers.length))) {
       view.stats = 'failed';
@@ -527,7 +602,7 @@
     card.appendChild(head);
 
     const sub = el('p', { class: 'card-sub' });
-    sub.textContent = model.info.name;
+    sub.textContent = typeLabel(model);
     card.appendChild(sub);
     if (model.description) {
       const about = el('p', { class: 'card-description' });
@@ -697,6 +772,415 @@
     if (document.hidden) { closeCard(false); }
   });
 
+  // ── Selection ─────────────────────────────────────────────────────────
+  //
+  // Click a cell, a row number or a column name to select it (JetBrains-style): Shift extends
+  // from the anchor, Cmd/Ctrl adds another range, dragging sweeps, the arrow keys move and
+  // Cmd/Ctrl+C copies the selection as tab-separated text. State is by row *index* into
+  // `view.shownRows` (the rows the table is showing), never by DOM node: with row
+  // virtualization most rows are not in the DOM, and the ones that are get redrawn.
+
+  /** Above this many cells a selection is counted but not summed. */
+  const SELECTION_SCAN_CAP = 250000;
+  const NUMERIC_CELL = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
+
+  /**
+   * @typedef {{ r0: number, r1: number, c0: number, c1: number }} SelRange
+   * @typedef {{ r: number, c: number }} SelSpot
+   * @typedef {{ ranges: SelRange[], kind: 'cells' | 'rows' | 'cols', anchor: SelSpot, cursor: SelSpot }} Selection
+   */
+
+  /** The mouse gesture in progress (a drag extends the selection it started). @type {{ view: NonNullable<typeof currentView>, kind: 'cells' | 'rows' | 'cols' } | undefined} */
+  let selectionDrag;
+  /** Set only while Cmd/Ctrl+Shift+C asks the `copy` handler to add the header line. */
+  let copyWithHeaders = false;
+
+  /**
+   * The range between two spots: a rectangle of cells, or whole rows / whole columns.
+   * @param {'cells' | 'rows' | 'cols'} kind
+   * @param {SelSpot} a
+   * @param {SelSpot} b
+   * @param {NonNullable<typeof currentView>} view
+   * @returns {SelRange}
+   */
+  function makeRange(kind, a, b, view) {
+    const rows = view.shownRows ? view.shownRows.length : 0;
+    const cols = view.headers.length;
+    const r0 = Math.min(a.r, b.r);
+    const r1 = Math.max(a.r, b.r);
+    const c0 = Math.min(a.c, b.c);
+    const c1 = Math.max(a.c, b.c);
+    if (kind === 'rows') { return { r0, r1, c0: 0, c1: cols - 1 }; }
+    if (kind === 'cols') { return { r0: 0, r1: rows - 1, c0, c1 }; }
+    return { r0, r1, c0, c1 };
+  }
+
+  /**
+   * Plain click replaces the selection, Shift extends the active range from the anchor, Cmd/Ctrl adds a range.
+   * @param {NonNullable<typeof currentView>} view
+   * @param {'cells' | 'rows' | 'cols'} kind
+   * @param {SelSpot} spot
+   * @param {boolean} extend
+   * @param {boolean} add
+   */
+  function applySelection(view, kind, spot, extend, add) {
+    const sel = view.sel;
+    if (extend && sel && sel.kind === kind) {
+      const ranges = sel.ranges.slice(0, -1);
+      ranges.push(makeRange(kind, sel.anchor, spot, view));
+      view.sel = { ranges, kind, anchor: sel.anchor, cursor: spot };
+    } else if (add && sel) {
+      view.sel = { ranges: [...sel.ranges, makeRange(kind, spot, spot, view)], kind, anchor: spot, cursor: spot };
+    } else {
+      view.sel = { ranges: [makeRange(kind, spot, spot, view)], kind, anchor: spot, cursor: spot };
+    }
+    paintSelection(view);
+  }
+
+  /** @param {NonNullable<typeof currentView>} view */
+  function selectAll(view) {
+    const rows = view.shownRows ? view.shownRows.length : 0;
+    if (rows === 0) { return; }
+    const last = { r: rows - 1, c: view.headers.length - 1 };
+    view.sel = { ranges: [makeRange('cells', { r: 0, c: 0 }, last, view)], kind: 'cells', anchor: { r: 0, c: 0 }, cursor: last };
+    paintSelection(view);
+  }
+
+  /** @param {NonNullable<typeof currentView>} view */
+  function clearSelection(view) {
+    if (!view.sel) { return; }
+    view.sel = undefined;
+    paintSelection(view);
+  }
+
+  /** The row index a drawn <tr> stands for: its gutter number minus one. @param {Element | null} tr */
+  function rowIndexOf(tr) {
+    const gutter = tr && /** @type {HTMLTableRowElement} */ (tr).cells && /** @type {HTMLTableRowElement} */ (tr).cells[0];
+    return gutter ? Number(gutter.textContent) - 1 : -1;
+  }
+
+  /**
+   * Which cell, row or column an element is, for the kind of gesture under way.
+   * @param {Element} target
+   * @param {'cells' | 'rows' | 'cols'} kind
+   * @param {SelSpot} fallback used for the part the element does not say (the column of a gutter cell, ...)
+   * @returns {SelSpot | undefined}
+   */
+  function spotOf(target, kind, fallback) {
+    const cell = target.closest('td, th');
+    if (!cell || cell.classList.contains('spacer-cell')) { return undefined; }
+    const inBody = cell.tagName === 'TD';
+    const column = cell.classList.contains('row-num') ? fallback.c : /** @type {HTMLTableCellElement} */ (cell).cellIndex - 1;
+    if (kind === 'cols') {
+      return inBody || !(cell.parentElement && cell.parentElement.classList.contains('filter-row'))
+        ? { r: 0, c: Math.max(0, column) }
+        : undefined;
+    }
+    if (!inBody) { return undefined; }
+    const r = rowIndexOf(cell.parentElement);
+    return r < 0 ? undefined : { r, c: kind === 'rows' ? 0 : Math.max(0, column) };
+  }
+
+  /**
+   * @param {NonNullable<typeof currentView>} view
+   * @param {MouseEvent} event
+   */
+  function onTableMouseDown(view, event) {
+    if (event.button !== 0 || event.altKey) { return; } // Alt+click is the filter shortcut
+    const target = /** @type {Element | null} */ (event.target);
+    if (!target || !target.closest || target.closest('input, button, textarea, select, a')) { return; }
+    const cell = target.closest('td, th');
+    if (!cell || !view.shownRows || cell.classList.contains('spacer-cell')) { return; }
+    const extend = event.shiftKey;
+    const add = event.metaKey || event.ctrlKey;
+    /** @type {'cells' | 'rows' | 'cols'} */
+    let kind = 'cells';
+    if (cell.tagName === 'TH') {
+      if (cell.parentElement && cell.parentElement.classList.contains('filter-row')) { return; }
+      if (cell.classList.contains('row-num')) {
+        event.preventDefault();
+        view.wrapper.focus({ preventScroll: true });
+        selectAll(view);
+        return;
+      }
+      kind = 'cols';
+    } else if (cell.classList.contains('row-num')) {
+      kind = 'rows';
+    }
+    const spot = spotOf(target, kind, view.sel ? view.sel.cursor : { r: 0, c: 0 });
+    if (!spot) { return; }
+    // No default: it would start a native text selection and drag the page around.
+    event.preventDefault();
+    view.wrapper.focus({ preventScroll: true });
+    applySelection(view, kind, spot, extend, add);
+    selectionDrag = { view, kind };
+  }
+
+  document.addEventListener('mousemove', (event) => {
+    const drag = selectionDrag;
+    if (!drag) { return; }
+    if (currentView !== drag.view || !(event.buttons & 1)) { selectionDrag = undefined; return; }
+    const sel = drag.view.sel;
+    const target = /** @type {Element | null} */ (event.target);
+    if (!sel || !target || !target.closest) { return; }
+    const spot = spotOf(target, drag.kind, sel.cursor);
+    if (!spot || (spot.r === sel.cursor.r && spot.c === sel.cursor.c)) { return; }
+    applySelection(drag.view, drag.kind, spot, true, false);
+  });
+  document.addEventListener('mouseup', () => { selectionDrag = undefined; });
+
+  /**
+   * Arrow keys, Home/End, PageUp/PageDown and Cmd/Ctrl+A on the focused table; Escape clears.
+   * With no selection the keys are left alone (they scroll the table natively).
+   * @param {NonNullable<typeof currentView>} view
+   * @param {KeyboardEvent} event
+   */
+  function onTableKeyDown(view, event) {
+    const target = /** @type {Element | null} */ (event.target);
+    if (target && target.closest && target.closest('input, textarea, button, select')) { return; }
+    const mod = event.metaKey || event.ctrlKey;
+    const key = event.key;
+    if (mod && !event.altKey && key.toLowerCase() === 'a') {
+      event.preventDefault();
+      selectAll(view);
+      return;
+    }
+    if (mod && event.shiftKey && key.toLowerCase() === 'c') {
+      if (view.sel && typeof document.execCommand === 'function') {
+        event.preventDefault();
+        copyWithHeaders = true;
+        try { document.execCommand('copy'); } finally { copyWithHeaders = false; }
+      }
+      return;
+    }
+    const sel = view.sel;
+    if (key === 'Escape') {
+      // An open statistics card closes first (its own handler, one level up).
+      if (sel && !openCard) {
+        event.stopPropagation();
+        clearSelection(view);
+      }
+      return;
+    }
+    if (!sel || !view.shownRows || event.altKey) { return; }
+    const rows = view.shownRows.length;
+    const cols = view.headers.length;
+    const { r, c } = sel.cursor;
+    const page = Math.max(1, Math.floor((view.wrapper.clientHeight || 400) / rowHeightOf(view)) - 1);
+    /** @type {SelSpot | undefined} */
+    let next;
+    switch (key) {
+      case 'ArrowUp': next = { r: mod ? 0 : r - 1, c }; break;
+      case 'ArrowDown': next = { r: mod ? rows - 1 : r + 1, c }; break;
+      case 'ArrowLeft': next = { r, c: mod ? 0 : c - 1 }; break;
+      case 'ArrowRight': next = { r, c: mod ? cols - 1 : c + 1 }; break;
+      case 'Home': next = { r: mod ? 0 : r, c: 0 }; break;
+      case 'End': next = { r: mod ? rows - 1 : r, c: cols - 1 }; break;
+      case 'PageUp': next = { r: r - page, c }; break;
+      case 'PageDown': next = { r: r + page, c }; break;
+      default: return;
+    }
+    event.preventDefault();
+    const spot = { r: Math.max(0, Math.min(rows - 1, next.r)), c: Math.max(0, Math.min(cols - 1, next.c)) };
+    if (event.shiftKey) {
+      // Rows/columns stay whole while extended along their own axis.
+      applySelection(view, sel.kind, spot, true, false);
+    } else {
+      applySelection(view, 'cells', spot, false, false);
+    }
+    revealCell(view, spot);
+  }
+
+  /**
+   * Puts a selection back after a refresh, cut to the rows the table has now (it may have shrunk).
+   * @param {NonNullable<typeof currentView>} view
+   * @param {Selection | undefined} previous
+   */
+  function restoreSelection(view, previous) {
+    const rows = view.shownRows ? view.shownRows.length : 0;
+    if (!previous || rows === 0) { return; }
+    const last = rows - 1;
+    const ranges = previous.ranges
+      .filter((g) => g.r0 <= last)
+      .map((g) => ({ ...g, r1: Math.min(g.r1, last) }));
+    if (ranges.length === 0) { return; }
+    const clamp = (/** @type {SelSpot} */ spot) => ({ r: Math.min(spot.r, last), c: spot.c });
+    view.sel = { ranges, kind: previous.kind, anchor: clamp(previous.anchor), cursor: clamp(previous.cursor) };
+    paintSelection(view);
+  }
+
+  /** One row's height in px: measured, else read from a drawn row, else a typical one. @param {NonNullable<typeof currentView>} view */
+  function rowHeightOf(view) {
+    if (view.win) { return view.win.rowHeight; }
+    if (view.rowHeight) { return view.rowHeight; }
+    const row = view.tbody.rows[0];
+    return (row && row.getBoundingClientRect().height) || 24;
+  }
+
+  /**
+   * Scrolls so the cell is in view, clear of the sticky header and gutter.
+   * @param {NonNullable<typeof currentView>} view
+   * @param {SelSpot} spot
+   */
+  function revealCell(view, spot) {
+    const wrapper = view.wrapper;
+    const headerHeight = view.thead.getBoundingClientRect().height;
+    if (view.win) {
+      // The row may not be drawn: bring its position into the viewport arithmetically, then draw it.
+      const top = spot.r * view.win.rowHeight;
+      const viewport = (wrapper.clientHeight || 400) - headerHeight;
+      if (top < wrapper.scrollTop) { wrapper.scrollTop = top; }
+      else if (top + view.win.rowHeight > wrapper.scrollTop + viewport) { wrapper.scrollTop = top + view.win.rowHeight - viewport; }
+      syncWindow(view);
+    }
+    const tr = view.win
+      ? view.tbody.rows[spot.r - view.win.start + 1]
+      : view.tbody.rows[spot.r];
+    const td = tr && tr.cells[spot.c + 1];
+    if (!td) { return; }
+    const box = td.getBoundingClientRect();
+    const frame = wrapper.getBoundingClientRect();
+    const gutter = view.gutterTh.getBoundingClientRect().width;
+    if (box.top < frame.top + headerHeight) { wrapper.scrollTop -= frame.top + headerHeight - box.top; }
+    else if (box.bottom > frame.bottom) { wrapper.scrollTop += box.bottom - frame.bottom; }
+    if (box.left < frame.left + gutter) { wrapper.scrollLeft -= frame.left + gutter - box.left; }
+    else if (box.right > frame.right) { wrapper.scrollLeft += box.right - frame.right; }
+    syncWindow(view);
+  }
+
+  /**
+   * Marks the drawn cells, row numbers and column headers that the selection covers.
+   * Cheap enough to run on every redraw: only the (few) drawn rows are visited.
+   * @param {NonNullable<typeof currentView>} view
+   */
+  function paintSelection(view) {
+    const sel = view.sel;
+    const ranges = sel ? sel.ranges : [];
+    const cols = view.headers.length;
+    const total = view.shownRows ? view.shownRows.length : 0;
+    const rows = view.tbody.rows;
+    for (let i = 0; i < rows.length; i++) {
+      const tr = rows[i];
+      if (tr.classList.contains('row-spacer')) { continue; }
+      const r = rowIndexOf(tr);
+      const hit = ranges.filter((g) => r >= g.r0 && r <= g.r1);
+      tr.cells[0].classList.toggle('is-selected', hit.some((g) => g.c0 === 0 && g.c1 === cols - 1));
+      for (let c = 0; c < cols; c++) {
+        const td = tr.cells[c + 1];
+        if (!td) { break; }
+        td.classList.toggle('is-selected', hit.some((g) => c >= g.c0 && c <= g.c1));
+        td.classList.toggle('is-cursor', !!sel && sel.kind === 'cells' && sel.cursor.r === r && sel.cursor.c === c);
+      }
+    }
+    view.ths.forEach((th, c) => {
+      th.classList.toggle('is-selected', ranges.some((g) => g.r0 === 0 && g.r1 === total - 1 && c >= g.c0 && c <= g.c1));
+    });
+    view.gutterTh.classList.toggle(
+      'is-selected',
+      ranges.some((g) => g.r0 === 0 && g.r1 === total - 1 && g.c0 === 0 && g.c1 === cols - 1)
+    );
+    if (view.selectionEl) {
+      const text = selectionSummary(view);
+      view.selectionEl.textContent = text;
+      view.selectionEl.hidden = text === '';
+    }
+  }
+
+  /**
+   * "12 cells selected · Sum 340 · Avg 28.3 · Min 1 · Max 99"; the figures only when every
+   * non-empty selected cell is a number, and nothing for a single cell.
+   * @param {NonNullable<typeof currentView>} view
+   */
+  function selectionSummary(view) {
+    const sel = view.sel;
+    const shown = view.shownRows;
+    if (!sel || !shown) { return ''; }
+    const cols = view.headers.length;
+    let area = 0;
+    for (const g of sel.ranges) { area += (g.r1 - g.r0 + 1) * (g.c1 - g.c0 + 1); }
+    if (area <= 1) { return ''; }
+    if (area > SELECTION_SCAN_CAP) { return `${area.toLocaleString()} cells selected`; }
+    const seen = sel.ranges.length > 1 ? new Set() : undefined;
+    let cells = 0;
+    let nonEmpty = 0;
+    let sum = 0;
+    let min = Infinity;
+    let max = -Infinity;
+    let numeric = true;
+    for (const g of sel.ranges) {
+      for (let r = g.r0; r <= g.r1; r++) {
+        const row = shown[r] || [];
+        for (let c = g.c0; c <= g.c1; c++) {
+          if (seen) {
+            const key = r * cols + c;
+            if (seen.has(key)) { continue; }
+            seen.add(key);
+          }
+          cells++;
+          const text = (row[c] === undefined ? '' : row[c]).trim();
+          if (text === '') { continue; }
+          nonEmpty++;
+          const n = NUMERIC_CELL.test(text) ? Number(text) : NaN;
+          if (Number.isFinite(n)) {
+            sum += n;
+            if (n < min) { min = n; }
+            if (n > max) { max = n; }
+          } else {
+            numeric = false;
+          }
+        }
+      }
+    }
+    const label = `${cells.toLocaleString()} cells selected`;
+    if (!numeric || nonEmpty === 0) { return label; }
+    return `${label} · Sum ${formatNumber(sum)} · Avg ${formatNumber(sum / nonEmpty)} · Min ${formatNumber(min)} · Max ${formatNumber(max)}`;
+  }
+
+  /** One cell as a spreadsheet pastes it: quoted when it holds a tab, a line break or a quote. @param {string} text */
+  function tsvCell(text) {
+    return /[\t\r\n"]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  }
+
+  /**
+   * The selection as tab-separated text, one block per range. Reads the data, not the DOM,
+   * so rows that are not drawn are copied too.
+   * @param {NonNullable<typeof currentView>} view
+   * @param {boolean} withHeaders add the column names above the first range
+   */
+  function selectionToTsv(view, withHeaders) {
+    const sel = view.sel;
+    const shown = view.shownRows;
+    if (!sel || !shown) { return ''; }
+    const blocks = sel.ranges.map((g, index) => {
+      const lines = [];
+      if (withHeaders && index === 0) {
+        lines.push(view.headers.slice(g.c0, g.c1 + 1).map(tsvCell).join('\t'));
+      }
+      for (let r = g.r0; r <= g.r1; r++) {
+        const row = shown[r] || [];
+        const cells = [];
+        for (let c = g.c0; c <= g.c1; c++) { cells.push(tsvCell(row[c] === undefined ? '' : row[c])); }
+        lines.push(cells.join('\t'));
+      }
+      return lines.join('\n');
+    });
+    return blocks.join('\n');
+  }
+
+  // Registered once. Leaves a copy alone when the user is copying from a text box or has
+  // selected text elsewhere (the statistics card), so those keep working.
+  document.addEventListener('copy', (event) => {
+    const view = currentView;
+    if (!view || !view.sel || !event.clipboardData) { return; }
+    const active = document.activeElement;
+    if (active && /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName)) { return; }
+    const selected = window.getSelection ? window.getSelection() : null;
+    if (selected && selected.toString() !== '') { return; }
+    event.clipboardData.setData('text/plain', selectionToTsv(view, copyWithHeaders));
+    event.preventDefault();
+  });
+
+
   // ── Column filtering ──────────────────────────────────────────────────
 
   /**
@@ -707,9 +1191,22 @@
    * @param {string[][]} rows
    */
   function renderRows(tbody, rows) {
+    tbody.textContent = '';
+    tbody.appendChild(buildRows(rows, 0, rows.length));
+  }
+
+  /**
+   * The <tr>s for rows [start, end), numbered by their index in `rows` (so a window
+   * starting at row 5000 still counts from 5001). Odd-numbered rows are `alt` for the
+   * zebra stripes, which `:nth-child` cannot do once spacer rows shift the parity.
+   * @param {string[][]} rows
+   * @param {number} start
+   * @param {number} end
+   */
+  function buildRows(rows, start, end) {
     const fragment = document.createDocumentFragment();
-    for (let i = 0; i < rows.length; i++) {
-      const tr = el('tr');
+    for (let i = start; i < end; i++) {
+      const tr = el('tr', i % 2 === 1 ? { class: 'alt' } : undefined);
 
       // Row number cell
       const rnCell = el('td', { class: 'row-num' });
@@ -724,8 +1221,92 @@
       }
       fragment.appendChild(tr);
     }
-    tbody.textContent = '';
-    tbody.appendChild(fragment);
+    return fragment;
+  }
+
+  /**
+   * Shows `rows` in the view's body: all of them for a small table, else a window of them
+   * (see VIRTUALIZE_ABOVE_ROWS). Without layout (a hidden panel, or a test DOM) one row's
+   * height cannot be measured, and the whole table is drawn as before.
+   * @param {NonNullable<typeof currentView>} view
+   * @param {string[][]} rows
+   */
+  function showRows(view, rows) {
+    view.win = undefined;
+    // New rows: what was selected by index no longer means anything.
+    view.sel = undefined;
+    view.shownRows = rows;
+    if (rows.length <= VIRTUALIZE_ABOVE_ROWS) {
+      renderRows(view.tbody, rows);
+      paintSelection(view);
+      return;
+    }
+    let rowHeight = view.rowHeight;
+    if (!rowHeight) {
+      const sample = Math.min(rows.length, ROW_MEASURE_SAMPLE);
+      renderRows(view.tbody, rows.slice(0, sample));
+      const measured = view.tbody.getBoundingClientRect().height / sample;
+      if (!(measured > 0)) {
+        renderRows(view.tbody, rows);
+        paintSelection(view);
+        return;
+      }
+      rowHeight = view.rowHeight = measured;
+    }
+    const columns = view.headers.length + 1; // plus the row-number gutter
+    const spacer = () => {
+      const tr = el('tr', { class: 'row-spacer', 'aria-hidden': 'true' });
+      tr.appendChild(el('td', { class: 'spacer-cell', colspan: String(columns) }));
+      return tr;
+    };
+    view.win = { rows, rowHeight, start: -1, end: -1, top: spacer(), bottom: spacer() };
+    syncWindow(view, true);
+  }
+
+  /**
+   * Redraws the window around the viewport if the viewport has moved close to an edge of
+   * what is drawn (or `force`). Call it after anything that moves the scroll position from
+   * script: the `scroll` event is asynchronous.
+   * @param {NonNullable<typeof currentView> | undefined} view
+   * @param {boolean=} force
+   */
+  function syncWindow(view, force) {
+    const win = view && view.win;
+    if (!view || !win) { return; }
+    const total = win.rows.length;
+    const scrollTop = view.wrapper.scrollTop;
+    // A panel that is not laid out reports 0; assume a tall one rather than draw nothing.
+    const viewport = view.wrapper.clientHeight || 1000;
+    const needFirst = Math.floor(scrollTop / win.rowHeight);
+    const needLast = Math.min(total, Math.ceil((scrollTop + viewport) / win.rowHeight));
+    if (!force) {
+      const topOk = win.start === 0 || needFirst >= win.start + ROW_WINDOW_MARGIN;
+      const bottomOk = win.end === total || needLast <= win.end - ROW_WINDOW_MARGIN;
+      if (topOk && bottomOk) { return; }
+    }
+    const first = Math.max(0, needFirst - ROW_OVERSCAN);
+    const last = Math.min(total, Math.max(needLast, first + 1) + ROW_OVERSCAN);
+    win.start = first;
+    win.end = last;
+    // CSSOM, not a style attribute: the CSP has no 'unsafe-inline' for styles.
+    /** @type {HTMLElement} */ (win.top.firstElementChild).style.height = `${first * win.rowHeight}px`;
+    /** @type {HTMLElement} */ (win.bottom.firstElementChild).style.height = `${(total - last) * win.rowHeight}px`;
+    view.tbody.textContent = '';
+    view.tbody.appendChild(win.top);
+    view.tbody.appendChild(buildRows(win.rows, first, last));
+    view.tbody.appendChild(win.bottom);
+    paintSelection(view);
+  }
+
+  /** `scroll` events come in bursts: redraw at most once a frame. @param {NonNullable<typeof currentView>} view */
+  function queueWindowSync(view) {
+    if (!view.win || view.scrollQueued) { return; }
+    view.scrollQueued = true;
+    const run = () => {
+      view.scrollQueued = false;
+      if (currentView === view) { syncWindow(view); }
+    };
+    if (window.requestAnimationFrame) { window.requestAnimationFrame(run); } else { window.setTimeout(run, 0); }
   }
 
   /** @param {NonNullable<typeof currentView>} view @param {Record<string, unknown>} message */
@@ -764,9 +1345,10 @@
 
   /** Back to the unfiltered table, without asking the host. @param {NonNullable<typeof currentView>} view */
   function restoreOriginalRows(view) {
-    renderRows(view.tbody, view.originalRows);
-    view.statsBar.textContent = view.baseStatsText;
+    view.rowsHidden = false;
     view.wrapper.scrollTop = 0;
+    showRows(view, view.originalRows);
+    view.statsBar.textContent = view.baseStatsText;
   }
 
   /**
@@ -825,6 +1407,7 @@
     if (!scroll) { return; }
     view.wrapper.scrollTop = scroll.top;
     view.wrapper.scrollLeft = scroll.left;
+    syncWindow(view);
   }
 
   /**
@@ -841,6 +1424,8 @@
     if (Array.isArray(payload.errors) && payload.errors.length > 0) {
       // Keep whatever rows are showing; just point at the boxes that didn't parse.
       view.filter = 'invalid';
+      // A reload hid the rows while it waited for this answer; there is no answer, so the table comes back.
+      if (view.rowsHidden) { restoreOriginalRows(view); }
       restorePendingScroll(view);
       for (const error of payload.errors) {
         const input = view.filterInputs[error.column];
@@ -860,9 +1445,10 @@
       return;
     }
     view.filter = 'active';
-    renderRows(view.tbody, payload.rows);
+    view.rowsHidden = false;
     // After a reload the user's scroll position comes back with the filtered rows.
     view.wrapper.scrollTop = 0;
+    showRows(view, payload.rows);
     restorePendingScroll(view);
     const total = view.totalRowCount != null ? view.totalRowCount : view.rowCount;
     let text = `${payload.matchCount.toLocaleString()} of ${total.toLocaleString()} row${total !== 1 ? 's' : ''} match`;
@@ -908,7 +1494,7 @@
     view.tbody.addEventListener('click', (event) => {
       if (!event.altKey) { return; }
       const cell = /** @type {Element} */ (event.target).closest('td');
-      if (!cell || cell.classList.contains('row-num')) { return; }
+      if (!cell || cell.classList.contains('row-num') || cell.classList.contains('spacer-cell')) { return; }
       const input = view.filterInputs[/** @type {HTMLTableCellElement} */ (cell).cellIndex - 1]; // minus the row-number gutter
       const text = cell.textContent || '';
       const value = '=' + text;
@@ -935,11 +1521,13 @@
    * @param {{ headers: string[], rows: string[][], rowCount: number, columnCount: number, totalRowCount?: number }} data
    * @param {string=} tableName the selected table/sheet of a multi-table source; undefined for CSV/Parquet
    * @param {string=} tableError why reading `tableName` failed; shown instead of the table
-   * @param {{ host?: HTMLElement, result?: { truncated: boolean }, columnDescriptions?: Record<string, string> }=} opts
+   * @param {{ host?: HTMLElement, result?: { truncated: boolean }, columnDescriptions?: Record<string, string>, deferStats?: boolean }=} opts
    *   `host` is where to render instead of #app; `result` marks the rows of a query: no filter row, no
    *   statistics (both are keyed by a table the host knows, which a query result is not), and a note when
    *   it was cut; `columnDescriptions` (by column name, matched ignoring case) are shown in the header
-   *   tooltip and the detail card.
+   *   tooltip and the detail card; `deferStats` leaves the `get-stats` request to the caller (it must call
+   *   `requestStats()` itself): a reload sends the filter first so the filtered rows are not queued behind a
+   *   whole-table statistics scan.
    */
   function renderTable(data, tableName, tableError, opts) {
     const app = opts && opts.host ? opts.host : document.getElementById('app');
@@ -979,10 +1567,14 @@
 
     const statusEl = renderStatsStatus();
     statsHeader.appendChild(statusEl);
+    // Beside the stats bar, not in it (the bar's text is asserted exactly): what is selected.
+    const selectionEl = el('span', { class: 'selection-summary' });
+    selectionEl.hidden = true;
+    statsHeader.appendChild(selectionEl);
     app.appendChild(statsHeader);
 
     // Scroll wrapper
-    const wrapper = el('div', { class: 'scroll-wrapper' });
+    const wrapper = el('div', { class: 'scroll-wrapper', tabindex: '0', 'aria-label': 'Table data' });
 
     const table = el('table', {
       id: 'csv-table',
@@ -1068,7 +1660,6 @@
     });
 
     const tbody = el('tbody');
-    renderRows(tbody, data.rows);
     table.appendChild(tbody);
     wrapper.appendChild(table);
     app.appendChild(wrapper);
@@ -1079,6 +1670,7 @@
       tbody,
       ths,
       gutterTh: rnHeader,
+      selectionEl,
       statusEl,
       statsBar,
       tableName,
@@ -1099,9 +1691,15 @@
       filterTimer: undefined,
       filter: 'none',
     };
+    // After the view exists and is in the document: a large table measures a row to size its window.
+    const created = /** @type {NonNullable<typeof currentView>} */ (currentView);
+    showRows(created, data.rows);
+    wrapper.addEventListener('scroll', () => queueWindowSync(created), { passive: true });
+    wrapper.addEventListener('mousedown', (event) => onTableMouseDown(created, event));
+    wrapper.addEventListener('keydown', (event) => onTableKeyDown(created, event));
     if (!result) {
       wireFilterRow(currentView);
-      requestStats();
+      if (!(opts && opts.deferStats)) { requestStats(); }
     }
   }
 
@@ -1157,6 +1755,11 @@
   let queryRerun;
   /** Result scroll position to put back once the re-run's answer is drawn. */
   let queryScrollToRestore;
+  /**
+   * The data changed (a refresh) while the SQL box was not showing, so the result held for it is
+   * old. It is re-run when the box is opened again, not while nobody can see it.
+   */
+  let queryStale = false;
   /** @type {HTMLElement | undefined} */
   let queryStatusEl;
 
@@ -1520,6 +2123,8 @@
       }
     }
     if (outcome.success && outcome.data.tables.length > 0) { lastMultiOutcome = outcome; }
+    // A reload while the table is showing leaves the SQL result behind the data.
+    if (isReload && !queryMode && queryRunSql !== undefined) { queryStale = true; }
     // A reload re-renders everything; remember what the user was doing.
     const carried = isReload && !queryMode ? captureReloadState() : undefined;
     const carriedQuery = isReload && queryMode ? captureQueryUiState() : undefined;
@@ -1597,16 +2202,162 @@
       }
       return;
     }
+    const restoring = carried || (rerender ? savedTableState : undefined);
     renderTable(outcome.data.data, outcome.data.selectedTable, outcome.data.tableError, {
       columnDescriptions: outcome.data.columnDescriptions,
+      deferStats: !!restoring,
     });
-    if (carried) {
-      restoreReloadState(carried);
-    } else if (rerender && savedTableState) {
-      // Back from the SQL box: the filters and scroll the table had.
-      restoreReloadState(savedTableState);
+    if (restoring) {
+      // After a reload, or back from the SQL box: the filters and scroll the table had.
+      restoreReloadState(restoring);
+      // Statistics only now, behind the filter request: the host answers in order.
+      requestStats();
     }
     if (rerender) { savedTableState = undefined; }
+  }
+
+  // ── SQL highlighting ──────────────────────────────────────────────────
+  //
+  // The query box is a <textarea> (so selection, undo, IME and accessibility are the browser's)
+  // with its text made transparent and a <pre> underneath that draws the same text coloured.
+  // The colours come from CSS variables the host fills from the active theme (`sql-theme`
+  // message), with a default palette per theme brightness in styles.css. Spans are built with
+  // textContent only: the text is whatever the user typed or pasted.
+
+  const SQL_KEYWORDS = new Set((
+    'select from where group by order having limit offset fetch union intersect except all distinct as on join inner ' +
+    'left right full outer cross natural using with recursive insert into values update set delete create table view ' +
+    'drop alter add column index schema sequence temp temporary replace if exists not and or in is like ilike similar ' +
+    'glob between escape asc desc nulls first last case when then else end cast try_cast any some lateral unnest ' +
+    'window over partition rows range groups unbounded preceding following current row filter within qualify pivot ' +
+    'unpivot describe show summarize explain analyze copy attach detach install load pragma call returning primary ' +
+    'key foreign references unique check default constraint collate sample tablesample using ordinality ignore respect ' +
+    'grouping sets cube rollup array struct map extract interval at time zone positional asof anti semi macro function ' +
+    'begin commit rollback transaction use database export import vacuum checkpoint force summarize to from'
+  ).split(' '));
+  const SQL_CONSTANTS = new Set(['null', 'true', 'false']);
+  const SQL_TYPES = new Set((
+    'integer int bigint smallint tinyint hugeint ubigint uinteger usmallint utinyint uhugeint float double real decimal ' +
+    'numeric boolean bool varchar text char string blob bytea date time timestamp timestamptz datetime interval uuid ' +
+    'json bit bitstring list union enum varint'
+  ).split(' '));
+  const SQL_IDENTIFIER = /[\p{L}_][\p{L}\p{N}_$]*/uy;
+  const SQL_NUMBER = /(?:0[xX][0-9a-fA-F]+|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)/y;
+  const SQL_OPERATOR = /[+\-*/%<>=!|&^~:@#?]+/y;
+  /** The kinds of coloured token, which are also the names of the `sql-theme` colours. */
+  const SQL_COLOR_CLASSES = ['keyword', 'function', 'string', 'number', 'comment', 'type', 'operator', 'identifier', 'constant'];
+  const SQL_HEX_COLOR = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+  /** Longer than this is highlighted a frame later instead of on every keystroke. */
+  const SQL_SYNC_HIGHLIGHT_LIMIT = 20000;
+
+  /**
+   * Splits SQL text into `[class, text]` pieces that together are exactly the text. `plain` is
+   * everything that is not coloured (names, punctuation, whitespace). It never throws, and an
+   * unterminated string or comment simply runs to the end, as an editor draws it while you type.
+   * @param {string} text
+   * @returns {Array<[string, string]>}
+   */
+  function tokenizeSql(text) {
+    /** @type {Array<[string, string]>} */
+    const tokens = [];
+    const n = text.length;
+    let i = 0;
+    let plain = '';
+    const flush = () => { if (plain !== '') { tokens.push(['plain', plain]); plain = ''; } };
+    /** @param {string} kind @param {number} end */
+    const take = (kind, end) => { flush(); tokens.push([kind, text.slice(i, end)]); i = end; };
+    while (i < n) {
+      const ch = text[i];
+      const next = text[i + 1];
+      if (ch === '-' && next === '-') {
+        const eol = text.indexOf('\n', i);
+        take('comment', eol === -1 ? n : eol);
+      } else if (ch === '/' && next === '*') {
+        const close = text.indexOf('*/', i + 2);
+        take('comment', close === -1 ? n : close + 2);
+      } else if (ch === "'" || ch === '"') {
+        let j = i + 1;
+        while (j < n) {
+          if (text[j] === ch) {
+            if (text[j + 1] === ch) { j += 2; continue; } // a doubled quote is an escaped one
+            j++;
+            break;
+          }
+          j++;
+        }
+        take(ch === "'" ? 'string' : 'identifier', j);
+      } else if (ch === '$' && next === '$') {
+        const close = text.indexOf('$$', i + 2);
+        take('string', close === -1 ? n : close + 2);
+      } else if ((ch >= '0' && ch <= '9') || (ch === '.' && next !== undefined && next >= '0' && next <= '9')) {
+        SQL_NUMBER.lastIndex = i;
+        const match = SQL_NUMBER.exec(text);
+        take('number', match ? i + match[0].length : i + 1);
+      } else {
+        SQL_IDENTIFIER.lastIndex = i;
+        const word = SQL_IDENTIFIER.exec(text);
+        if (word) {
+          const lower = word[0].toLowerCase();
+          let kind = 'plain';
+          if (SQL_CONSTANTS.has(lower)) { kind = 'constant'; }
+          else if (SQL_TYPES.has(lower)) { kind = 'type'; }
+          else if (SQL_KEYWORDS.has(lower)) { kind = 'keyword'; }
+          else {
+            // A name straight before "(" is a call.
+            let k = i + word[0].length;
+            while (k < n && (text[k] === ' ' || text[k] === '\t')) { k++; }
+            if (text[k] === '(') { kind = 'function'; }
+          }
+          if (kind === 'plain') { plain += word[0]; i += word[0].length; } else { take(kind, i + word[0].length); }
+        } else {
+          SQL_OPERATOR.lastIndex = i;
+          const op = SQL_OPERATOR.exec(text);
+          if (op) { take('operator', i + op[0].length); } else { plain += ch; i++; }
+        }
+      }
+    }
+    flush();
+    return tokens;
+  }
+
+  /**
+   * Draws `text` coloured into the overlay. A text that ends in a line break gets one more
+   * character, or the overlay would be a line shorter than the box and drift out of step.
+   * @param {HTMLElement} layer
+   * @param {string} text
+   */
+  function paintSqlHighlight(layer, text) {
+    const fragment = document.createDocumentFragment();
+    for (const [kind, piece] of tokenizeSql(text)) {
+      if (kind === 'plain') {
+        fragment.appendChild(document.createTextNode(piece));
+      } else {
+        const span = el('span', { class: `sql-${kind}` });
+        span.textContent = piece;
+        fragment.appendChild(span);
+      }
+    }
+    if (text.endsWith('\n')) { fragment.appendChild(document.createTextNode(' ')); }
+    layer.textContent = '';
+    layer.appendChild(fragment);
+  }
+
+  /**
+   * Applies the host's `sql-theme` colours: each valid one becomes a CSS variable on the root
+   * (CSSOM, allowed by the CSP); a kind the theme does not colour, or an invalid value, goes back
+   * to the stylesheet's default for the theme's brightness.
+   * @param {Record<string, unknown> | undefined} colors
+   */
+  function applySqlTheme(colors) {
+    const root = document.documentElement;
+    for (const kind of SQL_COLOR_CLASSES) {
+      const value = colors && colors[kind];
+      if (typeof value === 'string' && SQL_HEX_COLOR.test(value)) {
+        root.style.setProperty(`--sql-${kind}`, value);
+      } else {
+        root.style.removeProperty(`--sql-${kind}`);
+      }
+    }
   }
 
   // ── SQL box ───────────────────────────────────────────────────────────
@@ -1640,6 +2391,7 @@
     }
     queryMode = on;
     renderMultiTableOutcome(lastMultiOutcome, { rerender: true });
+    if (on && queryStale && queryRunSql !== undefined && !queryRunning) { runQuery(queryRunSql); }
   }
 
   /** The result's scroll wrapper, if a result table is showing. */
@@ -1683,6 +2435,7 @@
     if (!scroll || !wrapper) { return; }
     wrapper.scrollTop = scroll.top;
     wrapper.scrollLeft = scroll.left;
+    syncWindow(currentView);
   }
 
   /** @param {HTMLElement} app */
@@ -1693,6 +2446,9 @@
       class: 'query-input',
       'aria-label': 'SQL query',
       rows: '6',
+      // No soft wrapping: a wrapped line breaks where the box's width says, and the coloured
+      // layer underneath has none of the box's scrollbars, so the two would break differently.
+      wrap: 'off',
       maxlength: String(MAX_QUERY_LENGTH),
       spellcheck: 'false',
       autocomplete: 'off',
@@ -1700,6 +2456,22 @@
     }));
     input.value = queryText;
     queryInputEl = input;
+    // The coloured copy of the text, drawn under the (transparent-text) box. It is not for
+    // assistive technology or the mouse: the textarea is the real control.
+    const layer = el('pre', { class: 'query-highlight', 'aria-hidden': 'true' });
+    paintSqlHighlight(layer, input.value);
+    let highlightFrame = 0;
+    const highlight = () => {
+      if (input.value.length <= SQL_SYNC_HIGHLIGHT_LIMIT) {
+        paintSqlHighlight(layer, input.value);
+      } else if (!highlightFrame) {
+        highlightFrame = window.requestAnimationFrame
+          ? window.requestAnimationFrame(() => { highlightFrame = 0; paintSqlHighlight(layer, input.value); })
+          : window.setTimeout(() => { highlightFrame = 0; paintSqlHighlight(layer, input.value); }, 0);
+      }
+      layer.scrollTop = input.scrollTop;
+      layer.scrollLeft = input.scrollLeft;
+    };
     const bar = el('div', { class: 'query-bar' });
     const run = /** @type {HTMLButtonElement} */ (el('button', { type: 'button', class: 'query-run' }));
     run.textContent = 'Run';
@@ -1710,7 +2482,11 @@
     const status = el('span', { class: 'query-status', role: 'status' });
     const sync = () => { run.disabled = input.value.trim() === ''; };
     sync();
-    input.addEventListener('input', () => { queryText = input.value; sync(); });
+    input.addEventListener('input', () => { queryText = input.value; sync(); highlight(); });
+    input.addEventListener('scroll', () => {
+      layer.scrollTop = input.scrollTop;
+      layer.scrollLeft = input.scrollLeft;
+    });
     input.addEventListener('keydown', (event) => {
       if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
         event.preventDefault();
@@ -1721,9 +2497,14 @@
     bar.appendChild(run);
     bar.appendChild(hint);
     bar.appendChild(status);
-    panel.appendChild(input);
+    const editor = el('div', { class: 'query-editor' });
+    editor.appendChild(layer);
+    editor.appendChild(input);
+    panel.appendChild(editor);
     panel.appendChild(bar);
     app.appendChild(panel);
+    layer.scrollTop = input.scrollTop;
+    layer.scrollLeft = input.scrollLeft;
     const host = el('div', { class: 'query-result' });
     app.appendChild(host);
     queryResultHost = host;
@@ -1753,6 +2534,7 @@
     queryRunSql = sql;
     queryRunning = true;
     queryRerun = undefined;
+    queryStale = false;
     queryScrollToRestore = scroll;
     setQueryStatus('Running…', false);
     vscode.postMessage({ type: 'run-query', seq: ++querySeqCounter, sql });
@@ -1810,7 +2592,9 @@
     // A refresh landed while this ran: the data changed under it, so run it again.
     const again = queryRerun;
     queryRerun = undefined;
-    if (again && queryRunSql !== undefined) { runQuery(queryRunSql, again.scroll); }
+    if (again && queryRunSql !== undefined) {
+      if (queryMode) { runQuery(queryRunSql, again.scroll); } else { queryStale = true; }
+    }
   }
 
   /** @param {string} text @param {boolean} isError @param {string=} title */
@@ -1871,6 +2655,7 @@
       filters: view.filterInputs.map((input) => input.value),
       top: view.wrapper.scrollTop,
       left: view.wrapper.scrollLeft,
+      cellSelection: view.sel,
       focused,
       selection: focusedInput ? [focusedInput.selectionStart, focusedInput.selectionEnd] : undefined,
     };
@@ -1891,11 +2676,18 @@
     const hasFilter = state.filters.some((text) => text.trim() !== '');
     if (hasFilter) {
       state.filters.forEach((text, i) => { view.filterInputs[i].value = text; });
+      // Not the whole unfiltered table for a moment: it is not what the user was looking at, and
+      // drawing it is the costly part. The filtered rows replace this empty body when they arrive.
+      view.win = undefined;
+      view.tbody.textContent = '';
+      view.rowsHidden = true;
       view.pendingScroll = { top: state.top, left: state.left };
       sendFilter(view, true);
     } else {
       view.wrapper.scrollTop = state.top;
       view.wrapper.scrollLeft = state.left;
+      syncWindow(view);
+      restoreSelection(view, state.cellSelection);
     }
     const input = state.focused >= 0 ? view.filterInputs[state.focused] : undefined;
     if (input) {
@@ -1925,6 +2717,12 @@
       handleReloadStatus(message);
     } else if (message.type === 'query-data') {
       handleQueryData(message.payload);
+    } else if (message.type === 'sql-theme') {
+      applySqlTheme(message.colors);
+    } else if (message.type === 'show-table') {
+      // The host (dbt "Preview Model") asked for the table that is already the selected one:
+      // nothing to re-read, but the SQL box has to give way to it.
+      setQueryMode(false);
     }
   });
 

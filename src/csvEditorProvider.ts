@@ -113,7 +113,7 @@ export class CsvEditorProvider
         await webview.postMessage({ type: 'csv-data', payload: outcome });
         this._onDidPostCsvData.fire(outcome);
       } else if (isGetStatsMessage(message)) {
-        await webview.postMessage(statsDataMessage(await this.handleGetStats(document)));
+        await webview.postMessage(statsDataMessage(await this.handleGetStats(document), message.seq));
       } else if (isFilterMessage(message)) {
         const payload = await this.handleFilter(document, message);
         if (payload) {

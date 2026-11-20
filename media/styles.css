@@ -203,26 +203,119 @@ body.vscode-high-contrast-light {
   border-bottom: 1px solid var(--vscode-editorGroup-border, var(--vscode-panel-border));
 }
 
-.query-input {
-  display: block;
-  box-sizing: border-box;
-  width: 100%;
-  min-height: 72px;
-  max-height: 45vh;
-  padding: 6px 8px;
-  resize: vertical;
-  font-family: var(--vscode-editor-font-family, monospace);
-  font-size: var(--vscode-editor-font-size, 13px);
-  color: var(--vscode-input-foreground);
+/* ── SQL box: a transparent textarea over a coloured copy of its text ─────────
+   The two must lay out the text identically, so they share every font and box property
+   (below) and neither wraps. Both scroll (the layer's scroll bars are invisible but take the
+   same room, so their visible areas match and the copy stays in step). */
+
+/* Default syntax colours, for the dark themes; the host replaces them with the active theme's.
+   Declared on body (not on .query-editor), or they would shadow the light values below. */
+body {
+  --sql-default-keyword: #569cd6;
+  --sql-default-function: #dcdcaa;
+  --sql-default-string: #ce9178;
+  --sql-default-number: #b5cea8;
+  --sql-default-comment: #6a9955;
+  --sql-default-type: #4ec9b0;
+  --sql-default-operator: #d4d4d4;
+  --sql-default-identifier: #9cdcfe;
+  --sql-default-constant: #569cd6;
+}
+
+.query-editor {
+  --sql-font: var(--vscode-editor-font-family, monospace);
+  --sql-size: var(--vscode-editor-font-size, 13px);
+  position: relative;
   background-color: var(--vscode-input-background);
   border: 1px solid var(--vscode-input-border, transparent);
   border-radius: 2px;
+}
+
+body.vscode-light,
+body.vscode-high-contrast-light {
+  --sql-default-keyword: #0000ff;
+  --sql-default-function: #795e26;
+  --sql-default-string: #a31515;
+  --sql-default-number: #098658;
+  --sql-default-comment: #008000;
+  --sql-default-type: #267f99;
+  --sql-default-operator: #000000;
+  --sql-default-identifier: #001080;
+  --sql-default-constant: #0000ff;
+}
+
+.query-input,
+.query-highlight {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0;
+  padding: 6px 8px;
+  border: 0;
+  font-family: var(--sql-font);
+  font-size: var(--sql-size);
+  font-weight: normal;
+  font-style: normal;
+  line-height: 1.5;
+  letter-spacing: normal;
+  tab-size: 4;
+  white-space: pre;
+  overflow: auto;
+}
+
+.query-input {
+  position: relative;
+  min-height: 72px;
+  max-height: 45vh;
+  resize: vertical;
+  /* The text is drawn by the layer below; only the caret and the selection belong to this. */
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  caret-color: var(--vscode-editorCursor-foreground, var(--vscode-input-foreground));
+  background: transparent;
+}
+
+.query-input::placeholder {
+  color: var(--vscode-input-placeholderForeground);
+  -webkit-text-fill-color: var(--vscode-input-placeholderForeground);
+}
+
+/* A translucent selection, so the coloured text under it still shows. */
+.query-input::selection {
+  background-color: rgba(38, 79, 120, 0.55);
+  background-color: color-mix(in srgb, var(--vscode-editor-selectionBackground, #264f78) 60%, transparent);
+  -webkit-text-fill-color: transparent;
 }
 
 .query-input:focus {
   outline: 1px solid var(--vscode-focusBorder);
   outline-offset: -1px;
 }
+
+.query-highlight {
+  position: absolute;
+  inset: 0;
+  color: var(--vscode-input-foreground);
+  pointer-events: none;
+  user-select: none;
+  scrollbar-color: transparent transparent;
+}
+
+.query-highlight::-webkit-scrollbar-thumb,
+.query-highlight::-webkit-scrollbar-track,
+.query-highlight::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.sql-keyword { color: var(--sql-keyword, var(--sql-default-keyword)); }
+.sql-function { color: var(--sql-function, var(--sql-default-function)); }
+.sql-string { color: var(--sql-string, var(--sql-default-string)); }
+.sql-number { color: var(--sql-number, var(--sql-default-number)); }
+.sql-comment { color: var(--sql-comment, var(--sql-default-comment)); }
+.sql-type { color: var(--sql-type, var(--sql-default-type)); }
+.sql-operator { color: var(--sql-operator, var(--sql-default-operator)); }
+.sql-identifier { color: var(--sql-identifier, var(--sql-default-identifier)); }
+.sql-constant { color: var(--sql-constant, var(--sql-default-constant)); }
 
 .query-bar {
   display: flex;
@@ -446,18 +539,43 @@ body.vscode-high-contrast-light {
 /* ── Statistics: shared bits ─────────────────────────── */
 
 .type-badge {
-  display: inline-block;
-  min-width: 2.4em;
-  padding: 0 4px;
+  --type-color: var(--vscode-descriptionForeground);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 18px;
+  height: 18px;
   border-radius: 3px;
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 14px;
-  text-align: center;
-  white-space: nowrap;
-  color: var(--vscode-badge-foreground);
+  color: var(--type-color);
+  /* Plain tint first: `color-mix` needs Chromium 111, newer than the oldest VS Code we support. */
   background-color: var(--vscode-badge-background);
+  background-color: color-mix(in srgb, var(--type-color) 16%, transparent);
 }
+
+.type-icon {
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.type-icon .type-icon-solid {
+  fill: currentColor;
+  stroke: none;
+}
+
+/* The icon's shape names the type; colour (the theme's own symbol colours) only helps. */
+.type-integer,
+.type-float { --type-color: var(--vscode-symbolIcon-numberForeground, var(--vscode-charts-blue)); }
+.type-text { --type-color: var(--vscode-symbolIcon-stringForeground, var(--vscode-charts-orange)); }
+.type-boolean { --type-color: var(--vscode-symbolIcon-booleanForeground, var(--vscode-charts-purple)); }
+.type-date { --type-color: var(--vscode-symbolIcon-eventForeground, var(--vscode-charts-yellow)); }
+.type-mixed { --type-color: var(--vscode-symbolIcon-operatorForeground, var(--vscode-charts-red)); }
+.type-other { --type-color: var(--vscode-symbolIcon-structForeground, var(--vscode-charts-green)); }
+.type-empty { --type-color: var(--vscode-disabledForeground, var(--vscode-descriptionForeground)); }
 
 .nullbar,
 .distbar {
@@ -720,6 +838,9 @@ body[class*='vscode-high-contrast'] .stats-card {
   flex: 1;
   overflow: auto;
   position: relative;
+  /* Rows are swapped in and out as the table scrolls (see "row virtualization" in main.js);
+     the browser must not "helpfully" re-adjust the scroll position when that happens. */
+  overflow-anchor: none;
 }
 
 /* `separate` + zero spacing, not `collapse`: with collapsed borders the table
@@ -869,13 +990,73 @@ td:last-child {
   border-right: none;
 }
 
-tbody tr:nth-child(even) {
+/* `.alt` (odd-numbered rows, set by the webview), not :nth-child(even): the two spacer
+   rows of a windowed table would flip the stripes as the window moves. */
+tbody tr.alt {
   background-color: var(--vscode-list-hoverBackground);
 }
 
 tbody tr:hover {
   background-color: var(--vscode-list-activeSelectionBackground);
   color: var(--vscode-list-activeSelectionForeground);
+}
+
+/* The two rows that stand in for the rows outside the window: just height. */
+tbody tr.row-spacer,
+tbody tr.row-spacer:hover {
+  background-color: transparent;
+}
+
+td.spacer-cell {
+  padding: 0;
+  border: 0;
+}
+
+/* ── Selection ───────────────────────────────────────── */
+
+/* Cells are selected by click, not by dragging text, and Cmd/Ctrl+C copies the selection. */
+#csv-table td {
+  user-select: none;
+}
+
+/* The table takes keyboard focus for the arrow keys; the cursor cell is the visible focus
+   (only a keyboard-focused table with no cursor yet needs a ring of its own). */
+.scroll-wrapper:focus {
+  outline: none;
+}
+
+.scroll-wrapper:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+td.is-selected {
+  background-color: var(--vscode-editor-selectionBackground, var(--vscode-list-inactiveSelectionBackground));
+  color: var(--vscode-editor-foreground);
+}
+
+td.row-num.is-selected,
+th.is-selected {
+  background-color: var(--vscode-list-inactiveSelectionBackground, var(--vscode-editor-selectionBackground));
+  color: var(--vscode-list-inactiveSelectionForeground, var(--vscode-editor-foreground));
+}
+
+td.is-cursor {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+body[class*='vscode-high-contrast'] td.is-selected,
+body[class*='vscode-high-contrast'] th.is-selected {
+  outline: 1px dashed var(--vscode-contrastActiveBorder, var(--vscode-focusBorder));
+  outline-offset: -1px;
+}
+
+.selection-summary {
+  padding: 4px 12px;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  white-space: nowrap;
 }
 
 /* ── Row number gutter ───────────────────────────────── */

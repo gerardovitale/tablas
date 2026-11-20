@@ -12,6 +12,7 @@
     "src/xlsxEditorProvider.ts",
     "src/duckdbEditorProvider.ts",
     "src/dbtCommands.ts",
+    "src/sqlThemeHost.ts",
     "src/webviewHtml.ts"
   ],
   "extension": [".ts", ".js"],

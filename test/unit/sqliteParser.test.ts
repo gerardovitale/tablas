@@ -324,9 +324,17 @@ describe('sqliteTableStats', () => {
   it('gives zero-row stats with empty-typed columns (empty.db)', async () => {
     const stats = (await statsFor('empty.db', 'items'))!;
     assert.deepStrictEqual(stats.columns, [
-      { type: 'empty', nullCount: 0, distinctCount: 0 },
-      { type: 'empty', nullCount: 0, distinctCount: 0 },
+      { type: 'empty', nullCount: 0, distinctCount: 0, nativeType: 'INTEGER' },
+      { type: 'empty', nullCount: 0, distinctCount: 0, nativeType: 'TEXT' },
     ]);
+  });
+
+  it('reports declared types, and none for a view column that is an expression (multi-table.db)', async () => {
+    const orders = (await statsFor('multi-table.db', 'orders'))!;
+    assert.deepStrictEqual(orders.columns.map((c) => c.nativeType), ['INTEGER', 'INTEGER', 'REAL']);
+    const view = (await statsFor('multi-table.db', 'customer_totals'))!;
+    // The view's second column is SUM(..): SQLite declares no type for it.
+    assert.strictEqual(view.columns[1].nativeType, undefined);
   });
 
   it('computes stats for a view as well as tables (multi-table.db)', async () => {
@@ -357,11 +365,11 @@ describe('sqliteTableStats', () => {
     });
 
     it('reports BLOB columns as unsummarised with only a null count', () => {
-      assert.deepStrictEqual(columns[5], { type: 'other', nullCount: 2 });
+      assert.deepStrictEqual(columns[5], { type: 'other', nullCount: 2, nativeType: 'BLOB' });
     });
 
     it('reports an all-NULL column as empty', () => {
-      assert.deepStrictEqual(columns[6], { type: 'empty', nullCount: 5, distinctCount: 0 });
+      assert.deepStrictEqual(columns[6], { type: 'empty', nullCount: 5, distinctCount: 0, nativeType: 'TEXT' });
     });
 
     it('handles identifiers containing double quotes', () => {

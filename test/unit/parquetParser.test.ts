@@ -217,14 +217,14 @@ describe('parquetStats', () => {
   it('falls back to the declared type for zero-row files (empty.parquet)', async () => {
     const stats = (await statsOf('empty.parquet'))!;
     assert.deepStrictEqual(stats.columns, [
-      { type: 'integer', nullCount: 0, distinctCount: 0 },
-      { type: 'text', nullCount: 0, distinctCount: 0 },
+      { type: 'integer', nullCount: 0, distinctCount: 0, nativeType: 'INT64' },
+      { type: 'text', nullCount: 0, distinctCount: 0, nativeType: 'STRING' },
     ]);
   });
 
   it('reports struct columns as unsummarised', async () => {
     const stats = (await statsOf('nested.parquet'))!;
-    assert.deepStrictEqual(stats.columns[1], { type: 'other', nullCount: 0 });
+    assert.deepStrictEqual(stats.columns[1], { type: 'other', nullCount: 0, nativeType: 'STRUCT' });
   });
 
   describe('stats.parquet (3 row groups, every type)', () => {
@@ -280,8 +280,14 @@ describe('parquetStats', () => {
     });
 
     it('leaves lists unsummarised and an all-null column at its declared type', () => {
-      assert.deepStrictEqual(columns[8], { type: 'other', nullCount: 1 });
-      assert.deepStrictEqual(columns[9], { type: 'integer', nullCount: 5, distinctCount: 0 });
+      assert.deepStrictEqual(columns[8], { type: 'other', nullCount: 1, nativeType: 'LIST' });
+      assert.deepStrictEqual(columns[9], { type: 'integer', nullCount: 5, distinctCount: 0, nativeType: 'INT64' });
+    });
+
+    it("names each column's type as the file declares it", () => {
+      assert.deepStrictEqual(columns.map((c) => c.nativeType), [
+        'INT64', 'INT64', 'DOUBLE', 'BOOLEAN', 'TIMESTAMP(MILLIS)', 'DATE', 'STRING', 'DECIMAL(10,2)', 'LIST', 'INT64',
+      ]);
     });
 
     it('is JSON-safe (no bigint / NaN / Infinity / Date)', () => {

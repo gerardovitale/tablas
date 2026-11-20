@@ -14,6 +14,15 @@ VS Code has no first-class way to *look at* structured data files. JetBrains edi
 1. **Find within a file** — locate matching cells in the currently open table (JetBrains-style in-table search, not just VS Code's text-based Ctrl+F, which doesn't work well on a rendered table). Per-column filtering is already here.
 2. **Basic in-place editing** — edit a cell and persist it back to the source file. This is the point where the editor stops being `CustomReadonlyEditorProvider` and needs real document/edit-model semantics (undo/redo, dirty state, save).
 
+## Settings and commands
+
+| | |
+|---|---|
+| `tablas.maxRows` | Rows loaded per file, and the most a filter, SQL query or table switch shows (default 5000). |
+| `tablas.autoRefresh` | Re-read a DuckDB file automatically when it changes on disk (default on). |
+| `Tablas: Refresh` | Re-read the open DuckDB file now (also the `↻` toolbar button). |
+| `Tablas: Preview dbt Model` | On a dbt model's `.sql` file: open the DuckDB file on the table it built. |
+
 ## Current status
 
 CSV, Parquet, SQLite, DuckDB, and Excel (`.xlsx`), read-only, installed locally (not yet on the Marketplace). Publishing there is the near-term goal — see `scripts/install-local.sh --publish-help` for the checklist. See `CLAUDE.md` for architecture and how the pieces fit together if you're changing code here.

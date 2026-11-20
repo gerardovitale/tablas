@@ -14,6 +14,7 @@ import type { ColumnKind, ColumnStats, HistogramStats, TableStats } from './tabl
 export const HISTOGRAM_BINS = 10;
 export const MAX_TRACKED_DISTINCT = 100_000;
 export const MAX_STAT_STRING_LENGTH = 200;
+const MAX_NATIVE_TYPE_LENGTH = 60;
 
 export const STATS_TOO_LARGE_REASON = 'Table is too large to compute column statistics.';
 export const STATS_TIMED_OUT_REASON = 'Column statistics timed out.';
@@ -111,6 +112,12 @@ export function clipStat(value: string): string {
   return value.length > MAX_STAT_STRING_LENGTH
     ? value.slice(0, MAX_STAT_STRING_LENGTH) + '…'
     : value;
+}
+
+/** A source's own type name, shortened: a nested DuckDB STRUCT can spell out hundreds of characters. */
+export function clipNativeType(value: string): string {
+  const text = value.trim();
+  return text.length > MAX_NATIVE_TYPE_LENGTH ? text.slice(0, MAX_NATIVE_TYPE_LENGTH) + '…' : text;
 }
 
 export function emptyColumnStats(): ColumnStats {

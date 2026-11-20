@@ -20,3 +20,9 @@ dist-vsix/
 # OS / editor
 .DS_Store
 *.log
+
+# dbt fixture: output of running dbt against it
+test/fixtures/dbt/logs/
+test/fixtures/dbt/target/*
+!test/fixtures/dbt/target/manifest.json
+test/fixtures/dbt/dbt_packages/

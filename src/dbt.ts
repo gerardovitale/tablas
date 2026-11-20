@@ -73,6 +73,55 @@ export async function readProject(root: string): Promise<DbtProjectInfo> {
   return { root, ...parseProjectYaml(text) };
 }
 
+/**
+ * `findProjectRoot` and `readProject` run on every first load, table switch and reload
+ * of a DuckDB file (up to three times per reload), each with synchronous `existsSync`
+ * calls up the folder tree. Their answers change only when a `dbt_project.yml` appears,
+ * disappears or is edited, so they are remembered: the root per folder for a short
+ * time (a project created outside the workspace has no watcher to tell us), the parsed
+ * project until the file's mtime or size changes.
+ */
+const ROOT_CACHE_TTL_MS = 30_000;
+const rootCache = new Map<string, { root: string | undefined; at: number }>();
+const projectCache = new Map<string, { mtimeMs: number; size: number; info: DbtProjectInfo }>();
+
+/** Forgets what the project lookups remember (a `dbt_project.yml` was created or deleted). */
+export function clearDbtProjectCache(): void {
+  rootCache.clear();
+  projectCache.clear();
+}
+
+function findProjectRootCached(startDir: string): string | undefined {
+  const key = path.resolve(startDir);
+  const hit = rootCache.get(key);
+  if (hit && Date.now() - hit.at < ROOT_CACHE_TTL_MS) {
+    return hit.root;
+  }
+  const root = findProjectRoot(key);
+  rootCache.set(key, { root, at: Date.now() });
+  return root;
+}
+
+async function readProjectCached(root: string): Promise<DbtProjectInfo> {
+  let stat: fs.Stats | undefined;
+  try {
+    stat = await fs.promises.stat(path.join(root, DBT_PROJECT_FILE));
+  } catch {
+    // gone or unreadable: readProject falls back to the defaults
+  }
+  const hit = projectCache.get(root);
+  if (stat && hit && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size) {
+    return hit.info;
+  }
+  const info = await readProject(root);
+  if (stat) {
+    projectCache.set(root, { mtimeMs: stat.mtimeMs, size: stat.size, info });
+  } else {
+    projectCache.delete(root);
+  }
+  return info;
+}
+
 /** One relation dbt knows about. */
 export interface DbtRelation {
   resourceType: string;
@@ -268,11 +317,11 @@ export async function columnDescriptionsFor(
   ref: TableRef,
   workspaceRoots: readonly string[]
 ): Promise<Record<string, string> | undefined> {
-  const root = findProjectRoot(path.dirname(dbFilePath)) ?? (workspaceRoots.length === 1 ? workspaceRoots[0] : undefined);
+  const root = findProjectRootCached(path.dirname(dbFilePath)) ?? (workspaceRoots.length === 1 ? workspaceRoots[0] : undefined);
   if (!root) {
     return undefined;
   }
-  const project = await readProject(root);
+  const project = await readProjectCached(root);
   const loaded = await loadDbtManifest(manifestPath(project));
   if ('error' in loaded) {
     return undefined;

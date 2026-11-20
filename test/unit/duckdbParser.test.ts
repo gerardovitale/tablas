@@ -688,9 +688,14 @@ describe('duckdbTableStats', () => {
   it('keeps the schema type for a zero-row table (empty.duckdb)', async () => {
     const stats = (await statsFor('empty.duckdb', 'items'))!;
     assert.deepStrictEqual(stats.columns, [
-      { type: 'integer', nullCount: 0, distinctCount: 0 },
-      { type: 'text', nullCount: 0, distinctCount: 0 },
+      { type: 'integer', nullCount: 0, distinctCount: 0, nativeType: 'INTEGER' },
+      { type: 'text', nullCount: 0, distinctCount: 0, nativeType: 'VARCHAR' },
     ]);
+  });
+
+  it("reports each column's DuckDB type, parameters included (dates-and-decimals.duckdb)", async () => {
+    const stats = (await statsFor('dates-and-decimals.duckdb', 'events'))!;
+    assert.deepStrictEqual(stats.columns.map((c) => c.nativeType), ['INTEGER', 'DATE', 'DECIMAL(10,2)', 'BIGINT']);
   });
 
   it('formats dates, decimals and BIGINTs exactly (dates-and-decimals.duckdb)', async () => {
@@ -758,12 +763,12 @@ describe('duckdbTableStats', () => {
     });
 
     it('leaves BLOB and LIST columns unsummarised with only a null count', () => {
-      assert.deepStrictEqual(columns[9], { type: 'other', nullCount: 3 });
-      assert.deepStrictEqual(columns[10], { type: 'other', nullCount: 1 });
+      assert.deepStrictEqual(columns[9], { type: 'other', nullCount: 3, nativeType: 'BLOB' });
+      assert.deepStrictEqual(columns[10], { type: 'other', nullCount: 1, nativeType: 'INTEGER[]' });
     });
 
     it('keeps the schema type for an all-NULL column', () => {
-      assert.deepStrictEqual(columns[11], { type: 'integer', nullCount: 6, distinctCount: 0 });
+      assert.deepStrictEqual(columns[11], { type: 'integer', nullCount: 6, distinctCount: 0, nativeType: 'INTEGER' });
     });
 
     it('handles identifiers containing double quotes', () => {

@@ -7,7 +7,7 @@ import type { TablasApi } from '../../src/extension';
 import type { MultiTableParseOutcome } from '../../src/tableData';
 import { DuckdbEditorProvider } from '../../src/duckdbEditorProvider';
 import { DuckDBInstance } from '@duckdb/node-api';
-import { openDuckdbDatabase, queryLimits } from '../../src/duckdbParser';
+import { openDuckdbDatabase, queryLimits, runExclusive } from '../../src/duckdbParser';
 import { idsOf } from '../unit/filterCases';
 import { FILTER_UNKNOWN_TABLE_REASON } from '../../src/filter';
 
@@ -376,6 +376,17 @@ describe('DuckdbEditorProvider Integration', () => {
       }
     });
 
+    it('closes the handle when the panel was disposed while the file was loading', async () => {
+      const { context } = stubContext({});
+      const provider = new DuckdbEditorProvider(context);
+      const document = provider.openCustomDocument(fixtureUri('multi-table.duckdb'));
+      const loading = provider.loadInitial(document);
+      document.dispose(); // the tab closes before the read finishes
+      const outcome = await loading;
+      assert.strictEqual(outcome.success, false);
+      assert.strictEqual(document.handle, undefined, 'a handle nobody can close must not be kept');
+    });
+
     it('opens on the remembered table', async () => {
       const { context } = stubContext({ [keyFor('multi-table.duckdb')]: 'orders' });
       const provider = new DuckdbEditorProvider(context);
@@ -702,6 +713,32 @@ describe('DuckdbEditorProvider Integration', () => {
         assert.notStrictEqual(document.handle, old, 'a fresh handle replaces the old one');
         await waitUntil(() => !fs.existsSync(old.tempFilePath), 'the old handle should be closed');
         assert.ok(fs.existsSync(document.handle!.tempFilePath), 'the new handle stays open');
+      } finally {
+        document.dispose();
+      }
+    });
+
+    it('a table pick that waited behind a busy handle survives a reload swapping it meanwhile', async () => {
+      copyFixture('multi-table.duckdb');
+      const { provider, document } = await openTarget();
+      try {
+        const old = document.handle!;
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => { release = resolve; });
+        const busy = runExclusive(old, () => gate); // a long stats scan or query on the old handle
+        const pick = provider.handleSelectTable(document, 'orders'); // its list waits behind the scan
+        const reloaded = await provider.handleReload(document); // swaps the handle, queues the old one's close
+        assert.strictEqual(reloaded?.success, true);
+        assert.notStrictEqual(document.handle, old);
+        release();
+        await busy;
+        const outcome = await pick;
+        assert.strictEqual(outcome?.success, true);
+        if (outcome?.success) {
+          assert.strictEqual(outcome.data.tableError, undefined, 'no "connection disconnected" on a healthy table');
+          assert.strictEqual(outcome.data.selectedTable, 'orders');
+          assert.strictEqual(outcome.data.data.rowCount, 3);
+        }
       } finally {
         document.dispose();
       }

@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 import {
   DBT_PROJECT_FILE,
   findNodeForFile,
+  clearDbtProjectCache,
   findProjectRoot,
   loadDbtManifest,
   manifestPath,
@@ -41,14 +42,24 @@ export type PreviewResult =
   | 'cancelled';
 
 export function registerDbtSupport(context: vscode.ExtensionContext, provider: DuckdbEditorProvider): void {
+  // Overlapping scans (create + delete events in quick succession) can finish out of order;
+  // only the newest one may publish its result.
+  let scanGeneration = 0;
   const scan = async (): Promise<void> => {
+    const generation = ++scanGeneration;
+    clearDbtProjectCache();
+    let roots: string[];
     try {
       const found = await vscode.workspace.findFiles(`**/${DBT_PROJECT_FILE}`, EXCLUDE, 20);
-      projectRoots = found.filter((uri) => uri.scheme === 'file').map((uri) => path.dirname(uri.fsPath));
+      roots = found.filter((uri) => uri.scheme === 'file').map((uri) => path.dirname(uri.fsPath));
     } catch {
-      projectRoots = [];
+      roots = [];
     }
-    await vscode.commands.executeCommand('setContext', 'tablas.dbtProject', projectRoots.length > 0);
+    if (generation !== scanGeneration) {
+      return;
+    }
+    projectRoots = roots;
+    await vscode.commands.executeCommand('setContext', 'tablas.dbtProject', roots.length > 0);
   };
   void scan();
 

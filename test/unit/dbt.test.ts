@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
+  clearDbtProjectCache,
   columnDescriptionsFor,
   findNodeForFile,
   findProjectRoot,
@@ -290,6 +291,48 @@ describe('dbt', () => {
         assert.deepStrictEqual(await columnDescriptionsFor(path.join(dir, 'dev.duckdb'), orders, []), { id: 'from the project' });
         assert.deepStrictEqual(await columnDescriptionsFor(path.join(dir, 'prod.duckdb'), orders, []), { id: 'built elsewhere' });
         assert.strictEqual(await columnDescriptionsFor(path.join(dir, 'test.duckdb'), orders, []), undefined);
+      });
+
+      describe('remembering the project lookups', () => {
+        const orders: TableRef = { name: 'orders', type: 'table' };
+        const writeProject = (yml: string, target: string, description: string) => {
+          fs.writeFileSync(path.join(dir, 'dbt_project.yml'), yml);
+          fs.mkdirSync(path.join(dir, target), { recursive: true });
+          fs.writeFileSync(
+            path.join(dir, target, 'manifest.json'),
+            JSON.stringify({ nodes: { a: node('shop', 'dev', description) } })
+          );
+        };
+        beforeEach(() => clearDbtProjectCache());
+        afterEach(() => clearDbtProjectCache());
+
+        it('does not walk the folder tree again for a folder it has already resolved', async () => {
+          writeProject('name: shop\n', 'target', 'first');
+          const db = path.join(dir, 'dev.duckdb');
+          assert.deepStrictEqual(await columnDescriptionsFor(db, orders, []), { id: 'first' });
+          fs.rmSync(path.join(dir, 'dbt_project.yml'));
+          // The root is remembered; the default target folder still holds the manifest.
+          assert.deepStrictEqual(await columnDescriptionsFor(db, orders, []), { id: 'first' });
+          clearDbtProjectCache();
+          assert.strictEqual(await columnDescriptionsFor(db, orders, []), undefined, 'forgotten: no project any more');
+        });
+
+        it('remembers that a folder has no project, until told a dbt_project.yml appeared', async () => {
+          const db = path.join(dir, 'dev.duckdb');
+          assert.strictEqual(await columnDescriptionsFor(db, orders, []), undefined);
+          writeProject('name: shop\n', 'target', 'now there is one');
+          assert.strictEqual(await columnDescriptionsFor(db, orders, []), undefined, 'still the remembered answer');
+          clearDbtProjectCache();
+          assert.deepStrictEqual(await columnDescriptionsFor(db, orders, []), { id: 'now there is one' });
+        });
+
+        it('notices an edited dbt_project.yml without being told', async () => {
+          writeProject('name: shop\n', 'target', 'old target');
+          const db = path.join(dir, 'dev.duckdb');
+          assert.deepStrictEqual(await columnDescriptionsFor(db, orders, []), { id: 'old target' });
+          writeProject('name: shop\ntarget-path: other_target_folder\n', 'other_target_folder', 'new target');
+          assert.deepStrictEqual(await columnDescriptionsFor(db, orders, []), { id: 'new target' });
+        });
       });
 
       it('finds the manifest under an absolute target-path', async () => {

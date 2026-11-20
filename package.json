@@ -158,7 +158,7 @@
           "type": "number",
           "default": 5000,
           "minimum": 1,
-          "description": "Maximum number of rows loaded per file. Increase to see more rows in large files, at the cost of load time."
+          "description": "Maximum number of rows loaded per file, and the most rows a filter, SQL query or table switch shows. Increase to see more rows in large files, at the cost of load time."
         }
       }
     }

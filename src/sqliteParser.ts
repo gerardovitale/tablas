@@ -1,5 +1,6 @@
 import initSqlJs from 'sql.js';
 import {
+  clipNativeType,
   clipStat,
   exceedsStatsCellCap,
   histogramFromCounts,
@@ -281,6 +282,17 @@ function computeSqliteStats(handle: SqliteHandle, tableName: string): TableStats
       columns.push(
         buildColumnStats(handle, quotedTable, q, total, row.slice(offset, offset + STATS_VALUES_PER_COLUMN) as SqlCellValue[])
       );
+    });
+  }
+  // Declared types, by position (`table_info` lists a table's or view's columns in result order).
+  // An expression column has none. Skipped when the counts disagree rather than guess.
+  const declared = handle.db.exec(`PRAGMA table_info(${quotedTable})`)[0]?.values ?? [];
+  if (declared.length === columns.length) {
+    declared.forEach((info, i) => {
+      const type = typeof info[2] === 'string' ? clipNativeType(info[2]) : '';
+      if (type !== '') {
+        columns[i].nativeType = type;
+      }
     });
   }
   return { columns };

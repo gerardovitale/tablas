@@ -35,6 +35,8 @@ import {
 import type { MultiTableData, MultiTableParseOutcome } from './tableData';
 import { ReloadScheduler } from './reloadScheduler';
 import { columnDescriptionsFor, findTableRef, type TableTarget } from './dbt';
+import { sqlThemeMessage } from './sqlTheme';
+import { loadSqlColors } from './sqlThemeHost';
 import { getDbtProjectRoots } from './dbtCommands';
 import { buildWebviewHtml } from './webviewHtml';
 import { getAutoRefreshSetting, getMaxRowsSetting } from './config';
@@ -309,16 +311,19 @@ export class DuckdbEditorProvider
         if (initialLoading) {
           await initialLoading.then(undefined, () => undefined);
         }
-        if (panelDisposed || !document.handle) {
+        const handle = document.handle;
+        if (panelDisposed || !handle) {
           return 'unavailable';
         }
-        const ref = findTableRef(await listDuckdbTables(document.handle), target);
+        const ref = findTableRef(await listDuckdbTables(handle), target);
         if (!ref) {
           return 'missing';
         }
         if (document.selectedTable === ref.name && document.shownRowCount !== undefined) {
           // Already on screen: bringing the panel forward is all there is to do. Re-posting
-          // it would throw away the user's filters, scroll position and query result.
+          // it would throw away the user's filters, scroll position and query result. Only
+          // a webview sitting in SQL mode has to be told to give way to the table.
+          post({ type: 'show-table' });
           return 'shown';
         }
         const outcome = await this.handleSelectTable(document, ref.name);
@@ -335,7 +340,11 @@ export class DuckdbEditorProvider
         post({ type: 'duckdb-data', payload: pushed });
         this._onDidPostDuckdbData.fire(pushed);
         // A reload can swap the handle between the lookup and the read; the table asked for
-        // may be gone from the new one, and the read then falls back to another.
+        // may be gone from the new one, and the read then falls back to another. One that was
+        // found but could not be read is not "shown" either: the panel has an error under the picker.
+        if (outcome.data.tableError !== undefined) {
+          return 'unavailable';
+        }
         return outcome.data.selectedTable === ref.name ? 'shown' : 'missing';
       } catch {
         return 'unavailable';
@@ -376,10 +385,24 @@ export class DuckdbEditorProvider
       watcher.onDidCreate(onFileEvent);
       watcher.onDidDelete(onFileEvent);
     }
+    // The SQL box colours its text with the active theme's syntax colours, which a webview
+    // is not given: send them now, and again when the theme or its customizations change.
+    const sendSqlTheme = async (): Promise<void> => {
+      post(sqlThemeMessage(await loadSqlColors()));
+    };
+    const themeSubscriptions = [
+      vscode.window.onDidChangeActiveColorTheme(() => void sendSqlTheme()),
+      vscode.workspace.onDidChangeConfiguration((event) => {
+        if (event.affectsConfiguration('workbench.colorTheme') || event.affectsConfiguration('editor.tokenColorCustomizations')) {
+          void sendSqlTheme();
+        }
+      }),
+    ];
     webviewPanel.onDidDispose(() => {
       panelDisposed = true;
       scheduler?.dispose();
       watcher?.dispose();
+      themeSubscriptions.forEach((subscription) => subscription.dispose());
       if (this.refreshers.get(key) === runReload) {
         this.refreshers.delete(key);
       }
@@ -400,16 +423,19 @@ export class DuckdbEditorProvider
           return;
         }
         hasLoadedInitial = true;
+        void sendSqlTheme();
         initialLoading = this.loadInitial(document);
         const outcome = await initialLoading;
-        await webview.postMessage({ type: 'duckdb-data', payload: outcome });
+        // `post`, not `webview.postMessage`: the panel may be gone by now, and an
+        // unawaited async listener has nobody to catch the rejection.
+        post({ type: 'duckdb-data', payload: outcome });
         this._onDidPostDuckdbData.fire(outcome);
       } else if (message?.type === 'select-table' && typeof message.table === 'string') {
         const outcome = await this.handleSelectTable(document, message.table);
         // undefined means the database isn't open yet (shouldn't happen
         // given the ready-gate above, but cheap to guard) -- no-op.
         if (outcome) {
-          await webview.postMessage({ type: 'duckdb-data', payload: outcome });
+          post({ type: 'duckdb-data', payload: outcome });
           this._onDidPostDuckdbData.fire(outcome);
         }
       } else if (message?.type === 'refresh') {
@@ -417,17 +443,17 @@ export class DuckdbEditorProvider
       } else if (isGetStatsMessage(message)) {
         const payload = await this.handleGetStats(document, message.table);
         if (payload) {
-          await webview.postMessage(statsDataMessage(payload));
+          post(statsDataMessage(payload, message.seq));
         }
       } else if (isFilterMessage(message)) {
         const payload = await this.handleFilter(document, message);
         if (payload) {
-          await webview.postMessage(filterDataMessage(payload));
+          post(filterDataMessage(payload));
         }
       } else if (isRunQueryMessage(message)) {
         const payload = await this.handleRunQuery(document, message);
         if (payload) {
-          await webview.postMessage(queryDataMessage(payload));
+          post(queryDataMessage(payload));
         }
       }
     });
@@ -516,6 +542,15 @@ export class DuckdbEditorProvider
         opened.close();
         throw err;
       }
+      if (document.isDisposed) {
+        // The tab was closed while the file was being read: `dispose()` already ran
+        // without a handle, so nobody else would ever close this one (and its temp copy).
+        opened.close();
+        return {
+          success: false,
+          errors: [{ type: 'IOError', code: 'Disposed', message: 'The editor was closed while the file was loading.' }],
+        };
+      }
       // Only now: a reload must not swap in while this first read is running.
       document.handle = opened;
       if (revealedTable !== undefined && data.tableError === undefined && data.selectedTable === revealedTable) {
@@ -523,7 +558,10 @@ export class DuckdbEditorProvider
         this.rememberTable(document, revealedTable);
       }
       if (revealed) {
-        this.pendingReveals.get(document.uri.toString())?.settle(revealed);
+        // A table that was found but could not be read is not "shown": the panel has an error under the picker.
+        const settled: RevealOutcome =
+          revealed === 'shown' && data.tableError !== undefined ? 'unavailable' : revealed;
+        this.pendingReveals.get(document.uri.toString())?.settle(settled);
       }
       return { success: true, data: this.publish(document, data), errors: [] };
     } catch (err) {
@@ -688,10 +726,19 @@ export class DuckdbEditorProvider
     }
     const seq = ++document.selectSeq;
     try {
-      const tables = await listDuckdbTables(document.handle);
+      // One handle for the list and the read: the table list of one database must not be
+      // paired with the rows of another. A reload that swapped `document.handle` while the
+      // list waited in the (busy) old handle's queue has queued that handle's close behind
+      // it, so reading from the old one would hit a closed connection: go again on the new.
+      let handle = document.handle;
+      let tables = await listDuckdbTables(handle);
+      for (let retries = 0; document.handle !== handle && document.handle && retries < 3; retries++) {
+        handle = document.handle;
+        tables = await listDuckdbTables(handle);
+      }
       const data = await this.withColumnDescriptions(
         document,
-        await readSelectedTable(document.handle, tables, table, getMaxRowsSetting())
+        await readSelectedTable(handle, tables, table, getMaxRowsSetting())
       );
       if (document.selectSeq !== seq) {
         // A newer switch started meanwhile (the manifest read above takes real time);

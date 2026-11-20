@@ -47,8 +47,10 @@ const webviewGlobal = global as unknown as WebviewGlobals;
  */
 /** Statistics the default `get-stats` auto-reply answers with; set by the stats tests' `send`. */
 let replyStats: TableStats | undefined;
+/** The `seq` of the newest `get-stats` request the webview sent (what a real host would echo). */
+let lastStatsRequestSeq: number | undefined;
 
-type StatsReply = (request: { type: string; table?: string }) => unknown;
+type StatsReply = (request: { type: string; table?: string; seq?: number }) => unknown;
 
 /**
  * Like a real host, answers a `get-stats` request with a `stats-data` message
@@ -76,11 +78,12 @@ function loadWebview(
   webviewGlobal.acquireVsCodeApi = () => ({
     postMessage: (msg: unknown) => {
       postedMessages.push(msg);
-      const request = msg as { type: string; table?: string };
+      const request = msg as { type: string; table?: string; seq?: number };
+      if (request.type === 'get-stats') { lastStatsRequestSeq = request.seq; }
       if (request.type === 'get-stats' && reply !== null) {
         const payload = reply
           ? reply(request)
-          : { ...(request.table !== undefined && { table: request.table }), stats: replyStats };
+          : { ...(request.table !== undefined && { table: request.table }), seq: request.seq, stats: replyStats };
         if (payload !== undefined) {
           dom.window.dispatchEvent(
             new dom.window.MessageEvent('message', { data: { type: 'stats-data', payload } })
@@ -791,6 +794,82 @@ describe('webview main.js rendering', () => {
       assert.strictEqual(status(dom)!.firstChild, node);
     });
 
+    describe('order and cost of the requests a reload makes', () => {
+      const types = (posted: unknown[]) => posted.map((m) => (m as { type: string }).type);
+      const meta = { reload: { at: '2026-11-19T10:00:00.000Z', previousRowCount: 3 } };
+
+      it('asks for the filter before the statistics, so the filtered rows are not queued behind the scan', () => {
+        const { dom, postedMessages } = loadWebview();
+        sendDuckdbData(dom, payload(threeRows));
+        filterBoxes(dom)[1].value = 'Rome';
+        const before = postedMessages.length;
+        sendDuckdbData(dom, payload(fiveRows, meta));
+        const after = types(postedMessages.slice(before));
+        assert.deepStrictEqual(after, ['filter', 'get-stats']);
+      });
+
+      it('still asks for statistics once when there is no filter to re-apply', () => {
+        const { dom, postedMessages } = loadWebview();
+        sendDuckdbData(dom, payload(threeRows));
+        const before = postedMessages.length;
+        sendDuckdbData(dom, payload(fiveRows, meta));
+        assert.deepStrictEqual(types(postedMessages.slice(before)), ['get-stats']);
+      });
+
+      it('asks for statistics when the filters were dropped because the columns changed', () => {
+        const { dom, postedMessages } = loadWebview();
+        sendDuckdbData(dom, payload(threeRows));
+        filterBoxes(dom)[1].value = 'Rome';
+        const before = postedMessages.length;
+        sendDuckdbData(dom, payload([['1', 'Rome', 'x']], meta, ['id', 'city', 'extra']));
+        assert.deepStrictEqual(types(postedMessages.slice(before)), ['get-stats']);
+      });
+
+      it('does not draw the unfiltered table while the re-applied filter is pending', () => {
+        const { dom, postedMessages } = loadWebview();
+        sendDuckdbData(dom, payload(threeRows));
+        filterBoxes(dom)[1].value = 'Rome';
+        sendDuckdbData(dom, payload(fiveRows, meta));
+        const rows = () => dom.window.document.querySelectorAll('#csv-table tbody tr').length;
+        assert.strictEqual(rows(), 0, 'nothing is shown that the filter would hide');
+        const seq = (filterRequests(postedMessages) as unknown as Array<{ seq: number }>).at(-1)!.seq;
+        dom.window.dispatchEvent(
+          new dom.window.MessageEvent('message', {
+            data: { type: 'filter-data', payload: { seq, table: 'a', rows: [['1', 'Rome'], ['5', 'Rome']], matchCount: 2 } },
+          })
+        );
+        assert.strictEqual(rows(), 2);
+      });
+
+      it('brings the table back when the re-applied filter text does not parse', () => {
+        const { dom, postedMessages } = loadWebview();
+        sendDuckdbData(dom, payload(threeRows));
+        filterBoxes(dom)[1].value = '>';
+        sendDuckdbData(dom, payload(fiveRows, meta));
+        const seq = (filterRequests(postedMessages) as unknown as Array<{ seq: number }>).at(-1)!.seq;
+        dom.window.dispatchEvent(
+          new dom.window.MessageEvent('message', {
+            data: { type: 'filter-data', payload: { seq, table: 'a', errors: [{ column: 1, message: 'bad' }] } },
+          })
+        );
+        assert.strictEqual(dom.window.document.querySelectorAll('#csv-table tbody tr').length, 5);
+      });
+
+      it('brings the table back when the re-applied filter fails', () => {
+        const { dom, postedMessages } = loadWebview();
+        sendDuckdbData(dom, payload(threeRows));
+        filterBoxes(dom)[1].value = 'Rome';
+        sendDuckdbData(dom, payload(fiveRows, meta));
+        const seq = (filterRequests(postedMessages) as unknown as Array<{ seq: number }>).at(-1)!.seq;
+        dom.window.dispatchEvent(
+          new dom.window.MessageEvent('message', {
+            data: { type: 'filter-data', payload: { seq, table: 'a', failedReason: 'too big' } },
+          })
+        );
+        assert.strictEqual(dom.window.document.querySelectorAll('#csv-table tbody tr').length, 5);
+      });
+    });
+
     describe('scroll position after a reload with a filter', () => {
       const wrapper = (dom: JSDOM) => dom.window.document.querySelector<HTMLElement>('.scroll-wrapper')!;
       const lastFilterSeq = (posted: unknown[]) =>
@@ -1103,6 +1182,44 @@ describe('webview main.js rendering', () => {
       assert.ok(queryInput(dom), 'still in SQL mode after the refresh');
     });
 
+    describe('a result that went stale while the SQL box was not showing', () => {
+      function withResult() {
+        const loaded = inSqlMode();
+        runButton(loaded.dom).click();
+        sendQueryData(loaded.dom, resultOk(runQueries(loaded.postedMessages)[0].seq));
+        return loaded;
+      }
+
+      it('is not re-run by a refresh in Table mode, but is when the box is opened again', () => {
+        const { dom, postedMessages } = withResult();
+        toggle(dom, 'table').click();
+        sendDuckdbData(dom, warehouse({ ...reloadMeta }));
+        assert.strictEqual(runQueries(postedMessages).length, 1, 'nobody can see the result: no run');
+        toggle(dom, 'sql').click();
+        const sent = runQueries(postedMessages);
+        assert.strictEqual(sent.length, 2);
+        assert.strictEqual(sent[1].sql, sent[0].sql);
+      });
+
+      it('is not re-run when nothing changed meanwhile', () => {
+        const { dom, postedMessages } = withResult();
+        toggle(dom, 'table').click();
+        toggle(dom, 'sql').click();
+        assert.strictEqual(runQueries(postedMessages).length, 1);
+      });
+
+      it('defers the re-run of a refresh that landed mid-run when the user has left for Table mode', () => {
+        const { dom, postedMessages } = inSqlMode();
+        runButton(dom).click();
+        sendDuckdbData(dom, warehouse({ ...reloadMeta })); // pending re-run
+        toggle(dom, 'table').click();
+        sendQueryData(dom, resultOk(runQueries(postedMessages)[0].seq));
+        assert.strictEqual(runQueries(postedMessages).length, 1, 'no run for a box nobody sees');
+        toggle(dom, 'sql').click();
+        assert.strictEqual(runQueries(postedMessages).length, 2, 'it runs when the box comes back');
+      });
+    });
+
     it('falls back to table mode when the host can no longer query (e.g. the file became empty)', () => {
       const { dom } = inSqlMode();
       sendDuckdbData(dom, warehouse({ capabilities: { refresh: true, query: false } }));
@@ -1250,6 +1367,19 @@ describe('webview main.js rendering', () => {
         assert.strictEqual(shown(dom), 'c');
         assert.ok(doc(dom).querySelector('#csv-table'));
         assert.strictEqual(doc(dom).querySelector('.mode-button[data-mode="table"]')?.getAttribute('aria-pressed'), 'true');
+      });
+
+      it('show-table (the table is already selected) leaves the SQL box without re-reading anything', () => {
+        const { dom } = loadWebview();
+        sendDuckdbData(dom, payload());
+        doc(dom).querySelector<HTMLButtonElement>('.mode-button[data-mode="sql"]')!.click();
+        assert.ok(doc(dom).querySelector('.query-input'));
+        dom.window.dispatchEvent(new dom.window.MessageEvent('message', { data: { type: 'show-table' } }));
+        assert.strictEqual(doc(dom).querySelector('.query-input'), null);
+        assert.ok(doc(dom).querySelector('#csv-table'));
+        // Already in Table mode: a no-op.
+        dom.window.dispatchEvent(new dom.window.MessageEvent('message', { data: { type: 'show-table' } }));
+        assert.ok(doc(dom).querySelector('#csv-table'));
       });
 
       it('does not change how an ordinary stale reply is dropped', () => {
@@ -1671,6 +1801,9 @@ describe('webview main.js statistics', () => {
   const doc = (dom: JSDOM) => dom.window.document;
   const cardOf = (dom: JSDOM): HTMLElement | null => doc(dom).getElementById('stats-card');
   const tableEl = (dom: JSDOM): HTMLElement | null => doc(dom).getElementById('csv-table');
+  /** Which kind a strip's badge shows (the badge carries it as `data-kind`; its icon has no text). */
+  const badgeKind = (strip: Element): string | null | undefined =>
+    strip.querySelector('.type-badge')?.getAttribute('data-kind');
   const profile = (dom: JSDOM, col: number): HTMLButtonElement | null =>
     doc(dom).querySelector(`#csv-table thead button.col-profile[data-col="${col}"]`);
   const text = (node: Element | null | undefined): string | null | undefined => node?.textContent;
@@ -1689,7 +1822,12 @@ describe('webview main.js statistics', () => {
 
     /** A `get-stats` answer the test delivers by hand, when it wants control over timing. */
     function deliver(dom: JSDOM, payload: unknown): void {
-      dom.window.dispatchEvent(new dom.window.MessageEvent('message', { data: { type: 'stats-data', payload } }));
+      // Answers the newest request, like a host would, unless the test names a seq itself.
+      const answer =
+        typeof payload === 'object' && payload !== null && !('seq' in payload)
+          ? { ...payload, seq: lastStatsRequestSeq }
+          : payload;
+      dom.window.dispatchEvent(new dom.window.MessageEvent('message', { data: { type: 'stats-data', payload: answer } }));
     }
 
     const strips = (dom: JSDOM) => doc(dom).querySelectorAll('#csv-table thead button.col-profile');
@@ -1712,13 +1850,13 @@ describe('webview main.js statistics', () => {
     it('requests stats as soon as a table renders, naming no table for CSV/Parquet', () => {
       const { dom, postedMessages } = loadWebview();
       send(dom, table());
-      assert.deepStrictEqual(postedMessages, [{ type: 'ready' }, { type: 'get-stats' }]);
+      assert.deepStrictEqual(postedMessages, [{ type: 'ready' }, { type: 'get-stats', seq: 1 }]);
     });
 
     it('names the selected table for a multi-table source', () => {
       const { dom, postedMessages } = loadWebview();
       sendMulti(dom, 'orders', table(), ['customers', 'orders']);
-      assert.deepStrictEqual(getStats(postedMessages), [{ type: 'get-stats', table: 'orders' }]);
+      assert.deepStrictEqual(getStats(postedMessages), [{ type: 'get-stats', seq: 1, table: 'orders' }]);
       assert.strictEqual(strips(dom).length, 2);
     });
 
@@ -1727,8 +1865,8 @@ describe('webview main.js statistics', () => {
       sendMulti(dom, 'a', table(), ['a', 'b']);
       sendMulti(dom, 'b', table(), ['a', 'b']);
       assert.deepStrictEqual(getStats(postedMessages), [
-        { type: 'get-stats', table: 'a' },
-        { type: 'get-stats', table: 'b' },
+        { type: 'get-stats', seq: 1, table: 'a' },
+        { type: 'get-stats', seq: 2, table: 'b' },
       ]);
     });
 
@@ -1772,6 +1910,41 @@ describe('webview main.js statistics', () => {
 
         deliver(dom, { table: 'b', stats: twoColumnStats });
         assert.strictEqual(doc(dom).querySelectorAll('.col-profile').length, 2);
+      });
+
+      it("drops a slower answer for the same table's previous view (a refresh re-rendered it meanwhile)", () => {
+        const { dom, postedMessages } = loadWebview(undefined, () => undefined);
+        sendMulti(dom, 'a', table(), ['a', 'b']);
+        const oldSeq = (postedMessages.filter((m) => (m as { type: string }).type === 'get-stats').at(-1) as { seq: number }).seq;
+        sendMulti(dom, 'a', table(), ['a', 'b']); // the reload's render of the same table
+        const newSeq = (postedMessages.filter((m) => (m as { type: string }).type === 'get-stats').at(-1) as { seq: number }).seq;
+        assert.notStrictEqual(newSeq, oldSeq);
+
+        deliver(dom, { table: 'a', seq: oldSeq, stats: twoColumnStats });
+        assert.strictEqual(doc(dom).querySelector('.col-profile'), null, 'pre-refresh numbers must not land on the new view');
+        assert.strictEqual(text(doc(dom).querySelector('.stats-status')), 'Computing…');
+
+        deliver(dom, { table: 'a', seq: newSeq, stats: twoColumnStats });
+        assert.strictEqual(doc(dom).querySelectorAll('.col-profile').length, 2);
+      });
+
+      it('drops an answer that carries no seq at all', () => {
+        const { dom } = loadWebview(undefined, () => undefined);
+        send(dom, table());
+        dom.window.dispatchEvent(
+          new dom.window.MessageEvent('message', { data: { type: 'stats-data', payload: { stats: twoColumnStats } } })
+        );
+        assert.strictEqual(doc(dom).querySelector('.col-profile'), null);
+      });
+
+      it('numbers requests so that no two share a seq, across tables', () => {
+        const { dom, postedMessages } = loadWebview(undefined, () => undefined);
+        sendMulti(dom, 'a', table(), ['a', 'b']);
+        sendMulti(dom, 'b', table(), ['a', 'b']);
+        const seqs = postedMessages
+          .filter((m) => (m as { type: string }).type === 'get-stats')
+          .map((m) => (m as { seq: number }).seq);
+        assert.strictEqual(new Set(seqs).size, seqs.length);
       });
 
       it('ignores an answer that arrives before any table is shown', () => {
@@ -1844,6 +2017,55 @@ describe('webview main.js statistics', () => {
     });
   });
 
+  describe('type icons', () => {
+    const badge = (strip: Element) => strip.querySelector<HTMLElement>('.type-badge')!;
+
+    it('draws every kind as its own SVG icon, with no text in the badge', () => {
+      const { dom } = loadWebview();
+      const kinds = ['integer', 'float', 'boolean', 'date', 'text', 'mixed', 'other', 'empty'] as const;
+      send(dom, tableOf(kinds.map((type) => ({ type, nullCount: 0, distinctCount: 1 }))));
+      const shapes = kinds.map((_, i) => {
+        const b = badge(profile(dom, i)!);
+        assert.strictEqual(b.textContent, '', 'the icon is not a text glyph');
+        const svg = b.querySelector('svg.type-icon');
+        assert.ok(svg, `${kinds[i]} has an icon`);
+        assert.strictEqual(svg.getAttribute('aria-hidden'), 'true');
+        return svg.innerHTML;
+      });
+      assert.strictEqual(new Set(shapes).size, kinds.length, 'no two kinds share a drawing');
+    });
+
+    it('names the type for assistive technology and the tooltip', () => {
+      const { dom } = loadWebview();
+      send(dom, table());
+      const b = badge(profile(dom, 0)!);
+      assert.strictEqual(b.getAttribute('role'), 'img');
+      assert.strictEqual(b.getAttribute('aria-label'), 'integer');
+      assert.strictEqual(b.title, 'integer');
+    });
+
+    it("adds the source's own type to the badge, the summary and the card when the host sent one", () => {
+      const { dom } = loadWebview();
+      send(dom, tableOf([
+        { type: 'integer', nullCount: 0, distinctCount: 2, nativeType: 'BIGINT' },
+        { type: 'float', nullCount: 0, distinctCount: 2, nativeType: 'DECIMAL(10,2)' },
+      ]));
+      const strip = profile(dom, 0)!;
+      assert.strictEqual(badge(strip).title, 'integer · BIGINT');
+      assert.strictEqual(badge(strip).getAttribute('aria-label'), 'integer · BIGINT');
+      assert.match(strip.getAttribute('aria-label') ?? '', /^Details for c0: integer, BIGINT, /);
+      strip.click();
+      assert.strictEqual(text(doc(dom).querySelector('.card-sub')), 'integer · BIGINT');
+    });
+
+    it('treats the native type as text, never markup', () => {
+      const { dom } = loadWebview();
+      send(dom, tableOf([{ type: 'text', nullCount: 0, distinctCount: 1, nativeType: '<img src=x onerror=alert(1)>' }]));
+      assert.strictEqual(doc(dom).querySelector('img'), null);
+      assert.strictEqual(badge(profile(dom, 0)!).title, 'text · <img src=x onerror=alert(1)>');
+    });
+  });
+
   describe('header profile strips', () => {
     it('adds one strip per column to thead, and none to the body', () => {
       const { dom } = loadWebview();
@@ -1871,7 +2093,7 @@ describe('webview main.js statistics', () => {
       const { dom } = loadWebview();
       send(dom, table());
       const strip = profile(dom, 0)!;
-      assert.strictEqual(text(strip.querySelector('.type-badge')), '123');
+      assert.strictEqual(badgeKind(strip), 'integer');
       assert.strictEqual(strip.querySelector('.nullbar-valid')?.getAttribute('width'), '100');
       assert.strictEqual(strip.querySelector('.null-pct'), null, 'no nulls, no percentage');
       assert.strictEqual(strip.querySelectorAll('svg.hist-mini rect').length, 2);
@@ -1882,7 +2104,7 @@ describe('webview main.js statistics', () => {
       const { dom } = loadWebview();
       send(dom, table());
       const strip = profile(dom, 1)!; // 1 null in 2 rows
-      assert.strictEqual(text(strip.querySelector('.type-badge')), 'Abc');
+      assert.strictEqual(badgeKind(strip), 'text');
       assert.strictEqual(strip.querySelector('.nullbar-valid')?.getAttribute('width'), '50');
       assert.strictEqual(text(strip.querySelector('.null-pct')), '50%');
     });
@@ -1953,8 +2175,8 @@ describe('webview main.js statistics', () => {
       assert.strictEqual(dist(4).textContent, '');
       assert.strictEqual(text(dist(5)), 'constant');
       assert.deepStrictEqual(
-        [0, 1, 2, 3, 4].map((i) => text(profile(dom, i)!.querySelector('.type-badge'))),
-        ['date', 'T/F', 'mix', '{ }', '∅']
+        [0, 1, 2, 3, 4].map((i) => badgeKind(profile(dom, i)!)),
+        ['date', 'boolean', 'mixed', 'other', 'empty']
       );
     });
 
@@ -3105,6 +3327,842 @@ describe('webview main.js column filtering', () => {
       doc(dom).querySelector('#csv-table thead')!.getBoundingClientRect = () => rect(90); // header + filter row
       strip(dom, 0).click();
       assert.strictEqual(card(dom)!.style.top, '94px');
+    });
+  });
+
+  describe('row virtualization', () => {
+    const ROW_HEIGHT = 20;
+    const VIEWPORT = 400;
+    const doc = (dom: JSDOM) => dom.window.document;
+
+    /** A DOM with "layout": a tbody is as tall as its rows, the scroll wrapper is VIEWPORT high. */
+    function loadWithLayout(rowHeight = ROW_HEIGHT) {
+      const loaded = loadWebview();
+      const win = loaded.dom.window as unknown as {
+        Element: { prototype: { getBoundingClientRect: () => unknown } };
+        HTMLElement: { prototype: object };
+      };
+      win.Element.prototype.getBoundingClientRect = function (this: Element) {
+        const height = this.tagName === 'TBODY' ? this.children.length * rowHeight : 0;
+        return { height, width: 0, top: 0, left: 0, right: 0, bottom: height, x: 0, y: 0 };
+      };
+      Object.defineProperty(win.HTMLElement.prototype, 'clientHeight', {
+        configurable: true,
+        get(this: HTMLElement) {
+          return this.classList.contains('scroll-wrapper') ? VIEWPORT : 0;
+        },
+      });
+      return loaded;
+    }
+
+    const manyRows = (count: number) => Array.from({ length: count }, (_, i) => [String(i + 1), `row ${i + 1}`]);
+    const sendRows = (dom: JSDOM, rows: string[][]) =>
+      sendCsvData(dom, {
+        success: true,
+        errors: [],
+        data: { headers: ['n', 'label'], rows, rowCount: rows.length, columnCount: 2 },
+      });
+    const wrapper = (dom: JSDOM) => doc(dom).querySelector<HTMLElement>('.scroll-wrapper')!;
+    const dataRows = (dom: JSDOM) => Array.from(doc(dom).querySelectorAll<HTMLElement>('#csv-table tbody tr:not(.row-spacer)'));
+    const numbers = (dom: JSDOM) => dataRows(dom).map((tr) => Number(tr.querySelector('.row-num')!.textContent));
+    const spacerHeights = (dom: JSDOM) =>
+      Array.from(doc(dom).querySelectorAll<HTMLElement>('#csv-table tbody tr.row-spacer td')).map((td) => td.style.height);
+    const scrollTo = async (dom: JSDOM, top: number) => {
+      wrapper(dom).scrollTop = top;
+      wrapper(dom).dispatchEvent(new dom.window.Event('scroll'));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    };
+
+    it('draws only the rows around the viewport, between two spacers that hold the rest of the height', () => {
+      const { dom } = loadWithLayout();
+      sendRows(dom, manyRows(5000));
+      const drawn = numbers(dom);
+      // 400px / 20px = 20 visible rows, plus 30 of overscan below (none above the top)
+      assert.deepStrictEqual([drawn[0], drawn.at(-1)], [1, 50]);
+      assert.deepStrictEqual(spacerHeights(dom), ['0px', `${(5000 - 50) * ROW_HEIGHT}px`]);
+      assert.strictEqual(doc(dom).querySelectorAll('#csv-table tbody tr').length, 52);
+    });
+
+    it('still says how many rows there are, and the table keeps its fixed layout', () => {
+      const { dom } = loadWithLayout();
+      sendRows(dom, manyRows(5000));
+      assert.match(doc(dom).querySelector('.stats-bar')?.textContent ?? '', /^5000 rows × 2 columns/);
+      assert.ok(doc(dom).querySelector('#csv-table')?.classList.contains('table-fixed'));
+    });
+
+    it('moves the window when the table scrolls, keeping row numbers true', async () => {
+      const { dom } = loadWithLayout();
+      sendRows(dom, manyRows(5000));
+      await scrollTo(dom, 50000); // row index 2500
+      const drawn = numbers(dom);
+      assert.strictEqual(drawn[0], 2500 - 30 + 1);
+      assert.ok(drawn.includes(2501), 'the row at the top of the viewport is drawn');
+      assert.ok(drawn.includes(2520), 'and the last one in view');
+      assert.strictEqual(dataRows(dom)[0].querySelector('td:not(.row-num)')?.textContent, String(drawn[0]), 'the cells match their number');
+      assert.deepStrictEqual(spacerHeights(dom), [`${(drawn[0] - 1) * ROW_HEIGHT}px`, `${(5000 - drawn.at(-1)!) * ROW_HEIGHT}px`]);
+    });
+
+    it('does not redraw for a small scroll, only once the viewport nears an edge of what is drawn', async () => {
+      const { dom } = loadWithLayout();
+      sendRows(dom, manyRows(5000));
+      const before = dataRows(dom)[0];
+      await scrollTo(dom, 3 * ROW_HEIGHT);
+      assert.strictEqual(dataRows(dom)[0], before, 'the same elements: nothing was redrawn');
+      await scrollTo(dom, 25 * ROW_HEIGHT); // the viewport's bottom is now within the margin of row 50
+      assert.notStrictEqual(dataRows(dom)[0], before);
+    });
+
+    it('scrolls all the way to the last row', async () => {
+      const { dom } = loadWithLayout();
+      sendRows(dom, manyRows(5000));
+      await scrollTo(dom, 5000 * ROW_HEIGHT - VIEWPORT);
+      assert.strictEqual(numbers(dom).at(-1), 5000);
+      assert.strictEqual(spacerHeights(dom)[1], '0px');
+    });
+
+    it('stripes by row number, not by position in the window', async () => {
+      const { dom } = loadWithLayout();
+      sendRows(dom, manyRows(5000));
+      const stripes = () =>
+        dataRows(dom).map((tr): [number, boolean] => [Number(tr.querySelector('.row-num')!.textContent), tr.classList.contains('alt')]);
+      for (const [number, alt] of stripes()) { assert.strictEqual(alt, number % 2 === 0, `row ${number}`); }
+      await scrollTo(dom, 50000 + ROW_HEIGHT); // an odd shift
+      for (const [number, alt] of stripes()) { assert.strictEqual(alt, number % 2 === 0, `row ${number} after scrolling`); }
+    });
+
+    it('draws a table of up to 500 rows in full, with no spacers', () => {
+      const { dom } = loadWithLayout();
+      sendRows(dom, manyRows(500));
+      assert.strictEqual(dataRows(dom).length, 500);
+      assert.deepStrictEqual(spacerHeights(dom), []);
+    });
+
+    it('draws everything when a row cannot be measured (no layout, e.g. a hidden panel)', () => {
+      const { dom } = loadWebview();
+      sendRows(dom, manyRows(800));
+      assert.strictEqual(doc(dom).querySelectorAll('#csv-table tbody tr').length, 800);
+      assert.deepStrictEqual(spacerHeights(dom), []);
+    });
+
+    it('treats cell text as text in a window just as in a full table', () => {
+      const { dom } = loadWithLayout();
+      const rows = manyRows(1000);
+      rows[0] = ['<img src=x onerror=alert(1)>', 'b'];
+      sendRows(dom, rows);
+      assert.strictEqual(doc(dom).querySelector('#csv-table tbody img'), null);
+      assert.strictEqual(dataRows(dom)[0].querySelector('td:not(.row-num)')?.textContent, '<img src=x onerror=alert(1)>');
+    });
+
+    it('ignores Alt+click on a spacer', () => {
+      const { dom, postedMessages } = loadWithLayout();
+      sendRows(dom, manyRows(5000));
+      const before = postedMessages.length;
+      const spacer = doc(dom).querySelector<HTMLElement>('#csv-table tbody tr.row-spacer td')!;
+      spacer.dispatchEvent(new dom.window.MouseEvent('click', { altKey: true, bubbles: true }));
+      assert.strictEqual(postedMessages.length, before);
+    });
+
+    describe('with a filter', () => {
+      const filterReply = (dom: JSDOM, seq: number, rows: string[][], matchCount: number) =>
+        dom.window.dispatchEvent(
+          new dom.window.MessageEvent('message', { data: { type: 'filter-data', payload: { seq, rows, matchCount } } })
+        );
+      const filterBox = (dom: JSDOM) => doc(dom).querySelector<HTMLInputElement>('input.col-filter')!;
+      const lastSeq = (posted: unknown[]) =>
+        (posted.filter((m) => (m as { type: string }).type === 'filter').at(-1) as { seq: number }).seq;
+      function filtered(posted: unknown[], dom: JSDOM) {
+        filterBox(dom).value = 'x';
+        filterBox(dom).dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        return lastSeq(posted);
+      }
+
+      it('windows a long answer from the top and numbers it 1..N', async () => {
+        const { dom, postedMessages } = loadWithLayout();
+        sendRows(dom, manyRows(5000));
+        await scrollTo(dom, 40000);
+        filterReply(dom, filtered(postedMessages, dom), manyRows(3000), 3000);
+        assert.strictEqual(wrapper(dom).scrollTop, 0);
+        const drawn = numbers(dom);
+        assert.deepStrictEqual([drawn[0], drawn.at(-1)], [1, 50]);
+        assert.strictEqual(spacerHeights(dom)[1], `${(3000 - 50) * ROW_HEIGHT}px`);
+      });
+
+      it('draws a short answer in full with no spacers, and the original windowed rows come back on clear', async () => {
+        const { dom, postedMessages } = loadWithLayout();
+        sendRows(dom, manyRows(5000));
+        filterReply(dom, filtered(postedMessages, dom), manyRows(7), 7);
+        assert.strictEqual(dataRows(dom).length, 7);
+        assert.deepStrictEqual(spacerHeights(dom), []);
+        filterBox(dom).value = '';
+        filterBox(dom).dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        assert.strictEqual(numbers(dom).at(-1), 50);
+        assert.strictEqual(spacerHeights(dom).length, 2);
+      });
+    });
+
+    it('puts a refresh back at the scroll position the user was at', () => {
+      const { dom } = loadWithLayout();
+      const payload = (): MultiTableParseOutcome => ({
+        success: true,
+        errors: [],
+        data: {
+          tables: [{ name: 'a', type: 'table' }],
+          selectedTable: 'a',
+          data: { headers: ['n', 'label'], rows: manyRows(5000), rowCount: 5000, columnCount: 2 },
+          capabilities: { refresh: true },
+          reload: { at: '2026-11-19T10:00:00.000Z', previousRowCount: 5000 },
+        },
+      });
+      sendDuckdbData(dom, payload());
+      wrapper(dom).scrollTop = 20000; // row index 1000
+      sendDuckdbData(dom, payload());
+      assert.strictEqual(wrapper(dom).scrollTop, 20000);
+      const drawn = numbers(dom);
+      assert.ok(drawn[0] <= 1001 && drawn.at(-1)! >= 1020, `the window around row 1000 is drawn, got ${drawn[0]}..${drawn.at(-1)}`);
+    });
+
+    it('windows a SQL result too', () => {
+      const { dom, postedMessages } = loadWithLayout();
+      sendDuckdbData(dom, {
+        success: true,
+        errors: [],
+        data: {
+          tables: [{ name: 'a', type: 'table' }],
+          selectedTable: 'a',
+          data: { headers: ['n', 'label'], rows: [['1', 'x']], rowCount: 1, columnCount: 2 },
+          capabilities: { refresh: true, query: true },
+        },
+      });
+      doc(dom).querySelector<HTMLButtonElement>('.mode-button[data-mode="sql"]')!.click();
+      doc(dom).querySelector<HTMLTextAreaElement>('.query-input')!.value = 'select 1';
+      doc(dom).querySelector<HTMLTextAreaElement>('.query-input')!.dispatchEvent(new dom.window.Event('input'));
+      doc(dom).querySelector<HTMLButtonElement>('.query-run')!.click();
+      const seq = (postedMessages.filter((m) => (m as { type: string }).type === 'run-query').at(-1) as { seq: number }).seq;
+      dom.window.dispatchEvent(
+        new dom.window.MessageEvent('message', {
+          data: { type: 'query-data', payload: { seq, data: { headers: ['n', 'label'], rows: manyRows(4000), rowCount: 4000, columnCount: 2 }, truncated: false, elapsedMs: 5 } },
+        })
+      );
+      assert.strictEqual(doc(dom).querySelectorAll('.query-result #csv-table tbody tr').length, 52);
+    });
+  });
+
+  describe('selection', () => {
+    const rows = [
+      ['1', 'a', '10'],
+      ['2', 'b', '20.5'],
+      ['3', 'c', 'x'],
+      ['4', 'd', '40'],
+      ['5', 'e', ''],
+    ];
+    const doc = (dom: JSDOM) => dom.window.document;
+
+    function open(data: string[][] = rows) {
+      const loaded = loadWebview();
+      sendCsvData(loaded.dom, {
+        success: true,
+        errors: [],
+        data: { headers: ['n', 'label', 'score'], rows: data, rowCount: data.length, columnCount: 3 },
+      });
+      return loaded;
+    }
+    const body = (dom: JSDOM) => doc(dom).querySelector<HTMLTableSectionElement>('#csv-table tbody')!;
+    const cell = (dom: JSDOM, r: number, c: number) => body(dom).rows[r].cells[c + 1];
+    const gutter = (dom: JSDOM, r: number) => body(dom).rows[r].cells[0];
+    const header = (dom: JSDOM, c: number) => doc(dom).querySelectorAll<HTMLElement>('#csv-table thead tr:first-child th')[c + 1];
+    const colName = (dom: JSDOM, c: number) => header(dom, c).querySelector('.col-name')!;
+    const wrapper = (dom: JSDOM) => doc(dom).querySelector<HTMLElement>('.scroll-wrapper')!;
+    const summary = (dom: JSDOM) => doc(dom).querySelector<HTMLElement>('.selection-summary')!;
+    /** The "r,c" of every drawn cell that is selected. */
+    const selected = (dom: JSDOM) => {
+      const out: string[] = [];
+      Array.from(body(dom).rows).forEach((tr, r) => {
+        Array.from(tr.cells).slice(1).forEach((td, c) => {
+          if (td.classList.contains('is-selected')) { out.push(`${r},${c}`); }
+        });
+      });
+      return out;
+    };
+    const mouse = (dom: JSDOM, type: string, target: Element, init: Record<string, unknown> = {}) => {
+      const event = new dom.window.MouseEvent(type, { bubbles: true, cancelable: true, button: 0, ...init });
+      target.dispatchEvent(event);
+      return event;
+    };
+    const click = (dom: JSDOM, target: Element, init: Record<string, unknown> = {}) => mouse(dom, 'mousedown', target, init);
+    const key = (dom: JSDOM, k: string, init: Record<string, unknown> = {}) => {
+      const event = new dom.window.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...init });
+      wrapper(dom).dispatchEvent(event);
+      return event;
+    };
+    /** Fires `copy` with a clipboard stub and returns what was put on it (undefined = left alone). */
+    function copy(dom: JSDOM): string | undefined {
+      let text: string | undefined;
+      const event = new dom.window.Event('copy', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', { value: { setData: (_type: string, value: string) => { text = value; } } });
+      doc(dom).dispatchEvent(event);
+      return text;
+    }
+
+    describe('with the mouse', () => {
+      it('selects a cell on click and replaces the selection on the next click', () => {
+        const { dom } = open();
+        click(dom, cell(dom, 1, 1));
+        assert.deepStrictEqual(selected(dom), ['1,1']);
+        assert.ok(cell(dom, 1, 1).classList.contains('is-cursor'));
+        click(dom, cell(dom, 3, 2));
+        assert.deepStrictEqual(selected(dom), ['3,2']);
+        assert.strictEqual(summary(dom).hidden, true, 'one cell needs no summary');
+      });
+
+      it('takes keyboard focus and stops the native text selection', () => {
+        const { dom } = open();
+        const event = click(dom, cell(dom, 0, 0));
+        assert.strictEqual(event.defaultPrevented, true);
+        assert.strictEqual(doc(dom).activeElement, wrapper(dom));
+      });
+
+      it('selects a whole row from its number, and a whole column from its name', () => {
+        const { dom } = open();
+        click(dom, gutter(dom, 2));
+        assert.deepStrictEqual(selected(dom), ['2,0', '2,1', '2,2']);
+        assert.ok(gutter(dom, 2).classList.contains('is-selected'));
+        click(dom, colName(dom, 1));
+        assert.deepStrictEqual(selected(dom), ['0,1', '1,1', '2,1', '3,1', '4,1']);
+        assert.ok(header(dom, 1).classList.contains('is-selected'));
+        assert.ok(!gutter(dom, 2).classList.contains('is-selected'), 'the row highlight is gone');
+      });
+
+      it('selects everything from the corner cell', () => {
+        const { dom } = open();
+        click(dom, doc(dom).querySelector('#csv-table thead th.row-num')!);
+        assert.strictEqual(selected(dom).length, 15);
+        assert.strictEqual(summary(dom).textContent?.startsWith('15 cells selected'), true);
+      });
+
+      it('extends from the anchor with Shift, as a rectangle, a block of rows or a block of columns', () => {
+        const { dom } = open();
+        click(dom, cell(dom, 1, 0));
+        click(dom, cell(dom, 3, 1), { shiftKey: true });
+        assert.deepStrictEqual(selected(dom), ['1,0', '1,1', '2,0', '2,1', '3,0', '3,1']);
+        click(dom, gutter(dom, 1));
+        click(dom, gutter(dom, 3), { shiftKey: true });
+        assert.strictEqual(selected(dom).length, 9);
+        click(dom, colName(dom, 0));
+        click(dom, colName(dom, 1), { shiftKey: true });
+        assert.strictEqual(selected(dom).length, 10);
+      });
+
+      it('adds further ranges with Cmd or Ctrl', () => {
+        const { dom } = open();
+        click(dom, cell(dom, 0, 0));
+        click(dom, cell(dom, 4, 2), { metaKey: true });
+        click(dom, cell(dom, 2, 1), { ctrlKey: true });
+        assert.deepStrictEqual(selected(dom), ['0,0', '2,1', '4,2']);
+      });
+
+      it('sweeps with a drag, and stops when the button is released', () => {
+        const { dom } = open();
+        click(dom, cell(dom, 0, 0));
+        mouse(dom, 'mousemove', cell(dom, 2, 1), { buttons: 1 });
+        assert.deepStrictEqual(selected(dom), ['0,0', '0,1', '1,0', '1,1', '2,0', '2,1']);
+        mouse(dom, 'mouseup', cell(dom, 2, 1));
+        mouse(dom, 'mousemove', cell(dom, 4, 2), { buttons: 1 });
+        assert.strictEqual(selected(dom).length, 6, 'no longer dragging');
+      });
+
+      it('sweeps rows when dragging from a row number', () => {
+        const { dom } = open();
+        click(dom, gutter(dom, 1));
+        mouse(dom, 'mousemove', cell(dom, 3, 2), { buttons: 1 });
+        assert.strictEqual(selected(dom).length, 9);
+        assert.ok(gutter(dom, 3).classList.contains('is-selected'));
+      });
+
+      it('leaves Alt+click to the filter, and the filter boxes and the right button alone', () => {
+        const { dom } = open();
+        click(dom, cell(dom, 1, 1), { altKey: true });
+        assert.deepStrictEqual(selected(dom), []);
+        click(dom, doc(dom).querySelector('input.col-filter')!);
+        assert.deepStrictEqual(selected(dom), []);
+        click(dom, cell(dom, 1, 1), { button: 2 });
+        assert.deepStrictEqual(selected(dom), []);
+      });
+    });
+
+    describe('with the keyboard', () => {
+      it('leaves the arrow keys to native scrolling until something is selected', () => {
+        const { dom } = open();
+        assert.strictEqual(key(dom, 'ArrowDown').defaultPrevented, false);
+        click(dom, cell(dom, 0, 0));
+        assert.strictEqual(key(dom, 'ArrowDown').defaultPrevented, true);
+      });
+
+      it('moves the cursor cell and stays inside the table', () => {
+        const { dom } = open();
+        click(dom, cell(dom, 0, 0));
+        key(dom, 'ArrowUp');
+        key(dom, 'ArrowLeft');
+        assert.deepStrictEqual(selected(dom), ['0,0']);
+        key(dom, 'ArrowDown');
+        key(dom, 'ArrowRight');
+        assert.deepStrictEqual(selected(dom), ['1,1']);
+        key(dom, 'End');
+        assert.deepStrictEqual(selected(dom), ['1,2']);
+        key(dom, 'Home');
+        assert.deepStrictEqual(selected(dom), ['1,0']);
+        key(dom, 'ArrowDown', { ctrlKey: true });
+        assert.deepStrictEqual(selected(dom), ['4,0']);
+        key(dom, 'ArrowUp', { metaKey: true });
+        assert.deepStrictEqual(selected(dom), ['0,0']);
+        for (let i = 0; i < 10; i++) { key(dom, 'ArrowDown'); key(dom, 'ArrowRight'); }
+        assert.deepStrictEqual(selected(dom), ['4,2']);
+      });
+
+      it('extends with Shift+arrows', () => {
+        const { dom } = open();
+        click(dom, cell(dom, 1, 1));
+        key(dom, 'ArrowDown', { shiftKey: true });
+        key(dom, 'ArrowRight', { shiftKey: true });
+        assert.deepStrictEqual(selected(dom), ['1,1', '1,2', '2,1', '2,2']);
+        key(dom, 'ArrowUp', { shiftKey: true });
+        key(dom, 'ArrowLeft', { shiftKey: true });
+        assert.deepStrictEqual(selected(dom), ['1,1']);
+      });
+
+      it('keeps a row selection whole while Shift+arrows extend it', () => {
+        const { dom } = open();
+        click(dom, gutter(dom, 1));
+        key(dom, 'ArrowDown', { shiftKey: true });
+        assert.strictEqual(selected(dom).length, 6);
+      });
+
+      it('selects all with Cmd/Ctrl+A, and Escape clears', () => {
+        const { dom } = open();
+        key(dom, 'a', { metaKey: true });
+        assert.strictEqual(selected(dom).length, 15);
+        key(dom, 'Escape');
+        assert.deepStrictEqual(selected(dom), []);
+        assert.strictEqual(summary(dom).hidden, true);
+      });
+
+      it('does not take keys typed in a filter box', () => {
+        const { dom } = open();
+        click(dom, cell(dom, 0, 0));
+        const box = doc(dom).querySelector<HTMLInputElement>('input.col-filter')!;
+        const event = new dom.window.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true });
+        box.dispatchEvent(event);
+        assert.strictEqual(event.defaultPrevented, false);
+        assert.deepStrictEqual(selected(dom), ['0,0']);
+      });
+    });
+
+    describe('the summary', () => {
+      it('counts the cells, and adds the figures when every filled cell is a number', () => {
+        const { dom } = open();
+        click(dom, cell(dom, 0, 0));
+        click(dom, cell(dom, 3, 0), { shiftKey: true }); // 1 2 3 4
+        assert.strictEqual(summary(dom).textContent, '4 cells selected · Sum 10 · Avg 2.5 · Min 1 · Max 4');
+        assert.strictEqual(summary(dom).hidden, false);
+      });
+
+      it('shows only the count once a cell is not a number, and skips blanks in the average', () => {
+        const { dom } = open();
+        click(dom, colName(dom, 2)); // 10, 20.5, x, 40 and a blank
+        assert.strictEqual(summary(dom).textContent, '5 cells selected');
+        click(dom, cell(dom, 3, 2));
+        click(dom, cell(dom, 4, 2), { shiftKey: true }); // 40 and a blank
+        assert.strictEqual(summary(dom).textContent, '2 cells selected · Sum 40 · Avg 40 · Min 40 · Max 40');
+      });
+
+      it('does not count a cell twice when two ranges overlap', () => {
+        const { dom } = open();
+        click(dom, cell(dom, 0, 0));
+        click(dom, cell(dom, 1, 0), { shiftKey: true }); // 1, 2
+        click(dom, cell(dom, 1, 0), { metaKey: true });
+        click(dom, cell(dom, 2, 0), { metaKey: true, shiftKey: true }); // 2, 3 again
+        assert.strictEqual(summary(dom).textContent, '3 cells selected · Sum 6 · Avg 2 · Min 1 · Max 3');
+      });
+
+      it('is not inside the stats bar', () => {
+        const { dom } = open();
+        key(dom, 'a', { metaKey: true });
+        assert.strictEqual(doc(dom).querySelector('.stats-bar')?.textContent, '5 rows × 3 columns');
+      });
+    });
+
+    describe('copying', () => {
+      it('puts a cell, a block or several blocks on the clipboard as tab-separated text', () => {
+        const { dom } = open();
+        click(dom, cell(dom, 1, 1));
+        assert.strictEqual(copy(dom), 'b');
+        click(dom, cell(dom, 0, 0));
+        click(dom, cell(dom, 1, 1), { shiftKey: true });
+        assert.strictEqual(copy(dom), '1\ta\n2\tb');
+        click(dom, cell(dom, 0, 0));
+        click(dom, cell(dom, 4, 2), { metaKey: true });
+        assert.strictEqual(copy(dom), '1\n');
+      });
+
+      it('copies whole rows and whole columns', () => {
+        const { dom } = open();
+        click(dom, gutter(dom, 3));
+        assert.strictEqual(copy(dom), '4\td\t40');
+        click(dom, colName(dom, 0));
+        assert.strictEqual(copy(dom), '1\n2\n3\n4\n5');
+      });
+
+      it('quotes what a spreadsheet would: tabs, line breaks and quotes', () => {
+        const { dom } = open([['a\tb', 'line\nbreak', 'say "hi"'], ['plain', '', 'x']]);
+        key(dom, 'a', { metaKey: true });
+        assert.strictEqual(copy(dom), '"a\tb"\t"line\nbreak"\t"say ""hi"""\nplain\t\tx');
+      });
+
+      it('adds the column names with Cmd/Ctrl+Shift+C', () => {
+        const { dom } = open();
+        click(dom, cell(dom, 0, 1));
+        click(dom, cell(dom, 1, 2), { shiftKey: true });
+        let copied: string | undefined;
+        (doc(dom) as unknown as { execCommand: (name: string) => boolean }).execCommand = () => {
+          copied = copy(dom);
+          return true;
+        };
+        const event = key(dom, 'C', { metaKey: true, shiftKey: true });
+        assert.strictEqual(event.defaultPrevented, true);
+        assert.strictEqual(copied, 'label\tscore\na\t10\nb\t20.5');
+        assert.strictEqual(copy(dom), 'a\t10\nb\t20.5', 'a plain copy afterwards has no header line');
+      });
+
+      it('leaves the clipboard alone with nothing selected, or while a text box has focus', () => {
+        const { dom } = open();
+        assert.strictEqual(copy(dom), undefined);
+        click(dom, cell(dom, 0, 0));
+        doc(dom).querySelector<HTMLInputElement>('input.col-filter')!.focus();
+        assert.strictEqual(copy(dom), undefined);
+      });
+    });
+
+    describe('when the rows change', () => {
+      it('drops the selection when a filter swaps the rows', () => {
+        const { dom, postedMessages } = open();
+        click(dom, cell(dom, 0, 0));
+        const box = doc(dom).querySelector<HTMLInputElement>('input.col-filter')!;
+        box.value = 'a';
+        box.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        const seq = (postedMessages.filter((m) => (m as { type: string }).type === 'filter').at(-1) as { seq: number }).seq;
+        dom.window.dispatchEvent(
+          new dom.window.MessageEvent('message', { data: { type: 'filter-data', payload: { seq, rows: [rows[0]], matchCount: 1 } } })
+        );
+        assert.deepStrictEqual(selected(dom), []);
+        assert.strictEqual(summary(dom).hidden, true);
+      });
+
+      it('keeps the selection through a refresh, cut to the rows that remain', () => {
+        const { dom } = loadWebview();
+        const payload = (data: string[][]): MultiTableParseOutcome => ({
+          success: true,
+          errors: [],
+          data: {
+            tables: [{ name: 'a', type: 'table' }],
+            selectedTable: 'a',
+            data: { headers: ['n', 'label', 'score'], rows: data, rowCount: data.length, columnCount: 3 },
+            capabilities: { refresh: true },
+            reload: { at: '2026-11-19T10:00:00.000Z', previousRowCount: 5 },
+          },
+        });
+        sendDuckdbData(dom, payload(rows));
+        click(dom, cell(dom, 1, 0));
+        click(dom, cell(dom, 4, 1), { shiftKey: true });
+        sendDuckdbData(dom, payload(rows.slice(0, 3)));
+        assert.deepStrictEqual(selected(dom), ['1,0', '1,1', '2,0', '2,1']);
+      });
+    });
+
+    describe('in a large, virtualized table', () => {
+      const ROW_HEIGHT = 20;
+      const many = Array.from({ length: 5000 }, (_, i) => [String(i + 1), `row ${i + 1}`, String(i)]);
+      function openLarge() {
+        const loaded = loadWebview();
+        const win = loaded.dom.window as unknown as {
+          Element: { prototype: { getBoundingClientRect: () => unknown } };
+          HTMLElement: { prototype: object };
+        };
+        win.Element.prototype.getBoundingClientRect = function (this: Element) {
+          const height = this.tagName === 'TBODY' ? this.children.length * ROW_HEIGHT : 0;
+          return { height, width: 0, top: 0, left: 0, right: 0, bottom: height, x: 0, y: 0 };
+        };
+        Object.defineProperty(win.HTMLElement.prototype, 'clientHeight', {
+          configurable: true,
+          get(this: HTMLElement) { return this.classList.contains('scroll-wrapper') ? 400 : 0; },
+        });
+        sendCsvData(loaded.dom, {
+          success: true,
+          errors: [],
+          data: { headers: ['n', 'label', 'score'], rows: many, rowCount: many.length, columnCount: 3 },
+        });
+        return loaded;
+      }
+
+      it('copies rows that are not drawn: the data is copied, not the DOM', () => {
+        const { dom } = openLarge();
+        key(dom, 'a', { metaKey: true });
+        const lines = (copy(dom) ?? '').split('\n');
+        assert.strictEqual(lines.length, 5000);
+        assert.strictEqual(lines[4999], '5000\trow 5000\t4999');
+        assert.strictEqual(summary(dom).textContent, '15,000 cells selected');
+      });
+
+      // The first row of a windowed body is its top spacer.
+      const drawnCell = (dom: JSDOM, r: number, c: number) => body(dom).rows[r + 1].cells[c + 1];
+      const drawnGutter = (dom: JSDOM, r: number) => body(dom).rows[r + 1].cells[0];
+
+      it('follows the cursor with the keyboard, drawing the rows it scrolls to', () => {
+        const { dom } = openLarge();
+        click(dom, drawnCell(dom, 0, 0));
+        for (let i = 0; i < 6; i++) { key(dom, 'PageDown'); } // 19 rows a page: row index 114
+        assert.strictEqual(wrapper(dom).scrollTop > 0, true, 'the table scrolled to keep the cursor in view');
+        const cursor = doc(dom).querySelector('#csv-table td.is-cursor')!;
+        assert.ok(cursor, 'the cursor cell is drawn and marked');
+        assert.strictEqual((cursor.parentElement as HTMLTableRowElement).cells[0].textContent, '115');
+      });
+
+      it('keeps a row selection painted when the window moves away and back', async () => {
+        const { dom } = openLarge();
+        click(dom, drawnGutter(dom, 2));
+        const scrollTo = async (top: number) => {
+          wrapper(dom).scrollTop = top;
+          wrapper(dom).dispatchEvent(new dom.window.Event('scroll'));
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        };
+        await scrollTo(50000);
+        assert.strictEqual(selected(dom).length, 0, 'row 3 is not drawn any more');
+        await scrollTo(0);
+        assert.strictEqual(selected(dom).length, 3, 'and it is painted again when it is');
+      });
+    });
+  });
+
+  describe('sql highlighting', () => {
+    const doc = (dom: JSDOM) => dom.window.document;
+
+    function openBox(text = '') {
+      const loaded = loadWebview();
+      sendDuckdbData(loaded.dom, {
+        success: true,
+        errors: [],
+        data: {
+          tables: [{ name: 'a', type: 'table' }],
+          selectedTable: 'a',
+          data: { headers: ['id'], rows: [['1']], rowCount: 1, columnCount: 1 },
+          capabilities: { refresh: true, query: true },
+          querySuggestion: text,
+        },
+      });
+      doc(loaded.dom).querySelector<HTMLButtonElement>('.mode-button[data-mode="sql"]')!.click();
+      return loaded;
+    }
+    const input = (dom: JSDOM) => doc(dom).querySelector<HTMLTextAreaElement>('.query-input')!;
+    const layer = (dom: JSDOM) => doc(dom).querySelector<HTMLElement>('.query-highlight')!;
+    function type(dom: JSDOM, text: string) {
+      input(dom).value = text;
+      input(dom).dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    }
+    /** The coloured pieces of the layer as [kind, text]; text outside any span is `plain`. */
+    function pieces(dom: JSDOM): Array<[string, string]> {
+      return Array.from(layer(dom).childNodes).map((node): [string, string] => {
+        const span = node as HTMLElement;
+        const kind = span.className ? span.className.replace('sql-', '') : 'plain';
+        return [kind, node.textContent ?? ''];
+      });
+    }
+    const colored = (dom: JSDOM) => pieces(dom).filter(([kind]) => kind !== 'plain');
+
+    it('draws a coloured copy of the text under the box, which the screen reader ignores', () => {
+      const { dom } = openBox('select 1');
+      assert.strictEqual(layer(dom).getAttribute('aria-hidden'), 'true');
+      assert.strictEqual(layer(dom).textContent, 'select 1');
+      assert.ok(layer(dom).nextElementSibling === input(dom), 'the real control is the textarea, drawn above');
+      assert.strictEqual(input(dom).getAttribute('wrap'), 'off');
+    });
+
+    it('colours keywords, names before a bracket, numbers, strings, comments, types and constants', () => {
+      const { dom } = openBox('');
+      type(dom, "SELECT count(*), 12.5, 'a b', \"Col\" FROM t -- note\nWHERE x::INTEGER IS NOT NULL /* c */");
+      assert.deepStrictEqual(colored(dom), [
+        ['keyword', 'SELECT'],
+        ['function', 'count'],
+        ['operator', '*'],
+        ['number', '12.5'],
+        ['string', "'a b'"],
+        ['identifier', '"Col"'],
+        ['keyword', 'FROM'],
+        ['comment', '-- note'],
+        ['keyword', 'WHERE'],
+        ['operator', '::'],
+        ['type', 'INTEGER'],
+        ['keyword', 'IS'],
+        ['keyword', 'NOT'],
+        ['constant', 'NULL'],
+        ['comment', '/* c */'],
+      ]);
+    });
+
+    it('is case-insensitive about keywords and leaves ordinary names plain', () => {
+      const { dom } = openBox('');
+      type(dom, 'Select Name, selected from People');
+      assert.deepStrictEqual(colored(dom), [['keyword', 'Select'], ['keyword', 'from']]);
+    });
+
+    it('keeps a keyword a keyword before a bracket, and a type a type', () => {
+      const { dom } = openBox('');
+      type(dom, 'x IN (1) CAST(y AS DECIMAL(10, 2))');
+      assert.deepStrictEqual(
+        colored(dom).filter(([kind]) => kind === 'keyword' || kind === 'type' || kind === 'function'),
+        [['keyword', 'IN'], ['keyword', 'CAST'], ['keyword', 'AS'], ['type', 'DECIMAL']]
+      );
+    });
+
+    it('reads a doubled quote as part of the string or name, not its end', () => {
+      const { dom } = openBox('');
+      type(dom, `'it''s' "a""b" 'x'`);
+      assert.deepStrictEqual(colored(dom), [['string', "'it''s'"], ['identifier', '"a""b"'], ['string', "'x'"]]);
+    });
+
+    it('colours an unterminated string, block comment or dollar string to the end', () => {
+      for (const [text, kind] of [["select 'abc", 'string'], ['select /* abc', 'comment'], ['select $$ abc', 'string'], ['select "abc', 'identifier']] as const) {
+        const { dom } = openBox('');
+        type(dom, text);
+        assert.strictEqual(colored(dom).at(-1)?.[0], kind, text);
+        assert.strictEqual(layer(dom).textContent, text);
+      }
+    });
+
+    it('colours numbers in the forms SQL has them', () => {
+      const { dom } = openBox('');
+      type(dom, '1 2.5 .5 1e10 2.5E-3 0xFF');
+      assert.deepStrictEqual(colored(dom).map(([, text]) => text), ['1', '2.5', '.5', '1e10', '2.5E-3', '0xFF']);
+      assert.ok(colored(dom).every(([kind]) => kind === 'number'));
+    });
+
+    it('does not take digits inside a name for a number', () => {
+      const { dom } = openBox('');
+      type(dom, 'col1 t2.c3 x_1');
+      assert.deepStrictEqual(colored(dom), []);
+    });
+
+    it('always reproduces the text exactly, whatever it holds', () => {
+      const { dom } = openBox('');
+      const samples = [
+        '', ' ', '\n', 'select\n\n', "'", '"', '/*', '--', '$$', '$', '.', '..', '::', '-', 'a.b."c d".e',
+        'sélèct 日本語 “quoted” 😀 from t', "it's", 'x\t\ty', '1.2.3', '0x', 'e1', '<>!=||', '\r\n',
+        'select * from "a""b" where \'x\' = \'it\'\'s\' -- c\n/* d */ limit 5;',
+      ];
+      for (const text of samples) {
+        type(dom, text);
+        // What the box holds (a textarea turns "\r\n" into "\n" itself).
+        const held = input(dom).value;
+        const expected = held.endsWith('\n') ? held + ' ' : held;
+        assert.strictEqual(layer(dom).textContent, expected, JSON.stringify(text));
+      }
+    });
+
+    it('gives a text that ends in a line break one more character, so the last line is not lost', () => {
+      const { dom } = openBox('');
+      type(dom, 'select 1\n');
+      assert.strictEqual(layer(dom).textContent, 'select 1\n ');
+    });
+
+    it('treats what is typed as text, never as markup', () => {
+      const { dom } = openBox('');
+      type(dom, '<img src=x onerror=alert(1)> \'<b>x</b>\' -- <script>');
+      assert.strictEqual(layer(dom).querySelector('img, b, script'), null);
+      assert.strictEqual(layer(dom).textContent, '<img src=x onerror=alert(1)> \'<b>x</b>\' -- <script>');
+    });
+
+    it('follows every edit, and keeps the layer scrolled with the box', () => {
+      const { dom } = openBox('select 1');
+      type(dom, 'select 2 from t');
+      assert.strictEqual(layer(dom).textContent, 'select 2 from t');
+      input(dom).scrollTop = 40;
+      input(dom).scrollLeft = 25;
+      input(dom).dispatchEvent(new dom.window.Event('scroll'));
+      assert.strictEqual(layer(dom).scrollTop, 40);
+      assert.strictEqual(layer(dom).scrollLeft, 25);
+    });
+
+    it('draws the starting text on opening, and again after a refresh rebuilds the box', () => {
+      const { dom } = openBox('select 1');
+      type(dom, 'select max(x) from t');
+      sendDuckdbData(dom, {
+        success: true,
+        errors: [],
+        data: {
+          tables: [{ name: 'a', type: 'table' }],
+          selectedTable: 'a',
+          data: { headers: ['id'], rows: [['1']], rowCount: 1, columnCount: 1 },
+          capabilities: { refresh: true, query: true },
+          reload: { at: '2026-11-19T10:00:00.000Z', previousRowCount: 1 },
+        },
+      });
+      assert.strictEqual(layer(dom).textContent, 'select max(x) from t');
+      assert.deepStrictEqual(colored(dom).map(([kind]) => kind), ['keyword', 'function', 'keyword']);
+    });
+
+    it('draws a very long text a frame later instead of on every keystroke', async () => {
+      const { dom } = openBox('');
+      const long = 'select 1, '.repeat(3000); // 30,000 characters
+      type(dom, long);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      assert.strictEqual(layer(dom).textContent, long);
+    });
+
+    describe('theme colours from the host', () => {
+      const root = (dom: JSDOM) => doc(dom).documentElement;
+      const send = (dom: JSDOM, colors: unknown) =>
+        dom.window.dispatchEvent(new dom.window.MessageEvent('message', { data: { type: 'sql-theme', colors } }));
+      const value = (dom: JSDOM, kind: string) => root(dom).style.getPropertyValue(`--sql-${kind}`);
+
+      it('sets one variable per valid colour, which the stylesheet reads', () => {
+        const { dom } = openBox('');
+        send(dom, { keyword: '#c586c0', string: '#ce9178', comment: '#6a9955cc' });
+        assert.strictEqual(value(dom, 'keyword'), '#c586c0');
+        assert.strictEqual(value(dom, 'string'), '#ce9178');
+        assert.strictEqual(value(dom, 'comment'), '#6a9955cc');
+        assert.strictEqual(value(dom, 'number'), '', 'a kind the theme does not colour keeps the default');
+      });
+
+      it('ignores anything that is not a plain hex colour, so a message cannot inject CSS', () => {
+        const { dom } = openBox('');
+        send(dom, {
+          keyword: 'red',
+          function: 'url(https://x/y)',
+          string: '#fff; background: red',
+          number: 5,
+          comment: null,
+          type: '#12',
+          operator: { a: 1 },
+          unknown: '#ffffff',
+        });
+        for (const kind of ['keyword', 'function', 'string', 'number', 'comment', 'type', 'operator', 'identifier', 'constant']) {
+          assert.strictEqual(value(dom, kind), '', kind);
+        }
+        assert.strictEqual(root(dom).style.getPropertyValue('--sql-unknown'), '');
+      });
+
+      it('replaces the colours when the theme changes, and clears those the new theme lacks', () => {
+        const { dom } = openBox('');
+        send(dom, { keyword: '#111111', string: '#222222' });
+        send(dom, { keyword: '#333333' });
+        assert.strictEqual(value(dom, 'keyword'), '#333333');
+        assert.strictEqual(value(dom, 'string'), '');
+        send(dom, undefined);
+        assert.strictEqual(value(dom, 'keyword'), '');
+      });
+
+      it('works before the SQL box has ever been opened', () => {
+        const { dom } = loadWebview();
+        send(dom, { keyword: '#abcdef' });
+        assert.strictEqual(value(dom, 'keyword'), '#abcdef');
+      });
     });
   });
 });

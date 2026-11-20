@@ -114,7 +114,7 @@ export class ParquetEditorProvider
         await webview.postMessage({ type: 'parquet-data', payload: outcome });
         this._onDidPostParquetData.fire(outcome);
       } else if (isGetStatsMessage(message)) {
-        await webview.postMessage(statsDataMessage(await this.handleGetStats(document)));
+        await webview.postMessage(statsDataMessage(await this.handleGetStats(document), message.seq));
       } else if (isFilterMessage(message)) {
         const payload = await this.handleFilter(document, message);
         if (payload) {
