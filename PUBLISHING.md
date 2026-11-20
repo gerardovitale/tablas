@@ -16,6 +16,7 @@ Tracks remaining work before first `vsce publish`. See `scripts/install-local.sh
 - [ ] Smoke-test at least one non-macOS `.vsix` on its real platform (or CI) — packaging-only dry-run above doesn't prove the native binding loads.
 - [ ] `CHANGELOG.md` entry for the version being published (0.1.0 draft already in place).
 - [ ] `npm test` green (compile + tsc + vscode-test, unit + integration).
+- [ ] DuckDB engine: `npm view @duckdb/node-api dist-tags`; if `latest` moved past the exact pin in `package.json` (`2.0.0-r.1`), bump it and re-run `npm test` before building the `.vsix`s.
 
 ## Publish
 

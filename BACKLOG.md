@@ -9,8 +9,8 @@ Current milestone: **first Marketplace publish** (re-prioritised 2026-11-20).
 
 ## Release order
 
-1. **V-2** pin a stable DuckDB release.
-2. **P-3** per-platform `.vsix` builds, after **P-2** bundle the extension and trim the `.vsix` (P-2 first: they touch the same `.vscodeignore` lines).
+1. **P-2** bundle the extension and trim the `.vsix`.
+2. **P-3** per-platform `.vsix` builds (touches the same `.vscodeignore` lines, so after P-2).
 3. **D-5** manifest stall and **F-6** uncached re-parse stall (both can freeze the extension host).
 4. Publish (see `PUBLISHING.md`). Then **T-1** column sort and **T-2** in-table find.
 
@@ -44,10 +44,6 @@ Acceptance:
 - A script (or CI workflow) runs `vsce package --target <t>` for `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64` and `win32-x64`, each with only its own `@duckdb/node-bindings-<t>` package installed/included.
 - `vsce ls` per target shows exactly one platform binding; at least one non-host target is opened on a matching machine (or VM) and loads a DuckDB file.
 - `vsce publish` flow in `PUBLISHING.md` and the Packaging note in `CLAUDE.md` updated. Touches the same `.vscodeignore` lines as P-2, so do P-2 first.
-
-### V-2 · Engine version: CLAUDE.md text vs the installed package, and a pre-release pin · P1 · S
-
-CLAUDE.md talks about a bundled `@duckdb/node-api` "1.5"/storage versions, while `package.json` pins `^2.0.0-r.1` (a pre-release tag; `node_modules` has `2.0.0-r.1`). Acceptance: pin a stable release before publishing (or record why not), check which engine and storage versions it reads, and fix the CLAUDE.md text.
 
 ## Column filtering follow-ups
 
