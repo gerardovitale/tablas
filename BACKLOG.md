@@ -5,24 +5,24 @@ Open follow-ups for Tablas that are not done yet. When an item ships, delete it 
 - **Priority:** P1 = blocks the first Marketplace release, or an advertised behavior is broken or can freeze the extension host; P2 = soon after release (scale, robustness, top features); P3 = cleanup and polish.
 - **Size:** S = under an hour, M = a few hours, L = a day or more.
 
-Current milestone: **first Marketplace publish** (re-prioritised 2026-11-20).
+Current milestone: **0.1.0 is published** (2026-11-21, all 8 platform targets). Next: confirm it works as installed from the Marketplace (P-3), then **T-1** column sort and **T-2** in-table find.
 
 ## Release order
 
-1. **P-3** open a non-macOS `.vsix` in a real VS Code window (CI already builds and smoke-tests all 8 targets).
-2. Publish (see `PUBLISHING.md`). Then **T-1** column sort and **T-2** in-table find.
+1. **P-3** install the published extension on a non-macOS platform and open a file.
+2. **T-1** column sort, then **T-2** in-table find.
 
 The real-window smoke test (V-1) passed on 2026-11-20 in the installed extension: type icons, virtualization, selection and copy, filtering, the SQL box under the strict CSP and undo/redo all behaved. It found one bug (SQL colours taken from the wrong theme with an auto-detected colour scheme, fixed in `9011d97`) and nothing else.
 
 ## Packaging and marketplace
 
-### P-3 · Open a non-macOS `.vsix` in a real VS Code window before publishing · P1 · S
+### P-3 · Install the published extension on a non-macOS platform and open a file · P1 · S
 
-`.github/workflows/package.yml` builds one `.vsix` per target on a runner of its own platform (the two Alpine targets inside `node:20-alpine`) and smoke-tests each: layout (about 16 files, one native package matching the OS/arch/libc) and opening a DuckDB and a SQLite file from the packaged layout. The first run (2026-11-20, commit a604f14) was green on all 8 targets, so the runner labels (`macos-15-intel`, `windows-11-arm`, `ubuntu-24.04-arm`) work and the bundled `detect-libc` picks the musl binding on Alpine. What no CI step does is start VS Code.
+0.1.0 went out for all 8 targets on 2026-11-21 (alpine-arm64 from an interrupted first run, the other seven from run 44905404375). CI built and smoke-tested every target (layout, plus opening a DuckDB and a SQLite file from the packaged layout, which covers the bundled `detect-libc` and the musl binding on Alpine), but nothing has started VS Code with a non-macOS build.
 
 Acceptance:
-- Download one non-macOS artifact (for example `vsix-linux-x64` or `vsix-win32-x64`) from a Package run, install it in a real VS Code on that platform (or a VM / dev container), and open a DuckDB file and a CSV.
-- The first `Publish` run (see `PUBLISHING.md`) shows whether `vsce publish --oidc` accepts `--packagePath` with the 8 platform `.vsix` files; fix that step if not.
+- On Windows and/or Linux (a machine, VM, dev container or Codespace), install **Tablas** from the Marketplace (or `code --install-extension gerardovitale.tablas`) and open a `.duckdb` file and a `.csv`. Note the VS Code version used, and confirm it is 1.90 or newer.
+- If a platform fails, fix it and publish 0.1.1 for all targets (a published target cannot be replaced).
 
 ## Column filtering follow-ups
 
