@@ -23,12 +23,14 @@ Tracks remaining work before first `vsce publish`. See `scripts/install-local.sh
 
 Nothing is published from a laptop. A published version cannot be replaced, so before the run:
 
-1. Bump `version` in `package.json` and give `CHANGELOG.md` a dated section for it. The first release is `0.1.0`, and its section (dated 2026-11-20) is already written: change that date to the day you publish. For later releases, move `[Unreleased]` into a new dated section.
+1. Bump `version` in `package.json` and give `CHANGELOG.md` a dated section for it (set the date to the day you publish).
 2. Push `main`, and wait for the **Package** workflow to be green on all 8 targets.
 3. Actions -> **Publish** -> *Run workflow* on `main`. First run it with **publish unticked**: it rebuilds and smoke-tests every target (and uploads the `.vsix` files as artifacts) without publishing.
-4. Run it again with **publish ticked**. It checks that all 8 `.vsix` files exist, then runs `npx @vscode/vsce publish --oidc --packagePath vsix/*.vsix`.
+4. Run it again with **publish ticked** and **confirm_version** set to the version in `package.json` (the run refuses to publish if they differ, so a stray tick does nothing). It checks that all 8 `.vsix` files exist, then runs `npx @vscode/vsce publish --oidc --packagePath <files>`. **targets** (space-separated, e.g. `linux-x64 win32-x64`; empty means all 8) limits which targets are published.
 
-Not yet exercised: whether `vsce publish --oidc` accepts `--packagePath` with several platform-specific `.vsix` files (the docs only show `publish --oidc` building the package itself). If the first real run rejects it, change that one step, for example to one `--packagePath` call per file or `vsce publish --oidc --target <t>` per target after a build.
+**State of 0.1.0 (2026-11-21):** a first Publish run was started with *publish* ticked by mistake and cancelled while it was running. It had already published `alpine-arm64` 0.1.0, which the Marketplace validated ("version 0.1.0 for Alpine Linux ARM64 is available"); the other 7 targets were not published. A target cannot be published twice for the same version, so finish 0.1.0 with `targets` set to the other 7 (`alpine-x64 darwin-arm64 darwin-x64 linux-arm64 linux-x64 win32-arm64 win32-x64`), or bump the version and publish all 8.
+
+That run also showed that `vsce publish --oidc --packagePath` with several platform-specific `.vsix` files is accepted (Trusted Publishing worked and the first file was published). What has not been seen is it publishing a whole list in one run, since the cancel stopped it after the first.
 
 ## Later / nice-to-have
 

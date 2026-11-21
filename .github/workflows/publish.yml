@@ -6,8 +6,10 @@ name: Publish
 # does not accept a token minted by a different workflow.
 #
 # Manual only. A run always builds and smoke-tests every target (package.yml); it publishes only
-# when `publish` is ticked and the run is on main. Leave it unticked to rehearse. A published
-# version cannot be replaced, so bump "version" in package.json first and keep CHANGELOG.md in step.
+# when `publish` is ticked, `confirm_version` equals package.json's version, and the run is on main.
+# Leave `publish` unticked to rehearse. `targets` limits what is published (a target already published
+# for a version cannot be published again). A published version cannot be replaced, so bump
+# "version" in package.json first and keep CHANGELOG.md in step.
 
 on:
   workflow_dispatch:
@@ -16,6 +18,14 @@ on:
         description: 'Publish to the Marketplace (leave unticked to only build and test)'
         type: boolean
         default: false
+      confirm_version:
+        description: 'Only when publishing: type the version from package.json (a guard against a stray tick)'
+        type: string
+        default: ''
+      targets:
+        description: 'Only when publishing: space-separated targets to publish, e.g. "linux-x64 win32-x64" (empty = all 8). A target already published for this version cannot be published again.'
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -35,9 +45,19 @@ jobs:
     env:
       EXPECTED_TARGETS: '8'
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: confirm the version being published
+        env:
+          CONFIRM: ${{ inputs.confirm_version }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "$CONFIRM" != "$version" ]; then
+            echo "confirm_version '$CONFIRM' does not match package.json version '$version'; not publishing" >&2
+            exit 1
+          fi
       - uses: actions/download-artifact@v4
         with:
           pattern: vsix-*
@@ -52,4 +72,21 @@ jobs:
             exit 1
           fi
       - name: publish
-        run: npx --yes @vscode/vsce@4.1.0 publish --oidc --packagePath vsix/*.vsix
+        env:
+          TARGETS: ${{ inputs.targets }}
+        run: |
+          if [ -z "$TARGETS" ]; then
+            files=$(ls vsix/*.vsix)
+          else
+            files=""
+            for t in $TARGETS; do
+              f="vsix/tablas-$t.vsix"
+              if [ ! -f "$f" ]; then
+                echo "no package was built for target '$t'" >&2
+                exit 1
+              fi
+              files="$files $f"
+            done
+          fi
+          echo "publishing:$files"
+          npx --yes @vscode/vsce@4.1.0 publish --oidc --packagePath $files
