@@ -1619,6 +1619,70 @@ describe('a query result kept as a table', () => {
     }
   });
 
+  describe('the byte budget of a buffered result', () => {
+    async function withBudget<T>(bytes: number, fn: () => Promise<T>): Promise<T> {
+      const original = queryLimits.maxResultBytes;
+      queryLimits.maxResultBytes = bytes;
+      try {
+        return await fn();
+      } finally {
+        queryLimits.maxResultBytes = original;
+      }
+    }
+
+    it('caps a result of wide rows long before the row cap, and says so', async () => {
+      await withBudget(100_000, () =>
+        withResultHandle('multi-table.duckdb', async (handle) => {
+          const outcome = dataOf(await runAs(handle, 1, "SELECT repeat('x', 2000) AS s FROM range(5000)", 3));
+          assert.strictEqual(outcome.capped, true);
+          assert.ok((outcome.materializedRows ?? 0) >= 3 && (outcome.materializedRows ?? 0) <= 60, String(outcome.materializedRows));
+          assert.strictEqual(outcome.data.rowCount, 3);
+          assert.strictEqual(outcome.truncated, true);
+          const stats = await duckdbResultStats(handle, 1);
+          assert.strictEqual(stats?.columns.length, 1, 'the capped table still serves statistics');
+        })
+      );
+    });
+
+    it('never goes below tablas.maxRows, which the grid shows anyway', async () => {
+      await withBudget(1, () =>
+        withResultHandle('multi-table.duckdb', async (handle) => {
+          const outcome = dataOf(await runAs(handle, 1, "SELECT repeat('x', 100) AS s FROM range(5000)", 30));
+          assert.strictEqual(outcome.data.rowCount, 30);
+          assert.strictEqual(outcome.materializedRows, 30);
+          assert.strictEqual(outcome.capped, true);
+        })
+      );
+    });
+
+    it('leaves ordinary rows alone', async () => {
+      await withResultHandle('multi-table.duckdb', async (handle) => {
+        const outcome = dataOf(await runAs(handle, 1, 'SELECT range AS n, range::VARCHAR AS t FROM range(5000)', 10));
+        assert.strictEqual(outcome.materializedRows, 5000);
+        assert.strictEqual(outcome.capped, undefined);
+      });
+    });
+
+    it('trims across chunks when later rows turn out to be wide', async () => {
+      await withBudget(1_000_000, () =>
+        withResultHandle('multi-table.duckdb', async (handle) => {
+          // The first chunk (2048 rows) is narrow, the next ones are wide: the cap drops after the first
+          // wide chunk, below what was already buffered.
+          const outcome = dataOf(
+            await runAs(handle, 1, "SELECT CASE WHEN range < 2048 THEN 'a' ELSE repeat('x', 5000) END AS s FROM range(6000)", 5)
+          );
+          assert.strictEqual(outcome.capped, true);
+          const held = outcome.materializedRows ?? 0;
+          assert.ok(held >= 100 && held <= 250, String(held));
+          assert.deepStrictEqual(outcome.data.rows[0], ['a']);
+          const filtered = await duckdbResultFilter(handle, 1, specsOf([{ column: 0, text: '=a' }]), 10_000);
+          assert.ok('matchCount' in filtered);
+          assert.strictEqual('matchCount' in filtered ? filtered.matchCount : -1, held, 'every held row is a real row of the result');
+        })
+      );
+    });
+  });
+
   it('keeps the previous result when a run fails, and replaces it when one succeeds', async () => {
     await withResultHandle('multi-table.duckdb', async (handle) => {
       dataOf(await runAs(handle, 1, 'SELECT id FROM customers'));

@@ -801,7 +801,45 @@ export const queryLimits = {
    * workspace settings can come from an untrusted repo (see `MAX_ROWS_CEILING`).
    */
   maxResultRows: 100_000,
+  /**
+   * Rough size a result may take while it is buffered (it is held twice for a moment, as chunks and
+   * as the temp table), estimated from the text of sampled rows. Wide rows (long text, BLOBs) hit it
+   * long before `maxResultRows`; the result is then capped like any other (never below `tablas.maxRows`
+   * rows, which the grid shows anyway). One chunk (2048 rows) is always read whole: DuckDB's API
+   * has no smaller step.
+   */
+  maxResultBytes: 128 * 1024 * 1024,
 };
+
+/** The average size, as JSON text, of up to 8 evenly spaced rows of `chunk`: a cheap stand-in for its memory. */
+function averageRowBytes(chunk: DuckDBDataChunk): number {
+  const rows = chunk.rowCount;
+  if (rows === 0) {
+    return 0;
+  }
+  const samples = Math.min(8, rows);
+  let bytes = 0;
+  for (let i = 0; i < samples; i++) {
+    bytes += JSON.stringify(chunk.convertRowValues(Math.floor((i * rows) / samples), JsonDuckDBValueConverter)).length;
+  }
+  return bytes / samples;
+}
+
+/** Cuts `chunks` (together `total` rows) down to their first `limit` rows, dropping chunks that end up empty. */
+function trimChunksTo(chunks: DuckDBDataChunk[], total: number, limit: number): DuckDBDataChunk[] {
+  let excess = total - limit;
+  while (excess > 0 && chunks.length > 0) {
+    const last = chunks[chunks.length - 1];
+    if (last.rowCount <= excess) {
+      excess -= last.rowCount;
+      chunks.pop();
+    } else {
+      last.rowCount = last.rowCount - excess;
+      excess = 0;
+    }
+  }
+  return chunks;
+}
 
 /** The result table's columns are renamed `c0..cN`, so duplicate or odd result names cannot break the DDL. */
 function resultColumnDefinitions(types: readonly DuckDBType[]): string {
@@ -992,8 +1030,11 @@ export function duckdbRunQuery(
         }
       }
       const maxRows = clampMaxRows(maxRowsInput) ?? 1;
-      // What the result table may hold; the grid itself shows at most `maxRows` of it.
-      const cap = Math.max(queryLimits.maxResultRows, maxRows);
+      // What the result table may hold; the grid itself shows at most `maxRows` of it. The cap
+      // shrinks as the rows turn out to be wide (`maxResultBytes`), but never below `maxRows`.
+      const rowCap = Math.max(queryLimits.maxResultRows, maxRows);
+      let cap = rowCap;
+      let rowBytes = 0;
       stream = await handle.connection.stream(sql);
       const headers = stream.columnNames();
       const types = stream.columnTypes();
@@ -1008,6 +1049,8 @@ export function duckdbRunQuery(
           }
           chunks.push(chunk);
           total += chunk.rowCount;
+          rowBytes = Math.max(rowBytes, averageRowBytes(chunk));
+          cap = Math.max(maxRows, Math.min(rowCap, Math.floor(queryLimits.maxResultBytes / Math.max(rowBytes, 1))));
         }
       }
       // The stream must be closed before anything else runs on the connection (see the finally).
@@ -1015,10 +1058,8 @@ export function duckdbRunQuery(
       stream = undefined;
       const capped = total > cap;
       if (capped) {
-        const last = chunks[chunks.length - 1];
-        last.rowCount = last.rowCount - (total - cap);
+        chunks = trimChunksTo(chunks, total, cap);
         total = cap;
-        chunks = chunks.filter((chunk) => chunk.rowCount > 0);
       }
       const rows: string[][] = [];
       for (const chunk of chunks) {

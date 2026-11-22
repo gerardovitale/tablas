@@ -166,10 +166,6 @@ The statement splitter/classifier in the SQL path strips comments with a regex t
 
 If the first load finds no tables (empty file, or a build still writing), the panel shows "No tables found" without the toolbar, so the user must close and reopen the tab. The file watcher usually recovers it, but not with `tablas.autoRefresh` off. Acceptance: render the toolbar (`capabilities.refresh`) on the empty and failed first-load states too.
 
-### Q-17 · A result is buffered by row count, not by size · P3 · S
-
-`duckdbRunQuery` buffers up to `queryLimits.maxResultRows` (100,000) rows and then copies them into the temp table, so they are held twice for a moment. The cap counts rows: `select * from docs` over 100k rows of 100 KB text is gigabytes in the shared extension host (before the result-table change the same query read about `maxRows` rows). Acceptance: also bound the buffered size (an approximate byte count per chunk, or a lower row cap for wide VARCHAR/BLOB columns), reported through `capped` like the row cap, with a test using a wide-text query.
-
 ### Q-18 · The old result's table is dropped before the webview shows the new one · P3 · S
 
 `materializeResult` drops the previous result's table once the new one exists, but the webview keeps drawing the old result until the reply lands (same for the pick path: `duckdbDropCurrentResult` runs before the picked table's payload arrives). A filter or stats request for the old result in that window answers "no longer available; run the query again". Transient, but wrong to tell the user. Acceptance: the webview holds requests for a result while a replacing run is in flight, or the host keeps the old table until the webview closes it or the new reply is posted.
