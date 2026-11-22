@@ -6,7 +6,11 @@ import * as path from 'path';
 import { DuckDBInstance } from '@duckdb/node-api';
 import { statsHooks, statsLimits, STATS_TIMED_OUT_REASON } from '../../src/columnStats';
 import {
+  currentResultSeq,
   describeDuckdbOpenError,
+  duckdbDropResult,
+  duckdbResultFilter,
+  duckdbResultStats,
   duckdbRunQuery,
   duckdbTableFilter,
   duckdbTableStats,
@@ -1485,5 +1489,239 @@ describe('duckdbRunQuery (the read-only SQL box)', () => {
         );
       });
     });
+  });
+});
+
+describe('a query result kept as a table', () => {
+  async function withResultHandle<T>(name: string, fn: (handle: DuckdbHandle) => Promise<T>): Promise<T> {
+    const handle = await openFixture(name);
+    try {
+      await listDuckdbTables(handle);
+      return await fn(handle);
+    } finally {
+      handle.close();
+    }
+  }
+  const runAs = (handle: DuckdbHandle, seq: number, sql: string, maxRows = 100) =>
+    duckdbRunQuery(handle, sql, maxRows, { resultSeq: seq });
+  function dataOf(outcome: Awaited<ReturnType<typeof duckdbRunQuery>>) {
+    assert.ok(outcome && 'data' in outcome, JSON.stringify(outcome));
+    return outcome as Extract<NonNullable<typeof outcome>, { data: unknown }>;
+  }
+  function specsOf(filters: Parameters<typeof resolveFilters>[0]): ColumnFilterSpec[] {
+    const resolved = resolveFilters(filters);
+    if ('errors' in resolved) {
+      assert.fail('unexpected filter error');
+    }
+    return resolved.specs;
+  }
+
+  it('is registered under the run seq, with the row count it holds', async () => {
+    await withResultHandle('multi-table.duckdb', async (handle) => {
+      const outcome = dataOf(await runAs(handle, 7, 'SELECT name, id FROM customers ORDER BY id'));
+      assert.strictEqual(outcome.result, 7);
+      assert.strictEqual(outcome.materializedRows, 2);
+      assert.strictEqual(outcome.capped, undefined);
+      assert.strictEqual(outcome.data.totalRowCount, undefined, 'a small result is exactly like a table');
+      assert.strictEqual(currentResultSeq(handle), 7);
+    });
+  });
+
+  it('never shows up in the table list', async () => {
+    await withResultHandle('multi-table.duckdb', async (handle) => {
+      const before = (await listDuckdbTables(handle)).map((t) => t.name);
+      dataOf(await runAs(handle, 1, 'SELECT 1 AS x'));
+      const reader = await handle.connection.runAndReadAll(
+        "SELECT count(*) FROM information_schema.tables WHERE table_name LIKE '__tablas_result_%'"
+      );
+      assert.strictEqual(Number(reader.getRowsJson()[0][0]), 1, 'the temp table exists');
+      assert.deepStrictEqual((await listDuckdbTables(handle)).map((t) => t.name), before);
+    });
+  });
+
+  it('serves statistics with the column types of the query', async () => {
+    await withResultHandle('multi-table.duckdb', async (handle) => {
+      dataOf(await runAs(handle, 3, 'SELECT id, name, id * 1.5::DECIMAL(10,2) AS amount, [id] AS ids FROM customers'));
+      const stats = await duckdbResultStats(handle, 3);
+      assert.ok(stats && !stats.skippedReason);
+      const columns = stats?.columns ?? [];
+      assert.strictEqual(columns.length, 4);
+      assert.deepStrictEqual(columns.map((c) => c.type), ['integer', 'text', 'float', 'other']);
+      assert.strictEqual(columns[0].nativeType, 'INTEGER');
+      assert.match(columns[2].nativeType ?? '', /^DECIMAL/);
+      assert.strictEqual(columns[3].nativeType, 'INTEGER[]');
+      assert.strictEqual(columns[1].nullCount, 0);
+    });
+  });
+
+  it('keeps duplicate and odd column names usable', async () => {
+    await withResultHandle('multi-table.duckdb', async (handle) => {
+      const outcome = dataOf(await runAs(handle, 1, 'SELECT 1 AS a, 2 AS a, 3 AS "we ird""name", 4 AS c0'));
+      assert.deepStrictEqual(outcome.data.headers, ['a', 'a', 'we ird"name', 'c0']);
+      assert.strictEqual(outcome.result, 1);
+      const stats = await duckdbResultStats(handle, 1);
+      assert.strictEqual(stats?.columns.length, 4);
+      const filtered = await duckdbResultFilter(handle, 1, specsOf([{ column: 1, text: '=2' }]), 10);
+      assert.deepStrictEqual(filtered, { rows: [['1', '2', '3', '4']], matchCount: 1 });
+    });
+  });
+
+  it('filters exactly as the same filter on a real table does', async () => {
+    await withResultHandle('filter.duckdb', async (handle) => {
+      dataOf(await runAs(handle, 5, 'SELECT * FROM items', 1000));
+      for (const testCase of FILTER_CASES) {
+        const specs = specsOf(testCase.filters);
+        const onTable = await duckdbTableFilter(handle, 'items', specs, 1000);
+        const onResult = await duckdbResultFilter(handle, 5, specs, 1000);
+        assert.deepStrictEqual(onResult, onTable, testCase.name);
+        assert.ok('rows' in onResult && idsOf(onResult.rows).join() === testCase.ids.join(), testCase.name);
+      }
+    });
+  });
+
+  it('holds at most maxResultRows and says the query had more', async () => {
+    const original = queryLimits.maxResultRows;
+    queryLimits.maxResultRows = 10;
+    try {
+      await withResultHandle('multi-table.duckdb', async (handle) => {
+        // 5000 rows with maxRows 3: the grid shows 3, the table holds the first 10.
+        const outcome = dataOf(await runAs(handle, 2, 'SELECT range AS n FROM range(5000)', 3));
+        assert.deepStrictEqual(outcome.data.rows, [['0'], ['1'], ['2']]);
+        assert.strictEqual(outcome.materializedRows, 10);
+        assert.strictEqual(outcome.capped, true);
+        assert.strictEqual(outcome.truncated, true);
+        assert.strictEqual(outcome.data.totalRowCount, 10);
+        const stats = await duckdbResultStats(handle, 2);
+        assert.strictEqual(stats?.columns[0].max, '9', 'statistics cover the held rows, not the whole query');
+        const filtered = await duckdbResultFilter(handle, 2, specsOf([{ column: 0, text: '>=5' }]), 100);
+        assert.ok('matchCount' in filtered);
+        assert.strictEqual('matchCount' in filtered ? filtered.matchCount : -1, 5);
+      });
+    } finally {
+      queryLimits.maxResultRows = original;
+    }
+  });
+
+  it('is not capped when it is exactly the limit, and never below maxRows', async () => {
+    const original = queryLimits.maxResultRows;
+    queryLimits.maxResultRows = 10;
+    try {
+      await withResultHandle('multi-table.duckdb', async (handle) => {
+        const exact = dataOf(await runAs(handle, 1, 'SELECT range AS n FROM range(10)', 3));
+        assert.strictEqual(exact.materializedRows, 10);
+        assert.strictEqual(exact.capped, undefined);
+        // maxRows above the limit raises the limit: what is shown is always in the table.
+        const raised = dataOf(await runAs(handle, 2, 'SELECT range AS n FROM range(50)', 30));
+        assert.strictEqual(raised.data.rowCount, 30);
+        assert.strictEqual(raised.materializedRows, 30);
+        assert.strictEqual(raised.capped, true);
+      });
+    } finally {
+      queryLimits.maxResultRows = original;
+    }
+  });
+
+  it('keeps the previous result when a run fails, and replaces it when one succeeds', async () => {
+    await withResultHandle('multi-table.duckdb', async (handle) => {
+      dataOf(await runAs(handle, 1, 'SELECT id FROM customers'));
+      const failed = await runAs(handle, 2, 'SELECT nope FROM customers');
+      assert.ok(failed && 'error' in failed);
+      assert.strictEqual(currentResultSeq(handle), 1, 'an error does not touch the result on screen');
+      assert.ok((await duckdbResultStats(handle, 1))?.columns.length);
+      dataOf(await runAs(handle, 3, 'SELECT name FROM customers'));
+      assert.strictEqual(currentResultSeq(handle), 3);
+      assert.strictEqual(await duckdbResultStats(handle, 1), undefined, 'the replaced result is gone');
+      const gone = await duckdbResultFilter(handle, 1, specsOf([{ column: 0, text: 'a' }]), 10);
+      assert.ok('failedReason' in gone);
+      const reader = await handle.connection.runAndReadAll(
+        "SELECT count(*) FROM information_schema.tables WHERE table_name LIKE '__tablas_result_%'"
+      );
+      assert.strictEqual(Number(reader.getRowsJson()[0][0]), 1, 'only the newest temp table is left');
+    });
+  });
+
+  it('is dropped on request, but a newer result is left alone', async () => {
+    await withResultHandle('multi-table.duckdb', async (handle) => {
+      dataOf(await runAs(handle, 4, 'SELECT 1 AS x'));
+      await duckdbDropResult(handle, 3);
+      assert.strictEqual(currentResultSeq(handle), 4, 'closing an older result must not drop the newer one');
+      await duckdbDropResult(handle, 4);
+      assert.strictEqual(currentResultSeq(handle), undefined);
+      assert.strictEqual(await duckdbResultStats(handle, 4), undefined);
+      const reader = await handle.connection.runAndReadAll(
+        "SELECT count(*) FROM information_schema.tables WHERE table_name LIKE '__tablas_result_%'"
+      );
+      assert.strictEqual(Number(reader.getRowsJson()[0][0]), 0);
+    });
+  });
+
+  it('holds a result with zero rows, and none for a statement without columns', async () => {
+    await withResultHandle('multi-table.duckdb', async (handle) => {
+      const empty = dataOf(await runAs(handle, 1, 'SELECT id FROM customers WHERE id < 0'));
+      assert.strictEqual(empty.result, 1);
+      assert.strictEqual(empty.materializedRows, 0);
+      const filtered = await duckdbResultFilter(handle, 1, specsOf([{ column: 0, text: '1' }]), 10);
+      assert.deepStrictEqual(filtered, { rows: [], matchCount: 0 });
+    });
+  });
+
+  it('keeps types a plain text round trip would lose (nested, enum, blob, null)', async () => {
+    await withResultHandle('multi-table.duckdb', async (handle) => {
+      const outcome = dataOf(
+        await runAs(
+          handle,
+          1,
+          "SELECT {'a b': 1} AS s, [1, 2] AS l, 'x'::BLOB AS b, NULL AS n, 1.50::DECIMAL(18,3) AS d, now()::TIMESTAMPTZ AS t, union_value(num := 2) AS u"
+        )
+      );
+      assert.strictEqual(outcome.result, 1);
+      assert.deepStrictEqual(outcome.data.rows[0].slice(0, 2), ['{"a b":1}', '[1,2]']);
+      const stats = await duckdbResultStats(handle, 1);
+      assert.strictEqual(stats?.columns.length, 7);
+    });
+  });
+
+  it('survives a cut-off stream: later queries on the connection still work', async () => {
+    await withResultHandle('multi-table.duckdb', async (handle) => {
+      dataOf(await runAs(handle, 1, 'SELECT range AS n FROM range(300000)', 5));
+      assert.strictEqual((await readDuckdbTable(handle, 'orders')).rowCount, 3);
+      assert.ok('data' in ((await runAs(handle, 2, 'SELECT 1')) ?? {}));
+    });
+  });
+
+  it('never writes to the database file the handle opened (temp tables are in memory)', async () => {
+    await withResultHandle('multi-table.duckdb', async (handle) => {
+      const before = fsSync.readFileSync(handle.tempFilePath);
+      dataOf(await runAs(handle, 1, 'SELECT * FROM customers'));
+      dataOf(await runAs(handle, 2, 'SELECT * FROM orders'));
+      assert.ok(before.equals(fsSync.readFileSync(handle.tempFilePath)));
+    });
+  });
+
+  it('is dropped with its connection on a reload swap: the new handle has no result', async () => {
+    const first = await openFixture('multi-table.duckdb');
+    const second = await openFixture('multi-table.duckdb');
+    try {
+      dataOf(await runAs(first, 9, 'SELECT 1 AS x'));
+      assert.strictEqual(currentResultSeq(second), undefined);
+      assert.strictEqual(await duckdbResultStats(second, 9), undefined);
+    } finally {
+      first.close();
+      second.close();
+    }
+  });
+
+  it('reports a timeout as an error and leaves nothing open', async () => {
+    const original = queryLimits.duckdbTimeoutMs;
+    queryLimits.duckdbTimeoutMs = 100;
+    try {
+      await withResultHandle('multi-table.duckdb', async (handle) => {
+        const outcome = await runAs(handle, 1, 'SELECT count(*) FROM range(100000000000) a, range(1000) b');
+        assert.ok(outcome && 'error' in outcome);
+        assert.ok('data' in ((await runAs(handle, 2, 'SELECT 1')) ?? {}));
+      });
+    } finally {
+      queryLimits.duckdbTimeoutMs = original;
+    }
   });
 });

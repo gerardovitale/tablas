@@ -121,6 +121,7 @@
    *          filterSeq: number, filterTimer: number | undefined,
    *          pendingScroll?: { top: number, left: number },
    *          rowsHidden?: boolean, statsSeq?: number,
+   *          resultSeq?: number,
    *          rowHeight?: number, scrollQueued?: boolean,
    *          shownRows?: string[][], sel?: Selection, selectionEl?: HTMLElement,
    *          win?: { rows: string[][], rowHeight: number, start: number, end: number, top: HTMLElement, bottom: HTMLElement },
@@ -532,9 +533,7 @@
     const seq = ++statsSeqCounter;
     view.statsSeq = seq;
     applyStatsStatus();
-    vscode.postMessage(
-      view.tableName !== undefined ? { type: 'get-stats', seq, table: view.tableName } : { type: 'get-stats', seq }
-    );
+    vscode.postMessage(withTable(view, { type: 'get-stats', seq }));
   }
 
   /**
@@ -547,7 +546,10 @@
     const view = currentView;
     // The seq is what tells this view's reply from a slower one for the same table's previous view
     // (a refresh re-renders the table while the old handle's scan may still be running).
-    if (!view || view.stats !== 'pending' || !payload || payload.table !== view.tableName || payload.seq !== view.statsSeq) { return; }
+    if (
+      !view || view.stats !== 'pending' || !payload || payload.table !== view.tableName ||
+      payload.result !== view.resultSeq || payload.seq !== view.statsSeq
+    ) { return; }
     const stats = payload.stats;
     if (!stats || (!stats.skippedReason && (!Array.isArray(stats.columns) || stats.columns.length !== view.headers.length))) {
       view.stats = 'failed';
@@ -1309,8 +1311,13 @@
     if (window.requestAnimationFrame) { window.requestAnimationFrame(run); } else { window.setTimeout(run, 0); }
   }
 
-  /** @param {NonNullable<typeof currentView>} view @param {Record<string, unknown>} message */
+  /**
+   * Addresses a request to what the view shows: its table, or the query result the host keeps
+   * as a table (`result`, the seq of the run that made it). CSV/Parquet have neither.
+   * @param {NonNullable<typeof currentView>} view @param {Record<string, unknown>} message
+   */
   function withTable(view, message) {
+    if (view.resultSeq !== undefined) { return { ...message, result: view.resultSeq }; }
     return view.tableName !== undefined ? { ...message, table: view.tableName } : message;
   }
 
@@ -1418,7 +1425,10 @@
    */
   function handleFilterData(payload) {
     const view = currentView;
-    if (!view || view.filter !== 'pending' || !payload || payload.seq !== view.filterSeq || payload.table !== view.tableName) {
+    if (
+      !view || view.filter !== 'pending' || !payload || payload.seq !== view.filterSeq ||
+      payload.table !== view.tableName || payload.result !== view.resultSeq
+    ) {
       return;
     }
     if (Array.isArray(payload.errors) && payload.errors.length > 0) {
@@ -1521,10 +1531,12 @@
    * @param {{ headers: string[], rows: string[][], rowCount: number, columnCount: number, totalRowCount?: number }} data
    * @param {string=} tableName the selected table/sheet of a multi-table source; undefined for CSV/Parquet
    * @param {string=} tableError why reading `tableName` failed; shown instead of the table
-   * @param {{ host?: HTMLElement, result?: { truncated: boolean }, columnDescriptions?: Record<string, string>, deferStats?: boolean }=} opts
-   *   `host` is where to render instead of #app; `result` marks the rows of a query: no filter row, no
-   *   statistics (both are keyed by a table the host knows, which a query result is not), and a note when
-   *   it was cut; `columnDescriptions` (by column name, matched ignoring case) are shown in the header
+   * @param {{ host?: HTMLElement, result?: { truncated: boolean, seq?: number, capped?: boolean }, columnDescriptions?: Record<string, string>, deferStats?: boolean }=} opts
+   *   `host` is where to render instead of #app; `result` marks the rows of a query. With a `seq` the host
+   *   keeps the result as a table, so it gets the filter row, statistics and type badges like any table
+   *   (requests carry `result: seq` instead of a table name); without one (no table could be made) it is
+   *   rows only, with a note. `capped`: the query had more rows than the host's table holds, so statistics
+   *   and filters cover only the first `data.totalRowCount`. `columnDescriptions` (by column name, matched ignoring case) are shown in the header
    *   tooltip and the detail card; `deferStats` leaves the `get-stats` request to the caller (it must call
    *   `requestStats()` itself): a reload sends the filter first so the filtered rows are not queued behind a
    *   whole-table statistics scan.
@@ -1533,6 +1545,8 @@
     const app = opts && opts.host ? opts.host : document.getElementById('app');
     if (!app) { return; }
     const result = opts && opts.result;
+    // A result the host kept as a table is served like one; the rest is rows only.
+    const addressable = !result || result.seq !== undefined;
     releaseCurrentView();
 
     if (tableError !== undefined) {
@@ -1544,9 +1558,14 @@
       return;
     }
 
-    const coverNote = data.totalRowCount != null && data.totalRowCount > data.rowCount
+    const heldRows = data.totalRowCount != null ? data.totalRowCount : data.rowCount;
+    let coverNote = data.totalRowCount != null && data.totalRowCount > data.rowCount
       ? `Statistics cover all ${data.totalRowCount.toLocaleString()} rows, not just the ${data.rowCount.toLocaleString()} shown.`
       : undefined;
+    if (result && result.capped) {
+      coverNote = `Statistics and filters cover the first ${heldRows.toLocaleString()} rows of this result` +
+        (heldRows > data.rowCount ? `, not just the ${data.rowCount.toLocaleString()} shown.` : '.');
+    }
 
     // Stats header: the text-only stats bar plus a status span. Column
     // statistics themselves aren't in `data`: they're requested once the rows
@@ -1555,10 +1574,12 @@
     // A live region: the filter's "N of M rows match" is announced as it changes.
     const statsBar = el('div', { class: 'stats-bar', 'aria-live': 'polite' });
     let statsText = `${data.rowCount} row${data.rowCount !== 1 ? 's' : ''} × ${data.columnCount} column${data.columnCount !== 1 ? 's' : ''}`;
-    if (data.totalRowCount != null && data.totalRowCount > data.rowCount) {
+    if (result && result.capped) {
+      statsText += ` (the query returned more than ${heldRows.toLocaleString()} rows — statistics and filters cover the first ${heldRows.toLocaleString()}` +
+        (heldRows > data.rowCount ? `; showing ${data.rowCount.toLocaleString()}, increase tablas.maxRows in settings to see more` : '') + ')';
+    } else if (data.totalRowCount != null && data.totalRowCount > data.rowCount) {
       statsText += ` (showing first ${data.rowCount} of ${data.totalRowCount} — increase tablas.maxRows in settings to see more)`;
-    }
-    if (result && result.truncated) {
+    } else if (result && result.truncated) {
       statsText += ` (the query returned more — showing the first ${data.rowCount} rows; increase tablas.maxRows in settings to see more)`;
     }
     statsBar.textContent = statsText;
@@ -1610,7 +1631,7 @@
 
     // Filter row: one box per column, under the header (and its profile strips).
     // Same cell order as the header row, which Alt+click and the tests rely on.
-    // A query result has none: the host filters tables, not result sets.
+    // A query result the host did not keep as a table has none: there is nothing to filter against.
     const filterRow = el('tr', { class: 'filter-row' });
     const filterGutter = el('th', { class: 'row-num' });
     const clearButton = /** @type {HTMLButtonElement} */ (el('button', {
@@ -1625,7 +1646,7 @@
     filterRow.appendChild(filterGutter);
     /** @type {HTMLInputElement[]} */
     const filterInputs = [];
-    (result ? [] : data.headers).forEach((header) => {
+    (addressable ? data.headers : []).forEach((header) => {
       const cell = el('th', { class: 'filter-cell' });
       const input = /** @type {HTMLInputElement} */ (el('input', {
         type: 'search',
@@ -1641,7 +1662,7 @@
       filterRow.appendChild(cell);
       filterInputs.push(input);
     });
-    if (!result) { thead.appendChild(filterRow); }
+    if (addressable) { thead.appendChild(filterRow); }
     table.appendChild(thead);
 
     // Installed once; the strips it reacts to only exist after attachStats,
@@ -1681,8 +1702,8 @@
       coverNote,
       models: undefined,
       skippedReason: undefined,
-      // A query result is never profiled: the host's statistics are per table.
-      stats: result ? 'skipped' : 'idle',
+      resultSeq: result ? result.seq : undefined,
+      stats: addressable ? 'idle' : 'skipped',
       originalRows: data.rows,
       baseStatsText,
       filterInputs,
@@ -1697,9 +1718,12 @@
     wrapper.addEventListener('scroll', () => queueWindowSync(created), { passive: true });
     wrapper.addEventListener('mousedown', (event) => onTableMouseDown(created, event));
     wrapper.addEventListener('keydown', (event) => onTableKeyDown(created, event));
-    if (!result) {
+    if (addressable) {
       wireFilterRow(currentView);
       if (!(opts && opts.deferStats)) { requestStats(); }
+    } else {
+      created.skippedReason = 'Statistics and filters are not available for this result.';
+      applyStatsStatus();
     }
   }
 
@@ -1743,7 +1767,7 @@
   /** Webview-wide `run-query` counter; only a reply carrying the newest number is applied. */
   let querySeqCounter = 0;
   let queryRunning = false;
-  /** @type {{ kind: 'data', data: import('../../src/tableData').ParsedTable, truncated: boolean, elapsedMs: number } | { kind: 'error', message: string } | undefined} */
+  /** @type {{ kind: 'data', data: import('../../src/tableData').ParsedTable, truncated: boolean, elapsedMs: number, seq?: number, capped?: boolean } | { kind: 'error', message: string } | undefined} */
   let queryResult;
   /** The last successful multi-table payload, to re-render when the mode is toggled. */
   let lastMultiOutcome;
@@ -2564,8 +2588,8 @@
       note('The statement ran and returned no columns.', false);
       setQueryStatus(`Done · ${queryResult.elapsedMs.toLocaleString()} ms`, false);
     } else {
-      const { data, truncated, elapsedMs } = queryResult;
-      renderTable(data, undefined, undefined, { host, result: { truncated } });
+      const { data, truncated, elapsedMs, seq, capped } = queryResult;
+      renderTable(data, undefined, undefined, { host, result: { truncated, seq, capped } });
       setQueryStatus(
         `${data.rowCount.toLocaleString()}${truncated ? '+' : ''} row${data.rowCount !== 1 ? 's' : ''} · ${elapsedMs.toLocaleString()} ms`,
         false
@@ -2585,6 +2609,8 @@
         data: payload.data,
         truncated: payload.truncated === true,
         elapsedMs: typeof payload.elapsedMs === 'number' ? payload.elapsedMs : 0,
+        seq: Number.isSafeInteger(payload.result) ? payload.result : undefined,
+        capped: payload.capped === true,
       };
     } else {
       queryResult = { kind: 'error', message: 'The host sent an unexpected reply.' };

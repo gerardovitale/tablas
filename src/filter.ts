@@ -371,12 +371,21 @@ export function planFilter(message: FilterMessage): FilterPlan {
   return resolved.specs.length === 0 ? { kind: 'cleared' } : { kind: 'run', specs: resolved.specs };
 }
 
-/** Wraps an outcome into the reply for `message`, echoing its `seq` and `table`. */
-export function filterPayload(message: FilterMessage, outcome: FilterOutcome): FilterPayload {
+/** What every reply echoes of its request: `seq` and whichever address it carried. */
+function echoOf(message: FilterMessage): FilterPayload {
   const base: FilterPayload = { seq: message.seq };
   if (message.table !== undefined) {
     base.table = message.table;
   }
+  if (message.result !== undefined) {
+    base.result = message.result;
+  }
+  return base;
+}
+
+/** Wraps an outcome into the reply for `message`, echoing its `seq` and `table` (or `result`). */
+export function filterPayload(message: FilterMessage, outcome: FilterOutcome): FilterPayload {
+  const base = echoOf(message);
   return isFailedFilter(outcome)
     ? { ...base, failedReason: outcome.failedReason }
     : { ...base, rows: outcome.rows, matchCount: outcome.matchCount };
@@ -384,9 +393,5 @@ export function filterPayload(message: FilterMessage, outcome: FilterOutcome): F
 
 /** The reply for a request that held invalid filter texts. */
 export function filterErrorPayload(message: FilterMessage, errors: FilterError[]): FilterPayload {
-  const base: FilterPayload = { seq: message.seq };
-  if (message.table !== undefined) {
-    base.table = message.table;
-  }
-  return { ...base, errors };
+  return { ...echoOf(message), errors };
 }

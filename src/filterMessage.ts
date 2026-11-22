@@ -17,7 +17,8 @@ export interface FilterRequest {
 
 /**
  * webview -> host. `table` is the selected table/sheet, omitted for CSV/Parquet.
- * `seq` is one counter per webview; a newer request supersedes older ones. An
+ * `result` (never together with `table`) addresses a query result the host kept
+ * as a table: the `seq` of the `run-query` that made it. `seq` is one counter per webview; a newer request supersedes older ones. An
  * empty `filters` array means "all filters cleared" -- the host only uses it to
  * release anything it cached, and does not answer.
  */
@@ -25,6 +26,7 @@ export interface FilterMessage {
   type: 'filter';
   seq: number;
   table?: string;
+  result?: number;
   filters: FilterRequest[];
 }
 
@@ -46,6 +48,7 @@ export interface FilterError {
 export interface FilterPayload {
   seq: number;
   table?: string;
+  result?: number;
   rows?: string[][];
   matchCount?: number;
   errors?: FilterError[];
@@ -64,7 +67,7 @@ function isIndex(value: unknown): value is number {
 
 /**
  * True for a well-formed `filter` request: integer `seq`, `table` (when
- * present) a string, and `filters` an array of {integer column, string text of
+ * present) a string, `result` (when present) an integer and not alongside `table`, and `filters` an array of {integer column, string text of
  * at most `filterLimits.maxTextLength` characters} with no column repeated.
  * Whether a column exists in the table is the host's business, not this guard's.
  */
@@ -72,11 +75,14 @@ export function isFilterMessage(message: unknown): message is FilterMessage {
   if (typeof message !== 'object' || message === null) {
     return false;
   }
-  const candidate = message as { type?: unknown; seq?: unknown; table?: unknown; filters?: unknown };
+  const candidate = message as { type?: unknown; seq?: unknown; table?: unknown; result?: unknown; filters?: unknown };
   if (candidate.type !== 'filter' || !isIndex(candidate.seq)) {
     return false;
   }
   if (candidate.table !== undefined && typeof candidate.table !== 'string') {
+    return false;
+  }
+  if (candidate.result !== undefined && (!isIndex(candidate.result) || candidate.table !== undefined)) {
     return false;
   }
   if (!Array.isArray(candidate.filters)) {

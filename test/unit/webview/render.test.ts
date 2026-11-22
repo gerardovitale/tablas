@@ -1059,6 +1059,96 @@ describe('webview main.js rendering', () => {
       assert.strictEqual(countOf(postedMessages, 'get-stats'), statsBefore);
     });
 
+    describe('a result the host keeps as a table', () => {
+      const intStats = { columns: [{ type: 'integer', nullCount: 0, distinctCount: 3, min: '1', max: '3', mean: 2, nativeType: 'BIGINT' }] };
+      const sendStats = (dom: JSDOM, payload: Record<string, unknown>) =>
+        dom.window.dispatchEvent(new dom.window.MessageEvent('message', { data: { type: 'stats-data', payload } }));
+      const sendFilterData = (dom: JSDOM, payload: Record<string, unknown>) =>
+        dom.window.dispatchEvent(new dom.window.MessageEvent('message', { data: { type: 'filter-data', payload } }));
+      const last = (posted: unknown[], type: string) =>
+        posted.filter((m) => (m as { type: string }).type === type).at(-1) as Record<string, unknown>;
+
+      function withResult(rest: Record<string, unknown> = {}, data: Partial<ParsedTable> = {}) {
+        const loaded = inSqlMode();
+        runButton(loaded.dom).click();
+        const seq = runQueries(loaded.postedMessages)[0].seq;
+        sendQueryData(loaded.dom, resultOk(seq, data, { result: seq, materializedRows: 3, ...rest }));
+        return { ...loaded, seq };
+      }
+
+      it('gets the filter row, and asks for statistics by result, never by table', () => {
+        const { dom, postedMessages, seq } = withResult();
+        assert.strictEqual(doc(dom).querySelectorAll('.query-result input.col-filter').length, 1);
+        assert.strictEqual(doc(dom).querySelectorAll('.query-result thead tr').length, 2);
+        const request = last(postedMessages, 'get-stats');
+        assert.strictEqual(request.result, seq);
+        assert.ok(!('table' in request), 'a result has no table name');
+      });
+
+      it('draws the profile strip and the type badge from the statistics answer', () => {
+        const { dom, postedMessages, seq } = withResult();
+        sendStats(dom, { result: seq, seq: last(postedMessages, 'get-stats').seq, stats: intStats });
+        const strip = doc(dom).querySelector('.query-result button.col-profile');
+        assert.ok(strip, 'the strip is attached');
+        assert.match(doc(dom).querySelector('.query-result .type-badge')?.getAttribute('aria-label') ?? '', /integer · BIGINT/);
+      });
+
+      it('drops statistics and filter answers that belong to another result or to a table', () => {
+        const { dom, postedMessages, seq } = withResult();
+        const statsSeq = last(postedMessages, 'get-stats').seq;
+        sendStats(dom, { result: seq + 1, seq: statsSeq, stats: intStats });
+        sendStats(dom, { table: 'a', seq: statsSeq, stats: intStats });
+        assert.strictEqual(doc(dom).querySelector('.query-result button.col-profile'), null);
+
+        const box = doc(dom).querySelector<HTMLInputElement>('.query-result input.col-filter')!;
+        box.value = '>1';
+        box.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+        const filter = last(postedMessages, 'filter');
+        assert.strictEqual(filter.result, seq);
+        assert.ok(!('table' in filter));
+        const rows = [['2'], ['3']];
+        sendFilterData(dom, { seq: filter.seq, result: seq + 1, rows, matchCount: 2 });
+        assert.strictEqual(doc(dom).querySelectorAll('.query-result tbody tr').length, 3, 'a stale result address is ignored');
+        sendFilterData(dom, { seq: filter.seq, result: seq, rows, matchCount: 2 });
+        assert.strictEqual(doc(dom).querySelectorAll('.query-result tbody tr').length, 2);
+        assert.strictEqual(doc(dom).querySelector('.query-result .stats-bar')?.textContent, '2 of 3 rows match');
+      });
+
+      it('says when a failed answer is because the result is gone', () => {
+        const { dom, postedMessages, seq } = withResult();
+        const box = doc(dom).querySelector<HTMLInputElement>('.query-result input.col-filter')!;
+        box.value = '>1';
+        box.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+        sendFilterData(dom, {
+          seq: last(postedMessages, 'filter').seq,
+          result: seq,
+          failedReason: 'This result is no longer available; run the query again.',
+        });
+        assert.match(doc(dom).querySelector('.query-result .stats-bar')?.textContent ?? '', /no longer available/);
+        assert.strictEqual(doc(dom).querySelectorAll('.query-result tbody tr').length, 3, 'the rows stay');
+      });
+
+      it('says the statistics and filters cover the first N rows when the query had more', () => {
+        const { dom } = withResult({ capped: true, truncated: true, materializedRows: 100000 }, { totalRowCount: 100000 });
+        const bar = doc(dom).querySelector('.query-result .stats-bar')?.textContent ?? '';
+        assert.match(bar, /the query returned more than 100,000 rows — statistics and filters cover the first 100,000; showing 3/);
+        assert.strictEqual(queryStatus(dom), '3+ rows · 42 ms');
+      });
+
+      it('has no note about a cap when the whole result is held', () => {
+        const { dom } = withResult();
+        assert.strictEqual(doc(dom).querySelector('.query-result .stats-bar')?.textContent, '3 rows × 1 column');
+      });
+
+      it('explains a result without a table: rows only, no filter boxes', () => {
+        const { dom, postedMessages } = inSqlMode();
+        runButton(dom).click();
+        sendQueryData(dom, resultOk(runQueries(postedMessages)[0].seq));
+        assert.strictEqual(doc(dom).querySelectorAll('.query-result input.col-filter').length, 0);
+        assert.strictEqual(doc(dom).querySelector('.query-result .stats-status')?.textContent, 'Statistics and filters are not available for this result.');
+      });
+    });
+
     it('says when the query returned more rows than are shown', () => {
       const { dom, postedMessages } = inSqlMode();
       runButton(dom).click();

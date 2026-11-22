@@ -1,5 +1,11 @@
 import * as assert from 'assert';
-import { isRunQueryMessage, queryDataMessage, queryPayload, type RunQueryMessage } from '../../src/queryMessage';
+import {
+  isCloseResultMessage,
+  isRunQueryMessage,
+  queryDataMessage,
+  queryPayload,
+  type RunQueryMessage,
+} from '../../src/queryMessage';
 
 describe('queryMessage', () => {
   describe('isRunQueryMessage', () => {
@@ -30,7 +36,36 @@ describe('queryMessage', () => {
     });
   });
 
+  describe('isCloseResultMessage', () => {
+    it('accepts a non-negative integer seq', () => {
+      assert.strictEqual(isCloseResultMessage({ type: 'close-result', seq: 0 }), true);
+      assert.strictEqual(isCloseResultMessage({ type: 'close-result', seq: 12 }), true);
+    });
+
+    it('rejects anything else', () => {
+      for (const bad of [undefined, null, 'close-result', { type: 'run-query', seq: 1 }, { type: 'close-result' },
+        { type: 'close-result', seq: -1 }, { type: 'close-result', seq: 1.5 }, { type: 'close-result', seq: '1' }]) {
+        assert.strictEqual(isCloseResultMessage(bad), false, JSON.stringify(bad));
+      }
+    });
+  });
+
   describe('queryPayload', () => {
+    it('carries the result address, its row count and the capped flag only when there is a result', () => {
+      const m: RunQueryMessage = { type: 'run-query', seq: 4, sql: 'SELECT 1' };
+      const d = { headers: ['a'], rows: [['1']], rowCount: 1, columnCount: 1 };
+      assert.deepStrictEqual(queryPayload(m, { data: d, truncated: false, elapsedMs: 2, result: 4, materializedRows: 1 }), {
+        seq: 4, data: d, truncated: false, elapsedMs: 2, result: 4, materializedRows: 1,
+      });
+      assert.deepStrictEqual(
+        queryPayload(m, { data: d, truncated: true, elapsedMs: 2, result: 4, materializedRows: 100, capped: true }),
+        { seq: 4, data: d, truncated: true, elapsedMs: 2, result: 4, materializedRows: 100, capped: true }
+      );
+      assert.deepStrictEqual(queryPayload(m, { data: d, truncated: false, elapsedMs: 2 }), {
+        seq: 4, data: d, truncated: false, elapsedMs: 2,
+      });
+    });
+
     const message: RunQueryMessage = { type: 'run-query', seq: 9, sql: 'SELECT 1' };
     const data = { headers: ['a'], rows: [['1']], rowCount: 1, columnCount: 1 };
 

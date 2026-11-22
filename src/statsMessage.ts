@@ -9,10 +9,15 @@ import type { TableStats } from './tableData';
  * Kept free of any `vscode` import so it can be unit-tested from `test/unit/`.
  */
 
-/** webview -> host. `table` is the selected table/sheet, omitted for CSV/Parquet. */
+/**
+ * webview -> host. `table` is the selected table/sheet, omitted for CSV/Parquet.
+ * `result` (never together with `table`) addresses a query result the host kept
+ * as a table: the `seq` of the `run-query` that made it.
+ */
 export interface GetStatsMessage {
   type: 'get-stats';
   table?: string;
+  result?: number;
   /**
    * One webview-wide counter, never reset, echoed in the answer. The table name
    * alone cannot tell a reply for the view on screen from a slower one for the
@@ -29,6 +34,8 @@ export interface GetStatsMessage {
  */
 export interface StatsPayload {
   table?: string;
+  /** Echo of `GetStatsMessage.result`. */
+  result?: number;
   /** Echo of `GetStatsMessage.seq`. */
   seq?: number;
   stats?: TableStats;
@@ -40,15 +47,20 @@ export interface StatsDataMessage {
   payload: StatsPayload;
 }
 
-/** True for a well-formed `get-stats` request; `table`, when present, must be a string. */
+/**
+ * True for a well-formed `get-stats` request; `table`, when present, must be a
+ * string and `result`, when present, a non-negative integer, and not both.
+ */
 export function isGetStatsMessage(message: unknown): message is GetStatsMessage {
   if (typeof message !== 'object' || message === null) {
     return false;
   }
-  const candidate = message as { type?: unknown; table?: unknown; seq?: unknown };
+  const candidate = message as { type?: unknown; table?: unknown; result?: unknown; seq?: unknown };
   return (
     candidate.type === 'get-stats' &&
     (candidate.table === undefined || typeof candidate.table === 'string') &&
+    (candidate.result === undefined || (typeof candidate.result === 'number' && Number.isSafeInteger(candidate.result) && candidate.result >= 0)) &&
+    !(candidate.table !== undefined && candidate.result !== undefined) &&
     (candidate.seq === undefined || typeof candidate.seq === 'number')
   );
 }

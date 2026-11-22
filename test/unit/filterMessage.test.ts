@@ -14,6 +14,15 @@ describe('isFilterMessage', () => {
     assert.strictEqual(isFilterMessage({ ...valid, table: '' }), true);
   });
 
+  it('accepts a query result address, but never together with a table', () => {
+    assert.strictEqual(isFilterMessage({ ...valid, result: 4 }), true);
+    assert.strictEqual(isFilterMessage({ ...valid, result: 0 }), true);
+    assert.strictEqual(isFilterMessage({ ...valid, result: 4, table: 't' }), false);
+    for (const result of [-1, 1.5, NaN, '4', null, {}, 2 ** 60]) {
+      assert.strictEqual(isFilterMessage({ ...valid, result }), false, String(result));
+    }
+  });
+
   it('accepts an empty filter list (all cleared) and empty filter text', () => {
     assert.strictEqual(isFilterMessage({ ...valid, filters: [] }), true);
     assert.strictEqual(isFilterMessage({ ...valid, filters: [{ column: 2, text: '' }] }), true);

@@ -510,6 +510,82 @@ describe('DuckdbEditorProvider Integration', () => {
       }
     });
 
+    it('keeps the result as a table that stats and filters answer for, by result seq', async () => {
+      const { provider, document } = await open('multi-table.duckdb');
+      try {
+        const payload = await provider.handleRunQuery(document, {
+          type: 'run-query',
+          seq: 11,
+          sql: 'SELECT id, name FROM customers ORDER BY id',
+        });
+        assert.strictEqual(payload?.result, 11);
+        assert.strictEqual(payload?.materializedRows, 2);
+        assert.strictEqual(payload?.capped, undefined);
+
+        const stats = await provider.handleGetStats(document, undefined, 11);
+        assert.strictEqual(stats?.result, 11);
+        assert.strictEqual(stats?.table, undefined);
+        assert.deepStrictEqual(stats?.stats?.columns.map((c) => c.nativeType), ['INTEGER', 'VARCHAR']);
+
+        const filtered = await provider.handleFilter(document, {
+          type: 'filter',
+          seq: 1,
+          result: 11,
+          filters: [{ column: 1, text: 'glob' }],
+        });
+        assert.strictEqual(filtered?.result, 11);
+        assert.deepStrictEqual(filtered?.rows, [['2', 'Globex']]);
+        assert.strictEqual(filtered?.matchCount, 1);
+      } finally {
+        document.dispose();
+      }
+    });
+
+    it('drops the result when it is closed, replaced or a table is picked; asks to run again', async () => {
+      const { provider, document } = await open('multi-table.duckdb');
+      try {
+        const run = (seq: number) => provider.handleRunQuery(document, { type: 'run-query', seq, sql: 'SELECT id FROM customers' });
+        const filter = (seq: number, result: number) =>
+          provider.handleFilter(document, { type: 'filter', seq, result, filters: [{ column: 0, text: '1' }] });
+
+        await run(1);
+        await provider.handleCloseResult(document, 1);
+        assert.match((await filter(1, 1))?.failedReason ?? '', /no longer available/);
+        assert.strictEqual((await provider.handleGetStats(document, undefined, 1))?.stats, undefined);
+
+        await run(2);
+        await run(3);
+        assert.match((await filter(2, 2))?.failedReason ?? '', /no longer available/, 'a newer run replaced it');
+        assert.strictEqual((await filter(3, 3))?.matchCount, 1);
+
+        await provider.handleCloseResult(document, 2); // an older close must not drop the newer result
+        assert.strictEqual((await filter(4, 3))?.matchCount, 1);
+
+        await provider.handleSelectTable(document, 'orders');
+        assert.match((await filter(5, 3))?.failedReason ?? '', /no longer available/, 'picking a table leaves the result');
+      } finally {
+        document.dispose();
+      }
+    });
+
+    it('does not keep a result across a reload: the new handle starts without one', async () => {
+      const { provider, document } = await open('multi-table.duckdb');
+      try {
+        await provider.handleRunQuery(document, { type: 'run-query', seq: 5, sql: 'SELECT id FROM customers' });
+        const reloaded = await provider.handleReload(document);
+        assert.strictEqual(reloaded?.success, true);
+        const gone = await provider.handleFilter(document, {
+          type: 'filter',
+          seq: 1,
+          result: 5,
+          filters: [{ column: 0, text: '1' }],
+        });
+        assert.match(gone?.failedReason ?? '', /no longer available/);
+      } finally {
+        document.dispose();
+      }
+    });
+
     it('drops a request that a newer one overtook, and does nothing before the database is open', async () => {
       const { provider, document } = await open('multi-table.duckdb');
       try {

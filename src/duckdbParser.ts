@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -6,11 +7,13 @@ import {
   DOUBLE,
   DuckDBInstance,
   DuckDBTypeId,
+  JsonDuckDBValueConverter,
   StatementType,
   VARCHAR,
   version,
   type DuckDBConnection,
-  type DuckDBResultReader,
+  type DuckDBDataChunk,
+  type DuckDBResult,
   type DuckDBType,
   type Json,
 } from '@duckdb/node-api';
@@ -41,7 +44,7 @@ import {
   type CompareOp,
   type FilterOutcome,
 } from './filter';
-import type { QueryOutcome } from './queryMessage';
+import { RESULT_GONE_REASON, type QueryOutcome } from './queryMessage';
 import {
   clampMaxRows,
   MAIN_SCHEMA,
@@ -303,6 +306,21 @@ const tableRefs = new WeakMap<DuckdbHandle, Map<string, TableRef>>();
 // a name is known, which must not re-run the catalog join every time.
 const tableLists = new WeakMap<DuckdbHandle, TableRef[]>();
 
+/**
+ * The query result a handle keeps as a TEMP table (see `duckdbRunQuery`): the
+ * newest one only, since the box shows one result at a time. `seq` is the
+ * `run-query` that made it, which is how the webview addresses it; `sqlName` is
+ * the table's unique name (also its stats-cache key) and `quoted` how SQL refers
+ * to it. Temp tables go away with the connection, so a reload's handle swap
+ * drops the old result by itself and the new handle starts with none.
+ */
+interface ResultTable {
+  seq: number;
+  sqlName: string;
+  quoted: string;
+}
+const resultTables = new WeakMap<DuckdbHandle, ResultTable>();
+
 /** `"schema"."table"` for a table outside `main`, else `"table"`; see `tableRefs`. */
 function quotedTableName(handle: DuckdbHandle, name: string): string {
   const ref = tableRefs.get(handle)?.get(name);
@@ -472,8 +490,7 @@ async function buildDuckdbColumn(
 }
 
 /** The uncached work behind `duckdbTableStats`; may throw (including on interrupt). */
-async function computeDuckdbStats(handle: DuckdbHandle, tableName: string): Promise<TableStats | undefined> {
-  const quotedTable = quotedTableName(handle, tableName);
+async function computeDuckdbStats(handle: DuckdbHandle, quotedTable: string): Promise<TableStats | undefined> {
   // Column names and types come from a zero-row read, which still carries
   // the full result schema.
   const schemaReader = await handle.connection.runAndReadAll(`SELECT * FROM ${quotedTable} LIMIT 0`);
@@ -527,8 +544,32 @@ async function computeDuckdbStats(handle: DuckdbHandle, tableName: string): Prom
  * the table doesn't repeat an expensive attempt.
  */
 export function duckdbTableStats(handle: DuckdbHandle, tableName: string): Promise<TableStats | undefined> {
+  return statsFor(handle, () => ({ key: tableName, quoted: quotedTableName(handle, tableName) }));
+}
+
+/**
+ * `duckdbTableStats` for the query result kept under `resultSeq` (see
+ * `duckdbRunQuery`); `undefined` if that result is gone. Cached under the result
+ * table's own unique name, so a later run never inherits it.
+ */
+export function duckdbResultStats(handle: DuckdbHandle, resultSeq: number): Promise<TableStats | undefined> {
+  return statsFor(handle, () => {
+    const result = resultTables.get(handle);
+    return result && result.seq === resultSeq ? { key: result.sqlName, quoted: result.quoted } : undefined;
+  });
+}
+
+/** `resolve` runs inside the queue, so a result dropped while this waited is seen as gone. */
+function statsFor(
+  handle: DuckdbHandle,
+  resolve: () => { key: string; quoted: string } | undefined
+): Promise<TableStats | undefined> {
   return runExclusive(handle, async () => {
-    const cached = statsCache.lookup(handle, tableName);
+    const target = resolve();
+    if (!target) {
+      return undefined;
+    }
+    const cached = statsCache.lookup(handle, target.key);
     if (cached.hit) {
       return cached.stats;
     }
@@ -539,7 +580,7 @@ export function duckdbTableStats(handle: DuckdbHandle, tableName: string): Promi
     }, statsLimits.duckdbTimeoutMs);
     let stats: TableStats | undefined;
     try {
-      stats = await computeDuckdbStats(handle, tableName);
+      stats = await computeDuckdbStats(handle, target.quoted);
     } catch (err) {
       if (timedOut) {
         stats = skippedStats(STATS_TIMED_OUT_REASON);
@@ -549,7 +590,7 @@ export function duckdbTableStats(handle: DuckdbHandle, tableName: string): Promi
     } finally {
       clearTimeout(timer);
     }
-    statsCache.store(handle, tableName, stats);
+    statsCache.store(handle, target.key, stats);
     return stats;
   });
 }
@@ -662,14 +703,49 @@ export function duckdbTableFilter(
   specs: readonly ColumnFilterSpec[],
   maxRows: number
 ): Promise<FilterOutcome> {
+  return filterFor(handle, () => quotedTableName(handle, tableName), specs, maxRows);
+}
+
+/**
+ * `duckdbTableFilter` for the query result kept under `resultSeq`: the same SQL
+ * over the result's table, so a filter means the same thing as on a real table.
+ * A result that is gone yields a `failedReason`.
+ */
+export function duckdbResultFilter(
+  handle: DuckdbHandle,
+  resultSeq: number,
+  specs: readonly ColumnFilterSpec[],
+  maxRows: number
+): Promise<FilterOutcome> {
+  return filterFor(
+    handle,
+    () => {
+      const result = resultTables.get(handle);
+      return result && result.seq === resultSeq ? result.quoted : undefined;
+    },
+    specs,
+    maxRows
+  );
+}
+
+/** `resolve` runs inside the queue, so a result dropped while this waited is seen as gone. */
+function filterFor(
+  handle: DuckdbHandle,
+  resolve: () => string | undefined,
+  specs: readonly ColumnFilterSpec[],
+  maxRows: number
+): Promise<FilterOutcome> {
   return runExclusive(handle, async (): Promise<FilterOutcome> => {
+    const quotedTable = resolve();
+    if (quotedTable === undefined) {
+      return { failedReason: RESULT_GONE_REASON };
+    }
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
       handle.connection.interrupt();
     }, filterLimits.duckdbTimeoutMs);
     try {
-      const quotedTable = quotedTableName(handle, tableName);
       const schemaReader = await handle.connection.runAndReadAll(`SELECT * FROM ${quotedTable} LIMIT 0`);
       const headers = schemaReader.columnNames();
       if (headers.length === 0 || hasUnknownColumn(specs, headers.length)) {
@@ -717,7 +793,81 @@ export const queryLimits = {
   duckdbTimeoutMs: 30_000,
   /** Longest query text accepted; the webview's textarea carries the same `maxlength`. */
   maxSqlLength: 100_000,
+  /**
+   * Most rows a result keeps as a table (the first ones; at least `tablas.maxRows`). Statistics and
+   * filters cover that table, so beyond it they cover "the first N rows". A constant, not a setting:
+   * workspace settings can come from an untrusted repo (see `MAX_ROWS_CEILING`).
+   */
+  maxResultRows: 100_000,
 };
+
+/** The result table's columns are renamed `c0..cN`, so duplicate or odd result names cannot break the DDL. */
+function resultColumnDefinitions(types: readonly DuckDBType[]): string {
+  return types.map((type, i) => `c${i} ${type.toString()}`).join(', ');
+}
+
+/**
+ * Keeps the rows of a finished stream as a new TEMP table and makes it the
+ * handle's current result (the previous one is dropped only after this one
+ * exists, so a failure here leaves the old result usable). `chunks` hold at most
+ * `limit` rows once trimmed. Returns the registered table, or `undefined` when no
+ * table could be made (a type whose `toString()` is not valid DDL): the caller
+ * then shows the rows without statistics or filters.
+ */
+async function materializeResult(
+  handle: DuckdbHandle,
+  seq: number,
+  types: readonly DuckDBType[],
+  chunks: readonly DuckDBDataChunk[]
+): Promise<ResultTable | undefined> {
+  const sqlName = `__tablas_result_${crypto.randomBytes(4).toString('hex')}_${seq}`;
+  const quoted = `temp.main.${quoteIdentifier(sqlName)}`;
+  try {
+    await handle.connection.run(`CREATE TEMP TABLE ${quoteIdentifier(sqlName)} (${resultColumnDefinitions(types)})`);
+  } catch {
+    return undefined;
+  }
+  try {
+    const appender = await handle.connection.createAppender(sqlName, 'main', 'temp');
+    try {
+      for (const chunk of chunks) {
+        appender.appendDataChunk(chunk);
+      }
+    } finally {
+      appender.closeSync();
+    }
+  } catch {
+    await handle.connection.run(`DROP TABLE IF EXISTS ${quoted}`).catch(() => undefined);
+    return undefined;
+  }
+  const previous = resultTables.get(handle);
+  const created: ResultTable = { seq, sqlName, quoted };
+  resultTables.set(handle, created);
+  if (previous) {
+    await handle.connection.run(`DROP TABLE IF EXISTS ${previous.quoted}`).catch(() => undefined);
+  }
+  return created;
+}
+
+/**
+ * Forgets the result kept under `seq` (the webview stopped showing it) and drops
+ * its table. A newer result is left alone. Never throws.
+ */
+export function duckdbDropResult(handle: DuckdbHandle, seq: number): Promise<void> {
+  return runExclusive(handle, async () => {
+    const current = resultTables.get(handle);
+    if (!current || current.seq !== seq) {
+      return;
+    }
+    resultTables.delete(handle);
+    await handle.connection.run(`DROP TABLE IF EXISTS ${current.quoted}`).catch(() => undefined);
+  });
+}
+
+/** The seq of the result the handle keeps as a table, if any (for the provider and tests). */
+export function currentResultSeq(handle: DuckdbHandle): number | undefined {
+  return resultTables.get(handle)?.seq;
+}
 
 // What the SQL box will run: reads. `SELECT` covers WITH, FROM-first, SHOW,
 // DESCRIBE, SUMMARIZE and the read-style pragmas (`PRAGMA table_info(..)`,
@@ -778,7 +928,7 @@ export function duckdbRunQuery(
   handle: DuckdbHandle,
   sql: string,
   maxRowsInput: number,
-  options: { shouldRun?: () => boolean } = {}
+  options: { shouldRun?: () => boolean; resultSeq?: number } = {}
 ): Promise<QueryOutcome | undefined> {
   // Comments and semicolons alone are no query either (DuckDB answers them with
   // "Error in native callback"). Only used for this check, so a `--` inside a
@@ -801,7 +951,7 @@ export function duckdbRunQuery(
       timedOut = true;
       handle.connection.interrupt();
     }, queryLimits.duckdbTimeoutMs);
-    let reader: DuckDBResultReader | undefined;
+    let stream: DuckDBResult | undefined;
     try {
       const statements = await handle.connection.extractStatements(sql);
       for (let i = 0; i < statements.count; i++) {
@@ -820,14 +970,59 @@ export function duckdbRunQuery(
         }
       }
       const maxRows = clampMaxRows(maxRowsInput) ?? 1;
-      reader = await handle.connection.streamAndReadUntil(sql, maxRows + 1);
-      const headers = reader.columnNames();
-      const read = reader.getRowsJson();
-      const rows = read.slice(0, maxRows).map((row) => row.map(stringifyDuckdbCell));
+      // What the result table may hold; the grid itself shows at most `maxRows` of it.
+      const cap = Math.max(queryLimits.maxResultRows, maxRows);
+      stream = await handle.connection.stream(sql);
+      const headers = stream.columnNames();
+      const types = stream.columnTypes();
+      // Streamed, so `SELECT * FROM huge_table` never materializes more than `cap` + one chunk.
+      let chunks: DuckDBDataChunk[] = [];
+      let total = 0;
+      if (headers.length > 0) {
+        while (total <= cap) {
+          const chunk = await stream.fetchChunk();
+          if (!chunk || chunk.rowCount === 0) {
+            break;
+          }
+          chunks.push(chunk);
+          total += chunk.rowCount;
+        }
+      }
+      // The stream must be closed before anything else runs on the connection (see the finally).
+      stream.closeSync();
+      stream = undefined;
+      const capped = total > cap;
+      if (capped) {
+        const last = chunks[chunks.length - 1];
+        last.rowCount = last.rowCount - (total - cap);
+        total = cap;
+        chunks = chunks.filter((chunk) => chunk.rowCount > 0);
+      }
+      const rows: string[][] = [];
+      for (const chunk of chunks) {
+        if (rows.length >= maxRows) {
+          break;
+        }
+        for (const row of chunk.convertRows(JsonDuckDBValueConverter)) {
+          if (rows.length >= maxRows) {
+            break;
+          }
+          rows.push(row.map(stringifyDuckdbCell));
+        }
+      }
+      // Kept as a table so the table-keyed protocol (statistics, filters) can serve it.
+      const table = headers.length > 0 ? await materializeResult(handle, options.resultSeq ?? 0, types, chunks) : undefined;
       return {
-        data: { headers, rows, rowCount: rows.length, columnCount: headers.length },
-        truncated: read.length > maxRows,
+        data: {
+          headers,
+          rows,
+          rowCount: rows.length,
+          columnCount: headers.length,
+          ...(table !== undefined && total > rows.length && { totalRowCount: total }),
+        },
+        truncated: total > rows.length || capped,
         elapsedMs: Date.now() - started,
+        ...(table !== undefined && { result: table.seq, materializedRows: total, ...(capped && { capped: true }) }),
       };
     } catch (err) {
       if (timedOut) {
@@ -838,7 +1033,7 @@ export function duckdbRunQuery(
     } finally {
       clearTimeout(timer);
       try {
-        reader?.closeSync();
+        stream?.closeSync();
       } catch {
         // best effort: the connection is only blocked if the result stays open
       }

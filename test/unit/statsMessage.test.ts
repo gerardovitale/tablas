@@ -25,6 +25,15 @@ describe('isGetStatsMessage', () => {
     }
   });
 
+  it('accepts a query result address, but never together with a table', () => {
+    assert.strictEqual(isGetStatsMessage({ type: 'get-stats', result: 4 }), true);
+    assert.strictEqual(isGetStatsMessage({ type: 'get-stats', result: 0, seq: 2 }), true);
+    assert.strictEqual(isGetStatsMessage({ type: 'get-stats', result: 4, table: 't' }), false);
+    for (const result of [-1, 1.5, NaN, '4', null, {}, 2 ** 60]) {
+      assert.strictEqual(isGetStatsMessage({ type: 'get-stats', result }), false, String(result));
+    }
+  });
+
   it('rejects other message types and non-objects', () => {
     for (const message of [{ type: 'ready' }, { type: 'select-table', table: 't' }, {}, null, undefined, 'get-stats', 42]) {
       assert.strictEqual(isGetStatsMessage(message), false, JSON.stringify(message));

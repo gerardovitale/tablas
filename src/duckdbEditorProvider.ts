@@ -3,6 +3,10 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import {
+  currentResultSeq,
+  duckdbDropResult,
+  duckdbResultFilter,
+  duckdbResultStats,
   duckdbTableFilter,
   duckdbTableStats,
   emptyParsedTable,
@@ -25,6 +29,7 @@ import {
 import { filterDataMessage, isFilterMessage, type FilterMessage, type FilterPayload } from './filterMessage';
 import { isGetStatsMessage, statsDataMessage, type StatsPayload } from './statsMessage';
 import {
+  isCloseResultMessage,
   isRunQueryMessage,
   queryDataMessage,
   queryPayload,
@@ -435,7 +440,7 @@ export class DuckdbEditorProvider
       } else if (message?.type === 'refresh') {
         await runReload();
       } else if (isGetStatsMessage(message)) {
-        const payload = await this.handleGetStats(document, message.table);
+        const payload = await this.handleGetStats(document, message.table, message.result);
         if (payload) {
           post(statsDataMessage(payload, message.seq));
         }
@@ -449,6 +454,8 @@ export class DuckdbEditorProvider
         if (payload) {
           post(queryDataMessage(payload));
         }
+      } else if (isCloseResultMessage(message)) {
+        await this.handleCloseResult(document, message.seq);
       }
     });
   }
@@ -696,6 +703,11 @@ export class DuckdbEditorProvider
       return undefined;
     }
     const seq = ++document.selectSeq;
+    // A table pick leaves the query result (if one was still held): its table is dead weight.
+    const shown = currentResultSeq(document.handle);
+    if (shown !== undefined) {
+      void duckdbDropResult(document.handle, shown);
+    }
     try {
       // One handle for the list and the read: the table list of one database must not be
       // paired with the rows of another. A reload that swapped `document.handle` while the
@@ -738,9 +750,22 @@ export class DuckdbEditorProvider
    * queue behind any other query on the same connection (see
    * `runExclusive`), so a slow scan can't collide with a table switch.
    */
-  public async handleGetStats(document: DuckdbDocument, table?: string): Promise<StatsPayload | undefined> {
+  public async handleGetStats(
+    document: DuckdbDocument,
+    table?: string,
+    result?: number
+  ): Promise<StatsPayload | undefined> {
     if (!document.handle) {
       return undefined;
+    }
+    if (result !== undefined) {
+      // A query result the host kept as a table (see `duckdbRunQuery`); `undefined` stats if it is gone.
+      try {
+        return { result, stats: await duckdbResultStats(document.handle, result) };
+      } catch (err) {
+        reportStatsFailure(err);
+        return { result, stats: undefined };
+      }
     }
     try {
       const known = table !== undefined && (await listDuckdbTables(document.handle)).some((t) => t.name === table);
@@ -768,8 +793,19 @@ export class DuckdbEditorProvider
     document.querySeq = message.seq;
     const outcome = await duckdbRunQuery(document.handle, message.sql, getMaxRowsSetting(), {
       shouldRun: () => document.querySeq === message.seq,
+      resultSeq: message.seq,
     });
     return outcome === undefined ? undefined : queryPayload(message, outcome);
+  }
+
+  /**
+   * The webview stopped showing the result made by `run-query` `seq`: drop its table.
+   * A newer result is left alone. Public so an integration test can call it without a webview.
+   */
+  public async handleCloseResult(document: DuckdbDocument, seq: number): Promise<void> {
+    if (document.handle) {
+      await duckdbDropResult(document.handle, seq);
+    }
   }
 
   /**
@@ -796,6 +832,22 @@ export class DuckdbEditorProvider
     }
     if (plan.kind === 'invalid') {
       return plan.payload;
+    }
+    if (message.result !== undefined) {
+      // A query result: the same SQL as for a table, over the result's own table. Like the table
+      // path, wait in the connection's queue first (that is where a stale request is overtaken)
+      // and drop the request if a newer one arrived meanwhile.
+      try {
+        const handle = document.handle;
+        await runExclusive(handle, async () => undefined);
+        if (document.filterSeq !== message.seq) {
+          return undefined;
+        }
+        return filterPayload(message, await duckdbResultFilter(handle, message.result, plan.specs, getMaxRowsSetting()));
+      } catch (err) {
+        reportFilterFailure(err);
+        return filterPayload(message, { failedReason: FILTER_FAILED_REASON });
+      }
     }
     try {
       const table = message.table;
