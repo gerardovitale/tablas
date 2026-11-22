@@ -864,6 +864,21 @@ export function duckdbDropResult(handle: DuckdbHandle, seq: number): Promise<voi
   });
 }
 
+/**
+ * Drops whichever result the handle holds *by the time this reaches the front of the queue*:
+ * a run still in flight when the user picked a table has registered its result by then.
+ */
+export function duckdbDropCurrentResult(handle: DuckdbHandle): Promise<void> {
+  return runExclusive(handle, async () => {
+    const current = resultTables.get(handle);
+    if (!current) {
+      return;
+    }
+    resultTables.delete(handle);
+    await handle.connection.run(`DROP TABLE IF EXISTS ${current.quoted}`).catch(() => undefined);
+  });
+}
+
 /** The seq of the result the handle keeps as a table, if any (for the provider and tests). */
 export function currentResultSeq(handle: DuckdbHandle): number | undefined {
   return resultTables.get(handle)?.seq;

@@ -919,8 +919,8 @@ describe('webview main.js rendering', () => {
     });
   });
 
-  describe('sql mode', () => {
-    function warehouse(extra: Partial<MultiTableData> = {}): MultiTableParseOutcome {
+  describe('sql box', () => {
+    function warehouse(extra: Partial<MultiTableData> = {}, selectedTable = 'a'): MultiTableParseOutcome {
       return {
         success: true,
         errors: [],
@@ -929,7 +929,7 @@ describe('webview main.js rendering', () => {
             { name: 'a', type: 'table' },
             { name: 'b', type: 'table' },
           ],
-          selectedTable: 'a',
+          selectedTable,
           data: {
             headers: ['id', 'city'],
             rows: [['1', 'Rome'], ['2', 'Paris']],
@@ -937,129 +937,508 @@ describe('webview main.js rendering', () => {
             columnCount: 2,
           },
           capabilities: { refresh: true, query: true },
-          querySuggestion: 'select * from "a" limit 5',
+          querySuggestion: `select * from "${selectedTable}" limit 5`,
           ...extra,
         },
       };
     }
     const doc = (dom: JSDOM) => dom.window.document;
-    const toggle = (dom: JSDOM, mode: 'table' | 'sql') =>
-      doc(dom).querySelector<HTMLButtonElement>(`.mode-button[data-mode="${mode}"]`)!;
+    const sqlButton = (dom: JSDOM) => doc(dom).querySelector<HTMLButtonElement>('.sql-toggle')!;
+    const panel = (dom: JSDOM) => doc(dom).querySelector<HTMLElement>('.query-panel')!;
     const queryInput = (dom: JSDOM) => doc(dom).querySelector<HTMLTextAreaElement>('.query-input')!;
     const runButton = (dom: JSDOM) => doc(dom).querySelector<HTMLButtonElement>('.query-run')!;
     const queryStatus = (dom: JSDOM) => doc(dom).querySelector('.query-status')?.textContent;
+    const queryMessage = (dom: JSDOM) => doc(dom).querySelector<HTMLElement>('.query-message')!;
+    const chip = (dom: JSDOM) => doc(dom).querySelector<HTMLElement>('.result-chip');
+    const closeChip = (dom: JSDOM) => doc(dom).querySelector<HTMLButtonElement>('.result-chip-close')!;
+    const cellText = (dom: JSDOM) => doc(dom).querySelector('#csv-table tbody td:not(.row-num)')?.textContent;
+    const filterBoxIn = (dom: JSDOM, scope: string) => doc(dom).querySelector<HTMLInputElement>(`${scope} input.col-filter`)!;
     const runQueries = (posted: unknown[]) =>
       posted.filter((m) => (m as { type: string }).type === 'run-query') as Array<{ seq: number; sql: string }>;
-    const countOf = (posted: unknown[], type: string) =>
-      posted.filter((m) => (m as { type: string }).type === type).length;
+    const sentOf = (posted: unknown[], type: string) =>
+      posted.filter((m) => (m as { type: string }).type === type) as Array<Record<string, unknown>>;
+    const countOf = (posted: unknown[], type: string) => sentOf(posted, type).length;
     const sendQueryData = (dom: JSDOM, payload: Record<string, unknown>) =>
       dom.window.dispatchEvent(new dom.window.MessageEvent('message', { data: { type: 'query-data', payload } }));
+    /** An answer with a result the host keeps as a table (`result` = the run's seq), unless `rest` says otherwise. */
     const resultOk = (seq: number, data: Partial<ParsedTable> = {}, rest: Record<string, unknown> = {}) => ({
       seq,
       data: { headers: ['n'], rows: [['1'], ['2'], ['3']], rowCount: 3, columnCount: 1, ...data },
       truncated: false,
       elapsedMs: 42,
+      result: seq,
+      materializedRows: 3,
       ...rest,
     });
     const ctrlEnter = (dom: JSDOM, target: Element) =>
       target.dispatchEvent(
         new dom.window.KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true, cancelable: true })
       );
+    const type = (dom: JSDOM, text: string) => {
+      queryInput(dom).value = text;
+      queryInput(dom).dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    };
     const reloadMeta = { reload: { at: '2026-11-19T10:00:00.000Z', previousRowCount: 2 } };
+    const pickTable = (dom: JSDOM, name: string) => {
+      const app = doc(dom).getElementById('app')!;
+      openPickerPopup(app);
+      Array.from(app.querySelectorAll<HTMLElement>('.table-picker-option'))
+        .find((o) => o.querySelector('.picker-name')?.textContent === name)!
+        .click();
+    };
 
-    function inSqlMode(extra: Partial<MultiTableData> = {}) {
+    /** The page with the panel open. */
+    function inPanel(extra: Partial<MultiTableData> = {}) {
       const loaded = loadWebview();
       sendDuckdbData(loaded.dom, warehouse(extra));
-      toggle(loaded.dom, 'sql').click();
+      sqlButton(loaded.dom).click();
       return loaded;
     }
+    /** Runs the suggestion and answers it: a result is on screen, as a table the host keeps. */
+    function withResult(data: Partial<ParsedTable> = {}, rest: Record<string, unknown> = {}) {
+      const loaded = inPanel();
+      runButton(loaded.dom).click();
+      const seq = runQueries(loaded.postedMessages).at(-1)!.seq;
+      sendQueryData(loaded.dom, resultOk(seq, data, rest));
+      return { ...loaded, seq };
+    }
 
-    it('offers the switch only when the host can run queries', () => {
-      const { dom } = loadWebview();
-      sendDuckdbData(dom, warehouse({ capabilities: { refresh: true } }));
-      assert.strictEqual(doc(dom).querySelector('.mode-toggle'), null);
-      sendDuckdbData(dom, warehouse());
-      assert.ok(toggle(dom, 'table') && toggle(dom, 'sql'));
-      assert.strictEqual(toggle(dom, 'table').getAttribute('aria-pressed'), 'true');
-      assert.strictEqual(toggle(dom, 'sql').getAttribute('aria-pressed'), 'false');
+    describe('the panel', () => {
+      it('has a button only when the host can run queries, and no Table | SQL switch', () => {
+        const { dom } = loadWebview();
+        sendDuckdbData(dom, warehouse({ capabilities: { refresh: true } }));
+        assert.strictEqual(doc(dom).querySelector('.sql-toggle'), null);
+        assert.strictEqual(doc(dom).querySelector('.query-panel'), null);
+        sendDuckdbData(dom, warehouse());
+        assert.ok(sqlButton(dom));
+        assert.strictEqual(doc(dom).querySelector('.mode-toggle'), null);
+        assert.strictEqual(doc(dom).querySelector('.mode-button'), null);
+      });
+
+      it('starts closed: the box exists but is hidden, and the button says so', () => {
+        const { dom } = loadWebview();
+        sendDuckdbData(dom, warehouse());
+        assert.strictEqual(sqlButton(dom).getAttribute('aria-expanded'), 'false');
+        assert.strictEqual(sqlButton(dom).getAttribute('aria-controls'), panel(dom).id);
+        assert.strictEqual(panel(dom).hidden, true);
+      });
+
+      it('opens beside the table, which and whose picker stay where they are', () => {
+        const { dom, postedMessages } = inPanel();
+        assert.strictEqual(sqlButton(dom).getAttribute('aria-expanded'), 'true');
+        assert.strictEqual(panel(dom).hidden, false);
+        assert.strictEqual(queryInput(dom).value, 'select * from "a" limit 5');
+        assert.strictEqual(doc(dom).activeElement, queryInput(dom), 'the box is ready to type in');
+        assert.ok(doc(dom).querySelector('#csv-table'), 'the table is still there');
+        assert.ok(doc(dom).querySelector('.table-picker-trigger'), 'so is the picker');
+        assert.strictEqual(chip(dom), null);
+        assert.strictEqual(runQueries(postedMessages).length, 0, 'opening runs nothing');
+      });
+
+      it('opening and closing leaves the table, its filters and scroll alone, and returns focus to the button', () => {
+        const { dom, postedMessages } = loadWebview();
+        sendDuckdbData(dom, warehouse());
+        const box = filterBoxIn(dom, '.table-area');
+        box.value = 'Rome';
+        box.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        const table = doc(dom).querySelector('#csv-table');
+        const filtersBefore = countOf(postedMessages, 'filter');
+        sqlButton(dom).click();
+        sqlButton(dom).click();
+        assert.strictEqual(panel(dom).hidden, true);
+        assert.strictEqual(doc(dom).querySelector('#csv-table'), table, 'the same table element');
+        assert.strictEqual(filterBoxIn(dom, '.table-area').value, 'Rome');
+        assert.strictEqual(countOf(postedMessages, 'filter'), filtersBefore, 'nothing was re-sent');
+        assert.strictEqual(doc(dom).activeElement, sqlButton(dom));
+      });
+
+      it('follows the table being viewed until the user edits the box, then keeps their text', () => {
+        const { dom } = loadWebview();
+        sendDuckdbData(dom, warehouse());
+        sqlButton(dom).click();
+        assert.strictEqual(queryInput(dom).value, 'select * from "a" limit 5');
+
+        // On another table, the untouched box offers that table's suggestion.
+        sendDuckdbData(dom, warehouse({}, 'b'));
+        assert.strictEqual(queryInput(dom).value, 'select * from "b" limit 5');
+
+        // Once edited, the text is theirs, whatever table is shown later.
+        type(dom, 'select count(*) from b');
+        sendDuckdbData(dom, warehouse({}, 'a'));
+        assert.strictEqual(queryInput(dom).value, 'select count(*) from b');
+      });
+
+      it('keeps a box the user emptied empty, instead of refilling the suggestion', () => {
+        const { dom } = inPanel();
+        type(dom, '');
+        sendDuckdbData(dom, warehouse({}, 'b'));
+        assert.strictEqual(queryInput(dom).value, '');
+      });
+
+      it('keeps the panel open and the text through a table switch', () => {
+        const { dom } = inPanel();
+        type(dom, 'select 7');
+        sendDuckdbData(dom, warehouse({}, 'b'));
+        assert.strictEqual(panel(dom).hidden, false);
+        assert.strictEqual(sqlButton(dom).getAttribute('aria-expanded'), 'true');
+        assert.strictEqual(queryInput(dom).value, 'select 7');
+      });
+
+      it('falls back to a plain table when the host can no longer query (e.g. the file became empty)', () => {
+        const { dom } = withResult();
+        assert.ok(chip(dom));
+        sendDuckdbData(dom, warehouse({ capabilities: { refresh: true, query: false }, ...reloadMeta }));
+        assert.strictEqual(doc(dom).querySelector('.query-panel'), null);
+        assert.strictEqual(doc(dom).querySelector('.sql-toggle'), null);
+        assert.strictEqual(chip(dom), null);
+        assert.strictEqual(cellText(dom), '1');
+      });
     });
 
-    it('switches to a query box prefilled with the host suggestion, without running anything', () => {
-      const { dom, postedMessages } = inSqlMode();
-      assert.strictEqual(toggle(dom, 'sql').getAttribute('aria-pressed'), 'true');
-      assert.strictEqual(queryInput(dom).value, 'select * from "a" limit 5');
-      assert.strictEqual(doc(dom).activeElement, queryInput(dom), 'the box is ready to type in');
-      assert.strictEqual(doc(dom).querySelector('#csv-table'), null);
-      assert.strictEqual(doc(dom).querySelector('.table-picker-trigger'), null, 'the table picker does not apply to SQL');
-      assert.strictEqual(runQueries(postedMessages).length, 0);
+    describe('running', () => {
+      it('runs the text with the Run button and with Ctrl+Enter, numbering each request', () => {
+        const { dom, postedMessages } = inPanel();
+        runButton(dom).click();
+        type(dom, 'SELECT 2');
+        ctrlEnter(dom, queryInput(dom));
+        const sent = runQueries(postedMessages);
+        assert.deepStrictEqual(sent.map((q) => q.sql), ['select * from "a" limit 5', 'SELECT 2']);
+        assert.ok(sent[1].seq > sent[0].seq);
+        assert.strictEqual(queryStatus(dom), 'Running…');
+      });
+
+      it('does not run an empty query', () => {
+        const { dom, postedMessages } = inPanel({ querySuggestion: undefined });
+        assert.strictEqual(queryInput(dom).value, '');
+        assert.strictEqual(runButton(dom).disabled, true);
+        ctrlEnter(dom, queryInput(dom));
+        assert.strictEqual(runQueries(postedMessages).length, 0);
+      });
+
+      it('keeps the box, its focus and the table while the query runs', () => {
+        const { dom } = inPanel();
+        runButton(dom).click();
+        assert.ok(doc(dom).querySelector('#csv-table'), 'the table stays until the answer');
+        assert.strictEqual(chip(dom), null);
+      });
+
+      it('ignores a reply that a newer run overtook', () => {
+        const { dom, postedMessages } = inPanel();
+        runButton(dom).click();
+        runButton(dom).click();
+        const [first, second] = runQueries(postedMessages);
+        sendQueryData(dom, resultOk(first.seq, { rows: [['old']], rowCount: 1 }));
+        assert.strictEqual(chip(dom), null, 'the older answer is not shown');
+        assert.strictEqual(cellText(dom), '1', 'the table is still there');
+        assert.strictEqual(queryStatus(dom), 'Running…');
+        sendQueryData(dom, resultOk(second.seq, { rows: [['new']], rowCount: 1 }));
+        assert.strictEqual(cellText(dom), 'new');
+      });
     });
 
-    it('follows the table being viewed until the user edits the box, then keeps their text', () => {
-      const { dom } = loadWebview();
-      sendDuckdbData(dom, warehouse());
-      toggle(dom, 'sql').click();
-      assert.strictEqual(queryInput(dom).value, 'select * from "a" limit 5');
+    describe('a result', () => {
+      it('replaces the grid under a "Result of query" chip, with the picker and the box still there', () => {
+        const { dom } = withResult();
+        assert.strictEqual(chip(dom)?.querySelector('.result-chip-label')?.textContent, 'Result of query');
+        assert.strictEqual(doc(dom).querySelectorAll('#csv-table').length, 1, 'one grid: the result replaced the table');
+        assert.strictEqual(doc(dom).querySelectorAll('#csv-table tbody tr').length, 3);
+        assert.strictEqual(doc(dom).querySelector('.stats-bar')?.textContent, '3 rows × 1 column');
+        assert.ok(doc(dom).querySelector('.table-picker-trigger'));
+        assert.ok(queryInput(dom));
+        assert.strictEqual(queryStatus(dom), '3 rows · 42 ms');
+        assert.strictEqual(queryMessage(dom).hidden, true);
+      });
 
-      // Back to Table, on another table: the untouched box offers that table's suggestion.
-      toggle(dom, 'table').click();
-      sendDuckdbData(dom, warehouse({ selectedTable: 'b', querySuggestion: 'select * from "b" limit 5' }));
-      toggle(dom, 'sql').click();
-      assert.strictEqual(queryInput(dom).value, 'select * from "b" limit 5');
+      it('does not move focus out of the box when it arrives', () => {
+        const { dom, postedMessages } = inPanel();
+        queryInput(dom).focus();
+        ctrlEnter(dom, queryInput(dom));
+        sendQueryData(dom, resultOk(runQueries(postedMessages)[0].seq));
+        assert.strictEqual(doc(dom).activeElement, queryInput(dom));
+      });
 
-      // Once edited, the text is theirs, whatever table is shown later.
-      queryInput(dom).value = 'select count(*) from b';
-      queryInput(dom).dispatchEvent(new dom.window.Event('input', { bubbles: true }));
-      toggle(dom, 'table').click();
-      sendDuckdbData(dom, warehouse({ selectedTable: 'a', querySuggestion: 'select * from "a" limit 5' }));
-      toggle(dom, 'sql').click();
-      assert.strictEqual(queryInput(dom).value, 'select count(*) from b');
+      it('says when the query returned more rows than are shown', () => {
+        const { dom } = withResult({}, { result: undefined, truncated: true });
+        assert.match(doc(dom).querySelector('.stats-bar')?.textContent ?? '', /returned more — showing the first 3 rows/);
+        assert.strictEqual(queryStatus(dom), '3+ rows · 42 ms');
+      });
+
+      it('treats cell text as text, never markup', () => {
+        const { dom } = withResult({ rows: [['<img src=x onerror=alert(1)>']], rowCount: 1 });
+        assert.strictEqual(doc(dom).querySelector('img'), null);
+        assert.strictEqual(cellText(dom), '<img src=x onerror=alert(1)>');
+      });
+
+      it('does not decorate it with the table\'s column descriptions', () => {
+        const loaded = loadWebview();
+        sendDuckdbData(loaded.dom, warehouse({ columnDescriptions: { id: 'Primary key.' } }));
+        assert.strictEqual(doc(loaded.dom).querySelectorAll('th.has-description').length, 1);
+        sqlButton(loaded.dom).click();
+        runButton(loaded.dom).click();
+        sendQueryData(loaded.dom, resultOk(runQueries(loaded.postedMessages)[0].seq, { headers: ['id'], rows: [['1']], rowCount: 1 }));
+        assert.ok(chip(loaded.dom));
+        assert.strictEqual(doc(loaded.dom).querySelectorAll('th.has-description').length, 0);
+      });
     });
 
-    it('keeps a box the user emptied empty, instead of refilling the suggestion', () => {
-      const { dom } = inSqlMode();
-      queryInput(dom).value = '';
-      queryInput(dom).dispatchEvent(new dom.window.Event('input', { bubbles: true }));
-      toggle(dom, 'table').click();
-      toggle(dom, 'sql').click();
-      assert.strictEqual(queryInput(dom).value, '');
+    describe('what is not a result', () => {
+      it('shows an error under the box, keeps the box and the table, and fails the status', () => {
+        const { dom, postedMessages } = inPanel();
+        runButton(dom).click();
+        sendQueryData(dom, { seq: runQueries(postedMessages)[0].seq, error: 'Catalog Error: Table "x" does not exist' });
+        assert.strictEqual(queryMessage(dom).hidden, false);
+        assert.strictEqual(queryMessage(dom).textContent, 'Catalog Error: Table "x" does not exist');
+        assert.strictEqual(queryMessage(dom).getAttribute('role'), 'alert');
+        assert.ok(queryMessage(dom).classList.contains('error'));
+        assert.strictEqual(queryStatus(dom), 'Failed');
+        assert.strictEqual(queryInput(dom).value, 'select * from "a" limit 5');
+        assert.strictEqual(chip(dom), null);
+        assert.strictEqual(cellText(dom), '1', 'the table is still there');
+      });
+
+      it('keeps the previous result when a later run fails, and clears the message on the next success', () => {
+        const { dom, postedMessages } = withResult({ rows: [['kept']], rowCount: 1 });
+        runButton(dom).click();
+        sendQueryData(dom, { seq: runQueries(postedMessages).at(-1)!.seq, error: 'Parser Error: nope' });
+        assert.strictEqual(cellText(dom), 'kept');
+        assert.ok(chip(dom));
+        assert.strictEqual(queryMessage(dom).textContent, 'Parser Error: nope');
+        runButton(dom).click();
+        sendQueryData(dom, resultOk(runQueries(postedMessages).at(-1)!.seq, { rows: [['fresh']], rowCount: 1 }));
+        assert.strictEqual(cellText(dom), 'fresh');
+        assert.strictEqual(queryMessage(dom).hidden, true);
+      });
+
+      it('explains a statement that returned no columns, under the box, and leaves the grid', () => {
+        const { dom, postedMessages } = inPanel();
+        runButton(dom).click();
+        sendQueryData(dom, resultOk(runQueries(postedMessages)[0].seq, { headers: [], rows: [], rowCount: 0, columnCount: 0 }, { result: undefined }));
+        assert.strictEqual(queryMessage(dom).textContent, 'The statement ran and returned no columns.');
+        assert.ok(!queryMessage(dom).classList.contains('error'));
+        assert.strictEqual(chip(dom), null);
+        assert.strictEqual(cellText(dom), '1');
+        assert.strictEqual(queryStatus(dom), 'Done · 42 ms');
+      });
     });
 
-    it('runs the text with the Run button and with Ctrl+Enter, numbering each request', () => {
-      const { dom, postedMessages } = inSqlMode();
-      runButton(dom).click();
-      queryInput(dom).value = 'SELECT 2';
-      queryInput(dom).dispatchEvent(new dom.window.Event('input', { bubbles: true }));
-      ctrlEnter(dom, queryInput(dom));
-      const sent = runQueries(postedMessages);
-      assert.deepStrictEqual(sent.map((q) => q.sql), ['select * from "a" limit 5', 'SELECT 2']);
-      assert.ok(sent[1].seq > sent[0].seq);
-      assert.strictEqual(queryStatus(dom), 'Running…');
+    describe('going back to the table', () => {
+      it('the ✕ restores the table with its filter and its scroll, and tells the host to drop the result', () => {
+        const { dom, postedMessages } = loadWebview();
+        sendDuckdbData(dom, warehouse());
+        const box = filterBoxIn(dom, '.table-area');
+        box.value = 'Rome';
+        box.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        doc(dom).querySelector<HTMLElement>('.scroll-wrapper')!.scrollTop = 33;
+        sqlButton(dom).click();
+        runButton(dom).click();
+        const seq = runQueries(postedMessages)[0].seq;
+        sendQueryData(dom, resultOk(seq));
+        assert.deepStrictEqual(sentOf(postedMessages, 'filter').at(-1)!.filters, [], 'leaving the table releases its filter on the host');
+
+        closeChip(dom).click();
+
+        assert.strictEqual(chip(dom), null);
+        assert.ok(doc(dom).querySelector('#csv-table .filter-row'), 'the table is back (its rows wait for the filter\'s answer)');
+        assert.strictEqual(filterBoxIn(dom, '.table-area').value, 'Rome');
+        assert.deepStrictEqual(sentOf(postedMessages, 'filter').at(-1)!.filters, [{ column: 0, text: 'Rome' }]);
+        // The scroll comes back with the filter's rows, like after a refresh.
+        const refilter = sentOf(postedMessages, 'filter').at(-1)!;
+        dom.window.dispatchEvent(
+          new dom.window.MessageEvent('message', {
+            data: { type: 'filter-data', payload: { seq: refilter.seq, table: 'a', rows: [['1', 'Rome']], matchCount: 1 } },
+          })
+        );
+        assert.strictEqual(doc(dom).querySelector<HTMLElement>('.scroll-wrapper')!.scrollTop, 33);
+        assert.deepStrictEqual(sentOf(postedMessages, 'close-result'), [{ type: 'close-result', seq }]);
+        assert.strictEqual(queryInput(dom).value, 'select * from "a" limit 5', 'the box keeps its text');
+        assert.strictEqual(panel(dom).hidden, false);
+        assert.strictEqual(queryStatus(dom), '');
+        assert.strictEqual(doc(dom).activeElement, doc(dom).querySelector('.scroll-wrapper'));
+      });
+
+      it('has an accessible name for the ✕', () => {
+        const { dom } = withResult();
+        assert.match(closeChip(dom).getAttribute('aria-label') ?? '', /Close the result/);
+      });
+
+      it('a result without a table has nothing to tell the host', () => {
+        const { dom, postedMessages } = withResult({}, { result: undefined });
+        closeChip(dom).click();
+        assert.strictEqual(countOf(postedMessages, 'close-result'), 0);
+        assert.strictEqual(chip(dom), null);
+      });
+
+      it('forgets a run still in flight, so its answer cannot bring a result back', () => {
+        const { dom, postedMessages, seq } = withResult();
+        runButton(dom).click();
+        const second = runQueries(postedMessages).at(-1)!.seq;
+        closeChip(dom).click();
+        assert.deepStrictEqual(
+          sentOf(postedMessages, 'close-result').map((m) => m.seq),
+          [seq, second],
+          'the shown result and the one the run will make'
+        );
+        sendQueryData(dom, resultOk(second, { rows: [['late']], rowCount: 1 }));
+        assert.strictEqual(chip(dom), null);
+        assert.strictEqual(cellText(dom), '1');
+      });
+
+      it('is what a pick of another table does: the table replaces the result, which is not re-run', () => {
+        const { dom, postedMessages } = withResult();
+        pickTable(dom, 'b');
+        sendDuckdbData(dom, warehouse({}, 'b'));
+        assert.strictEqual(chip(dom), null);
+        assert.strictEqual(cellText(dom), '1');
+        const sentBefore = runQueries(postedMessages).length;
+        sendDuckdbData(dom, warehouse({ ...reloadMeta }, 'b'));
+        assert.strictEqual(runQueries(postedMessages).length, sentBefore, 'nothing left to re-run');
+      });
+
+      it('is what the host choosing a table does (dbt Preview Model, the same table, show-table)', () => {
+        const first = withResult();
+        sendDuckdbData(first.dom, warehouse({ hostSelected: true }, 'b'));
+        assert.strictEqual(chip(first.dom), null);
+        assert.strictEqual(pickerCurrent(doc(first.dom).getElementById('app')!), 'b');
+
+        const second = withResult();
+        second.dom.window.dispatchEvent(new second.dom.window.MessageEvent('message', { data: { type: 'show-table' } }));
+        assert.strictEqual(chip(second.dom), null);
+        assert.ok(doc(second.dom).querySelector('#csv-table'));
+        // With nothing to give way, a no-op.
+        second.dom.window.dispatchEvent(new second.dom.window.MessageEvent('message', { data: { type: 'show-table' } }));
+        assert.ok(doc(second.dom).querySelector('#csv-table'));
+      });
+
+      it('shows the refreshed table when the file was refreshed while the result was on screen', () => {
+        const { dom } = withResult();
+        sendDuckdbData(
+          dom,
+          warehouse({ ...reloadMeta, data: { headers: ['id', 'city'], rows: [['9', 'Oslo']], rowCount: 1, columnCount: 2 } })
+        );
+        closeChip(dom).click();
+        assert.strictEqual(cellText(dom), '9');
+      });
     });
 
-    it('does not run an empty query', () => {
-      const { dom, postedMessages } = inSqlMode({ querySuggestion: undefined });
-      assert.strictEqual(queryInput(dom).value, '');
-      assert.strictEqual(runButton(dom).disabled, true);
-      ctrlEnter(dom, queryInput(dom));
-      assert.strictEqual(runQueries(postedMessages).length, 0);
+    describe('when the file is refreshed', () => {
+      it('keeps the result on screen and re-runs the query behind it, not unsent edits', () => {
+        const { dom, postedMessages } = withResult();
+        const grid = doc(dom).querySelector('#csv-table');
+        type(dom, 'SELECT 99 -- not run yet');
+
+        sendDuckdbData(dom, warehouse({ ...reloadMeta }));
+
+        const sent = runQueries(postedMessages);
+        assert.strictEqual(sent.length, 2);
+        assert.strictEqual(sent[1].sql, 'select * from "a" limit 5', 'the query behind the result, not the unsent edit');
+        assert.strictEqual(queryInput(dom).value, 'SELECT 99 -- not run yet');
+        assert.ok(chip(dom), 'still the result');
+        assert.strictEqual(doc(dom).querySelector('#csv-table'), grid, 'the old result stays as it is until the new one arrives');
+        assert.strictEqual(queryStatus(dom), 'Running…');
+        sendQueryData(dom, resultOk(sent[1].seq, { rows: [['9']], rowCount: 1 }));
+        assert.strictEqual(cellText(dom), '9');
+      });
+
+      it('puts the result\'s filter and scroll back on the new answer', () => {
+        const { dom, postedMessages } = withResult();
+        const box = filterBoxIn(dom, '.table-area');
+        box.value = '>1';
+        box.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+
+        sendDuckdbData(dom, warehouse({ ...reloadMeta }));
+        assert.strictEqual(filterBoxIn(dom, '.table-area').value, '>1', 'kept while the re-run is pending');
+
+        const second = runQueries(postedMessages)[1].seq;
+        sendQueryData(dom, resultOk(second, { rows: [['5'], ['6']], rowCount: 2 }));
+        assert.strictEqual(filterBoxIn(dom, '.table-area').value, '>1');
+        const filter = sentOf(postedMessages, 'filter').at(-1)!;
+        assert.strictEqual(filter.result, second, 'asked of the new result');
+        assert.deepStrictEqual(filter.filters, [{ column: 0, text: '>1' }]);
+      });
+
+      it('keeps the scroll of the result through the refresh and the new answer', () => {
+        const { dom, postedMessages } = withResult();
+        const wrapper = () => doc(dom).querySelector<HTMLElement>('.scroll-wrapper')!;
+        wrapper().scrollTop = 120;
+        wrapper().scrollLeft = 30;
+        sendDuckdbData(dom, warehouse({ ...reloadMeta }));
+        assert.strictEqual(wrapper().scrollTop, 120);
+        sendQueryData(dom, resultOk(runQueries(postedMessages)[1].seq, { rows: [['9']], rowCount: 1 }));
+        assert.strictEqual(wrapper().scrollTop, 120);
+        assert.strictEqual(wrapper().scrollLeft, 30);
+      });
+
+      it('keeps focus, caret and scroll in the box through a refresh', () => {
+        const { dom } = withResult();
+        const before = queryInput(dom);
+        before.focus();
+        before.setSelectionRange(3, 7);
+        before.scrollTop = 11;
+
+        sendDuckdbData(dom, warehouse({ ...reloadMeta }));
+
+        const after = queryInput(dom);
+        assert.notStrictEqual(after, before, 'the page is rebuilt');
+        assert.strictEqual(doc(dom).activeElement, after, 'typing can go on');
+        assert.deepStrictEqual([after.selectionStart, after.selectionEnd], [3, 7]);
+        assert.strictEqual(after.scrollTop, 11);
+      });
+
+      it('does not move focus into the box on a refresh when the user was elsewhere', () => {
+        const { dom } = inPanel();
+        (doc(dom).activeElement as HTMLElement).blur();
+        sendDuckdbData(dom, warehouse({ ...reloadMeta }));
+        assert.notStrictEqual(doc(dom).activeElement, queryInput(dom));
+      });
+
+      it('does not start a second run on top of a running one, but runs once more after its answer', () => {
+        const { dom, postedMessages } = withResult();
+        runButton(dom).click();
+        sendDuckdbData(dom, warehouse({ ...reloadMeta }));
+        sendDuckdbData(dom, warehouse({ ...reloadMeta }));
+        assert.strictEqual(runQueries(postedMessages).length, 2, 'refreshes during a run add no runs');
+
+        sendQueryData(dom, resultOk(runQueries(postedMessages)[1].seq));
+        const sent = runQueries(postedMessages);
+        assert.strictEqual(sent.length, 3, 'one re-run for all of them, after the answer');
+        assert.strictEqual(sent[2].sql, sent[1].sql);
+        assert.ok(chip(dom), 'the answer that did arrive is shown meanwhile');
+      });
+
+      it('a manual run cancels a pending re-run', () => {
+        const { dom, postedMessages } = withResult();
+        runButton(dom).click();
+        sendDuckdbData(dom, warehouse({ ...reloadMeta }));
+        runButton(dom).click();
+        sendQueryData(dom, resultOk(runQueries(postedMessages)[2].seq));
+        assert.strictEqual(runQueries(postedMessages).length, 3, 'no extra run after the manual one answered');
+      });
+
+      it('runs nothing when no result is on screen, and nothing after the result was closed', () => {
+        const { dom, postedMessages } = inPanel();
+        sendDuckdbData(dom, warehouse({ ...reloadMeta }));
+        assert.strictEqual(runQueries(postedMessages).length, 0);
+        assert.ok(queryInput(dom), 'the panel is still there after the refresh');
+
+        const withOne = withResult();
+        closeChip(withOne.dom).click();
+        const before = runQueries(withOne.postedMessages).length;
+        sendDuckdbData(withOne.dom, warehouse({ ...reloadMeta }));
+        assert.strictEqual(runQueries(withOne.postedMessages).length, before);
+      });
+
+      it('does not re-run a query whose run failed (the result on screen came from another one)', () => {
+        const { dom, postedMessages } = withResult();
+        type(dom, 'SELECT nope');
+        runButton(dom).click();
+        sendQueryData(dom, { seq: runQueries(postedMessages).at(-1)!.seq, error: 'Binder Error' });
+        sendDuckdbData(dom, warehouse({ ...reloadMeta }));
+        const sent = runQueries(postedMessages);
+        assert.strictEqual(sent.at(-1)!.sql, 'select * from "a" limit 5', 'the SQL behind the result on screen');
+      });
     });
 
-    it('shows the result as a table without filter boxes, and asks for no statistics', () => {
-      const { dom, postedMessages } = inSqlMode();
-      const statsBefore = countOf(postedMessages, 'get-stats');
-      runButton(dom).click();
-      sendQueryData(dom, resultOk(runQueries(postedMessages)[0].seq));
-      const result = doc(dom).querySelector('.query-result')!;
-      assert.ok(result.querySelector('#csv-table'));
-      assert.strictEqual(result.querySelectorAll('input.col-filter').length, 0);
-      assert.strictEqual(result.querySelectorAll('thead tr').length, 1);
-      assert.strictEqual(result.querySelectorAll('tbody tr').length, 3);
-      assert.strictEqual(result.querySelector('.stats-bar')?.textContent, '3 rows × 1 column');
-      assert.strictEqual(queryStatus(dom), '3 rows · 42 ms');
-      assert.strictEqual(countOf(postedMessages, 'get-stats'), statsBefore);
-    });
-
-    describe('a result the host keeps as a table', () => {
+    describe('a result served as a table by the host', () => {
       const intStats = { columns: [{ type: 'integer', nullCount: 0, distinctCount: 3, min: '1', max: '3', mean: 2, nativeType: 'BIGINT' }] };
       const sendStats = (dom: JSDOM, payload: Record<string, unknown>) =>
         dom.window.dispatchEvent(new dom.window.MessageEvent('message', { data: { type: 'stats-data', payload } }));
@@ -1068,39 +1447,33 @@ describe('webview main.js rendering', () => {
       const last = (posted: unknown[], type: string) =>
         posted.filter((m) => (m as { type: string }).type === type).at(-1) as Record<string, unknown>;
 
-      function withResult(rest: Record<string, unknown> = {}, data: Partial<ParsedTable> = {}) {
-        const loaded = inSqlMode();
-        runButton(loaded.dom).click();
-        const seq = runQueries(loaded.postedMessages)[0].seq;
-        sendQueryData(loaded.dom, resultOk(seq, data, { result: seq, materializedRows: 3, ...rest }));
-        return { ...loaded, seq };
-      }
+      const withServedResult = (rest: Record<string, unknown> = {}, data: Partial<ParsedTable> = {}) => withResult(data, rest);
 
       it('gets the filter row, and asks for statistics by result, never by table', () => {
-        const { dom, postedMessages, seq } = withResult();
-        assert.strictEqual(doc(dom).querySelectorAll('.query-result input.col-filter').length, 1);
-        assert.strictEqual(doc(dom).querySelectorAll('.query-result thead tr').length, 2);
+        const { dom, postedMessages, seq } = withServedResult();
+        assert.strictEqual(doc(dom).querySelectorAll('.table-area input.col-filter').length, 1);
+        assert.strictEqual(doc(dom).querySelectorAll('.table-area thead tr').length, 2);
         const request = last(postedMessages, 'get-stats');
         assert.strictEqual(request.result, seq);
         assert.ok(!('table' in request), 'a result has no table name');
       });
 
       it('draws the profile strip and the type badge from the statistics answer', () => {
-        const { dom, postedMessages, seq } = withResult();
+        const { dom, postedMessages, seq } = withServedResult();
         sendStats(dom, { result: seq, seq: last(postedMessages, 'get-stats').seq, stats: intStats });
-        const strip = doc(dom).querySelector('.query-result button.col-profile');
+        const strip = doc(dom).querySelector('.table-area button.col-profile');
         assert.ok(strip, 'the strip is attached');
-        assert.match(doc(dom).querySelector('.query-result .type-badge')?.getAttribute('aria-label') ?? '', /integer · BIGINT/);
+        assert.match(doc(dom).querySelector('.table-area .type-badge')?.getAttribute('aria-label') ?? '', /integer · BIGINT/);
       });
 
       it('drops statistics and filter answers that belong to another result or to a table', () => {
-        const { dom, postedMessages, seq } = withResult();
+        const { dom, postedMessages, seq } = withServedResult();
         const statsSeq = last(postedMessages, 'get-stats').seq;
         sendStats(dom, { result: seq + 1, seq: statsSeq, stats: intStats });
         sendStats(dom, { table: 'a', seq: statsSeq, stats: intStats });
-        assert.strictEqual(doc(dom).querySelector('.query-result button.col-profile'), null);
+        assert.strictEqual(doc(dom).querySelector('.table-area button.col-profile'), null);
 
-        const box = doc(dom).querySelector<HTMLInputElement>('.query-result input.col-filter')!;
+        const box = doc(dom).querySelector<HTMLInputElement>('.table-area input.col-filter')!;
         box.value = '>1';
         box.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
         const filter = last(postedMessages, 'filter');
@@ -1108,15 +1481,15 @@ describe('webview main.js rendering', () => {
         assert.ok(!('table' in filter));
         const rows = [['2'], ['3']];
         sendFilterData(dom, { seq: filter.seq, result: seq + 1, rows, matchCount: 2 });
-        assert.strictEqual(doc(dom).querySelectorAll('.query-result tbody tr').length, 3, 'a stale result address is ignored');
+        assert.strictEqual(doc(dom).querySelectorAll('.table-area tbody tr').length, 3, 'a stale result address is ignored');
         sendFilterData(dom, { seq: filter.seq, result: seq, rows, matchCount: 2 });
-        assert.strictEqual(doc(dom).querySelectorAll('.query-result tbody tr').length, 2);
-        assert.strictEqual(doc(dom).querySelector('.query-result .stats-bar')?.textContent, '2 of 3 rows match');
+        assert.strictEqual(doc(dom).querySelectorAll('.table-area tbody tr').length, 2);
+        assert.strictEqual(doc(dom).querySelector('.table-area .stats-bar')?.textContent, '2 of 3 rows match');
       });
 
       it('says when a failed answer is because the result is gone', () => {
-        const { dom, postedMessages, seq } = withResult();
-        const box = doc(dom).querySelector<HTMLInputElement>('.query-result input.col-filter')!;
+        const { dom, postedMessages, seq } = withServedResult();
+        const box = doc(dom).querySelector<HTMLInputElement>('.table-area input.col-filter')!;
         box.value = '>1';
         box.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
         sendFilterData(dom, {
@@ -1124,223 +1497,31 @@ describe('webview main.js rendering', () => {
           result: seq,
           failedReason: 'This result is no longer available; run the query again.',
         });
-        assert.match(doc(dom).querySelector('.query-result .stats-bar')?.textContent ?? '', /no longer available/);
-        assert.strictEqual(doc(dom).querySelectorAll('.query-result tbody tr').length, 3, 'the rows stay');
+        assert.match(doc(dom).querySelector('.table-area .stats-bar')?.textContent ?? '', /no longer available/);
+        assert.strictEqual(doc(dom).querySelectorAll('.table-area tbody tr').length, 3, 'the rows stay');
       });
 
       it('says the statistics and filters cover the first N rows when the query had more', () => {
-        const { dom } = withResult({ capped: true, truncated: true, materializedRows: 100000 }, { totalRowCount: 100000 });
-        const bar = doc(dom).querySelector('.query-result .stats-bar')?.textContent ?? '';
+        const { dom } = withServedResult({ capped: true, truncated: true, materializedRows: 100000 }, { totalRowCount: 100000 });
+        const bar = doc(dom).querySelector('.table-area .stats-bar')?.textContent ?? '';
         assert.match(bar, /the query returned more than 100,000 rows — statistics and filters cover the first 100,000; showing 3/);
         assert.strictEqual(queryStatus(dom), '3+ rows · 42 ms');
       });
 
       it('has no note about a cap when the whole result is held', () => {
-        const { dom } = withResult();
-        assert.strictEqual(doc(dom).querySelector('.query-result .stats-bar')?.textContent, '3 rows × 1 column');
+        const { dom } = withServedResult();
+        assert.strictEqual(doc(dom).querySelector('.table-area .stats-bar')?.textContent, '3 rows × 1 column');
       });
 
       it('explains a result without a table: rows only, no filter boxes', () => {
-        const { dom, postedMessages } = inSqlMode();
+        const { dom, postedMessages } = inPanel();
         runButton(dom).click();
-        sendQueryData(dom, resultOk(runQueries(postedMessages)[0].seq));
-        assert.strictEqual(doc(dom).querySelectorAll('.query-result input.col-filter').length, 0);
-        assert.strictEqual(doc(dom).querySelector('.query-result .stats-status')?.textContent, 'Statistics and filters are not available for this result.');
+        sendQueryData(dom, resultOk(runQueries(postedMessages)[0].seq, {}, { result: undefined }));
+        assert.strictEqual(doc(dom).querySelectorAll('.table-area input.col-filter').length, 0);
+        assert.strictEqual(doc(dom).querySelector('.table-area .stats-status')?.textContent, 'Statistics and filters are not available for this result.');
       });
     });
 
-    it('says when the query returned more rows than are shown', () => {
-      const { dom, postedMessages } = inSqlMode();
-      runButton(dom).click();
-      sendQueryData(dom, resultOk(runQueries(postedMessages)[0].seq, {}, { truncated: true }));
-      assert.match(doc(dom).querySelector('.stats-bar')?.textContent ?? '', /returned more — showing the first 3 rows/);
-      assert.strictEqual(queryStatus(dom), '3+ rows · 42 ms');
-    });
-
-    it('shows the error text and keeps the query', () => {
-      const { dom, postedMessages } = inSqlMode();
-      runButton(dom).click();
-      sendQueryData(dom, { seq: runQueries(postedMessages)[0].seq, error: 'Catalog Error: Table "x" does not exist' });
-      const message = doc(dom).querySelector('.query-result p.message.error');
-      assert.strictEqual(message?.textContent, 'Catalog Error: Table "x" does not exist');
-      assert.strictEqual(queryStatus(dom), 'Failed');
-      assert.strictEqual(queryInput(dom).value, 'select * from "a" limit 5');
-    });
-
-    it('ignores a reply that a newer run overtook', () => {
-      const { dom, postedMessages } = inSqlMode();
-      runButton(dom).click();
-      runButton(dom).click();
-      const [first, second] = runQueries(postedMessages);
-      sendQueryData(dom, resultOk(first.seq, { rows: [['old']], rowCount: 1 }));
-      assert.strictEqual(doc(dom).querySelector('#csv-table'), null, 'the older answer is not shown');
-      assert.strictEqual(queryStatus(dom), 'Running…');
-      sendQueryData(dom, resultOk(second.seq, { rows: [['new']], rowCount: 1 }));
-      assert.strictEqual(doc(dom).querySelector('#csv-table tbody td:not(.row-num)')?.textContent, 'new');
-    });
-
-    it('explains a statement that returned no columns', () => {
-      const { dom, postedMessages } = inSqlMode();
-      runButton(dom).click();
-      sendQueryData(dom, resultOk(runQueries(postedMessages)[0].seq, { headers: [], rows: [], rowCount: 0, columnCount: 0 }));
-      assert.strictEqual(doc(dom).querySelector('.query-result p.message')?.textContent, 'The statement ran and returned no columns.');
-    });
-
-    it('treats cell text as text, never markup', () => {
-      const { dom, postedMessages } = inSqlMode();
-      runButton(dom).click();
-      sendQueryData(dom, resultOk(runQueries(postedMessages)[0].seq, { rows: [['<img src=x onerror=alert(1)>']], rowCount: 1 }));
-      assert.strictEqual(doc(dom).querySelector('.query-result img'), null);
-      assert.strictEqual(doc(dom).querySelector('#csv-table tbody td:not(.row-num)')?.textContent, '<img src=x onerror=alert(1)>');
-    });
-
-    it('keeps the text across the switch, and brings the table back with its filter', () => {
-      const { dom, postedMessages } = loadWebview();
-      sendDuckdbData(dom, warehouse());
-      const box = doc(dom).querySelectorAll<HTMLInputElement>('input.col-filter')[1];
-      box.value = 'Rome';
-      box.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-      toggle(dom, 'sql').click();
-      queryInput(dom).value = 'SELECT 1';
-      queryInput(dom).dispatchEvent(new dom.window.Event('input', { bubbles: true }));
-      const filters = () => postedMessages.filter((m) => (m as { type: string }).type === 'filter') as Array<{ filters: unknown[] }>;
-      assert.deepStrictEqual(filters().at(-1)!.filters, [], 'leaving the table releases its filter on the host');
-
-      toggle(dom, 'table').click();
-      assert.ok(doc(dom).querySelector('#csv-table'));
-      assert.strictEqual(doc(dom).querySelectorAll<HTMLInputElement>('input.col-filter')[1].value, 'Rome');
-      assert.deepStrictEqual(filters().at(-1)!.filters, [{ column: 1, text: 'Rome' }]);
-
-      toggle(dom, 'sql').click();
-      assert.strictEqual(queryInput(dom).value, 'SELECT 1', 'the text survives a round trip');
-    });
-
-    it('re-runs the query that produced the result when the file is refreshed, keeping unsent edits', () => {
-      const { dom, postedMessages } = inSqlMode();
-      runButton(dom).click();
-      sendQueryData(dom, resultOk(runQueries(postedMessages)[0].seq));
-      queryInput(dom).value = 'SELECT 99 -- not run yet';
-      queryInput(dom).dispatchEvent(new dom.window.Event('input', { bubbles: true }));
-
-      sendDuckdbData(dom, warehouse({ ...reloadMeta }));
-
-      const sent = runQueries(postedMessages);
-      assert.strictEqual(sent.length, 2);
-      assert.strictEqual(sent[1].sql, 'select * from "a" limit 5', 'the query behind the result, not the unsent edit');
-      assert.strictEqual(queryInput(dom).value, 'SELECT 99 -- not run yet');
-      assert.ok(doc(dom).querySelector('.query-result #csv-table'), 'the old result stays until the new one arrives');
-      assert.strictEqual(queryStatus(dom), 'Running…');
-      sendQueryData(dom, resultOk(sent[1].seq, { rows: [['9']], rowCount: 1 }));
-      assert.strictEqual(doc(dom).querySelector('#csv-table tbody td:not(.row-num)')?.textContent, '9');
-    });
-
-    it('keeps focus, caret and scroll in the box, and the result scroll, through a refresh', () => {
-      const { dom, postedMessages } = inSqlMode();
-      runButton(dom).click();
-      sendQueryData(dom, resultOk(runQueries(postedMessages)[0].seq));
-      const before = queryInput(dom);
-      before.focus();
-      before.setSelectionRange(3, 7);
-      before.scrollTop = 11;
-      const wrapper = () => doc(dom).querySelector<HTMLElement>('.query-result .scroll-wrapper')!;
-      wrapper().scrollTop = 120;
-      wrapper().scrollLeft = 30;
-
-      sendDuckdbData(dom, warehouse({ ...reloadMeta }));
-
-      const after = queryInput(dom);
-      assert.notStrictEqual(after, before, 'the page is rebuilt');
-      assert.strictEqual(doc(dom).activeElement, after, 'typing can go on');
-      assert.deepStrictEqual([after.selectionStart, after.selectionEnd], [3, 7]);
-      assert.strictEqual(after.scrollTop, 11);
-      assert.strictEqual(wrapper().scrollTop, 120, 'the old result is back where it was while the re-run is pending');
-
-      sendQueryData(dom, resultOk(runQueries(postedMessages)[1].seq, { rows: [['9']], rowCount: 1 }));
-      assert.strictEqual(wrapper().scrollTop, 120, 'and so is the new one');
-      assert.strictEqual(wrapper().scrollLeft, 30);
-    });
-
-    it('does not move focus into the box on a refresh when the user was elsewhere', () => {
-      const { dom } = inSqlMode();
-      (doc(dom).activeElement as HTMLElement).blur();
-      sendDuckdbData(dom, warehouse({ ...reloadMeta }));
-      assert.notStrictEqual(doc(dom).activeElement, queryInput(dom));
-    });
-
-    it('does not start a second run on top of a running one, but runs once more after its answer', () => {
-      const { dom, postedMessages } = inSqlMode();
-      runButton(dom).click();
-      sendDuckdbData(dom, warehouse({ ...reloadMeta }));
-      sendDuckdbData(dom, warehouse({ ...reloadMeta }));
-      assert.strictEqual(runQueries(postedMessages).length, 1, 'refreshes during a run add no runs');
-
-      sendQueryData(dom, resultOk(runQueries(postedMessages)[0].seq));
-      const sent = runQueries(postedMessages);
-      assert.strictEqual(sent.length, 2, 'one re-run for all of them, after the answer');
-      assert.strictEqual(sent[1].sql, sent[0].sql);
-      assert.ok(doc(dom).querySelector('#csv-table'), 'the answer that did arrive is shown meanwhile');
-    });
-
-    it('a manual run cancels a pending re-run', () => {
-      const { dom, postedMessages } = inSqlMode();
-      runButton(dom).click();
-      sendDuckdbData(dom, warehouse({ ...reloadMeta }));
-      runButton(dom).click();
-      sendQueryData(dom, resultOk(runQueries(postedMessages)[1].seq));
-      assert.strictEqual(runQueries(postedMessages).length, 2, 'no extra run after the manual one answered');
-    });
-
-    it('does not run anything on a refresh when no query was ever run', () => {
-      const { dom, postedMessages } = inSqlMode();
-      sendDuckdbData(dom, warehouse({ ...reloadMeta }));
-      assert.strictEqual(runQueries(postedMessages).length, 0);
-      assert.ok(queryInput(dom), 'still in SQL mode after the refresh');
-    });
-
-    describe('a result that went stale while the SQL box was not showing', () => {
-      function withResult() {
-        const loaded = inSqlMode();
-        runButton(loaded.dom).click();
-        sendQueryData(loaded.dom, resultOk(runQueries(loaded.postedMessages)[0].seq));
-        return loaded;
-      }
-
-      it('is not re-run by a refresh in Table mode, but is when the box is opened again', () => {
-        const { dom, postedMessages } = withResult();
-        toggle(dom, 'table').click();
-        sendDuckdbData(dom, warehouse({ ...reloadMeta }));
-        assert.strictEqual(runQueries(postedMessages).length, 1, 'nobody can see the result: no run');
-        toggle(dom, 'sql').click();
-        const sent = runQueries(postedMessages);
-        assert.strictEqual(sent.length, 2);
-        assert.strictEqual(sent[1].sql, sent[0].sql);
-      });
-
-      it('is not re-run when nothing changed meanwhile', () => {
-        const { dom, postedMessages } = withResult();
-        toggle(dom, 'table').click();
-        toggle(dom, 'sql').click();
-        assert.strictEqual(runQueries(postedMessages).length, 1);
-      });
-
-      it('defers the re-run of a refresh that landed mid-run when the user has left for Table mode', () => {
-        const { dom, postedMessages } = inSqlMode();
-        runButton(dom).click();
-        sendDuckdbData(dom, warehouse({ ...reloadMeta })); // pending re-run
-        toggle(dom, 'table').click();
-        sendQueryData(dom, resultOk(runQueries(postedMessages)[0].seq));
-        assert.strictEqual(runQueries(postedMessages).length, 1, 'no run for a box nobody sees');
-        toggle(dom, 'sql').click();
-        assert.strictEqual(runQueries(postedMessages).length, 2, 'it runs when the box comes back');
-      });
-    });
-
-    it('falls back to table mode when the host can no longer query (e.g. the file became empty)', () => {
-      const { dom } = inSqlMode();
-      sendDuckdbData(dom, warehouse({ capabilities: { refresh: true, query: false } }));
-      assert.strictEqual(doc(dom).querySelector('.query-input'), null);
-      assert.strictEqual(doc(dom).querySelector('.mode-toggle'), null);
-    });
   });
 
   describe('dbt awareness', () => {
@@ -1422,25 +1603,6 @@ describe('webview main.js rendering', () => {
         assert.strictEqual(doc(dom).querySelectorAll('th.has-description').length, 0);
       });
 
-      it('does not decorate a query result', () => {
-        const { dom, postedMessages } = loadWebview();
-        sendDuckdbData(dom, payload({ columnDescriptions: descriptions }));
-        doc(dom).querySelector<HTMLButtonElement>('.mode-button[data-mode="sql"]')!.click();
-        doc(dom).querySelector<HTMLButtonElement>('.query-run')!.disabled = false;
-        (doc(dom).querySelector('.query-input') as HTMLTextAreaElement).value = 'SELECT 1';
-        (doc(dom).querySelector('.query-input') as HTMLTextAreaElement).dispatchEvent(new dom.window.Event('input', { bubbles: true }));
-        doc(dom).querySelector<HTMLButtonElement>('.query-run')!.click();
-        const sent = postedMessages.filter((m) => (m as { type: string }).type === 'run-query') as Array<{ seq: number }>;
-        dom.window.dispatchEvent(
-          new dom.window.MessageEvent('message', {
-            data: {
-              type: 'query-data',
-              payload: { seq: sent[0].seq, data: { headers: ['id'], rows: [['1']], rowCount: 1, columnCount: 1 }, truncated: false, elapsedMs: 1 },
-            },
-          })
-        );
-        assert.strictEqual(doc(dom).querySelectorAll('.query-result th.has-description').length, 0);
-      });
     });
 
     describe('a table chosen by the host (Preview Model)', () => {
@@ -1470,31 +1632,6 @@ describe('webview main.js rendering', () => {
         sendDuckdbData(dom, payload({}, 'b'));
         sendDuckdbData(dom, payload({ hostSelected: true }, 'a'));
         assert.strictEqual(shown(dom), 'a');
-      });
-
-      it('leaves the SQL box for the table', () => {
-        const { dom } = loadWebview();
-        sendDuckdbData(dom, payload());
-        doc(dom).querySelector<HTMLButtonElement>('.mode-button[data-mode="sql"]')!.click();
-        assert.ok(doc(dom).querySelector('.query-input'));
-        sendDuckdbData(dom, payload({ hostSelected: true }, 'c'));
-        assert.strictEqual(doc(dom).querySelector('.query-input'), null);
-        assert.strictEqual(shown(dom), 'c');
-        assert.ok(doc(dom).querySelector('#csv-table'));
-        assert.strictEqual(doc(dom).querySelector('.mode-button[data-mode="table"]')?.getAttribute('aria-pressed'), 'true');
-      });
-
-      it('show-table (the table is already selected) leaves the SQL box without re-reading anything', () => {
-        const { dom } = loadWebview();
-        sendDuckdbData(dom, payload());
-        doc(dom).querySelector<HTMLButtonElement>('.mode-button[data-mode="sql"]')!.click();
-        assert.ok(doc(dom).querySelector('.query-input'));
-        dom.window.dispatchEvent(new dom.window.MessageEvent('message', { data: { type: 'show-table' } }));
-        assert.strictEqual(doc(dom).querySelector('.query-input'), null);
-        assert.ok(doc(dom).querySelector('#csv-table'));
-        // Already in Table mode: a no-op.
-        dom.window.dispatchEvent(new dom.window.MessageEvent('message', { data: { type: 'show-table' } }));
-        assert.ok(doc(dom).querySelector('#csv-table'));
       });
 
       it('does not change how an ordinary stale reply is dropped', () => {
@@ -3648,7 +3785,7 @@ describe('webview main.js column filtering', () => {
           capabilities: { refresh: true, query: true },
         },
       });
-      doc(dom).querySelector<HTMLButtonElement>('.mode-button[data-mode="sql"]')!.click();
+      doc(dom).querySelector<HTMLButtonElement>('.sql-toggle')!.click();
       doc(dom).querySelector<HTMLTextAreaElement>('.query-input')!.value = 'select 1';
       doc(dom).querySelector<HTMLTextAreaElement>('.query-input')!.dispatchEvent(new dom.window.Event('input'));
       doc(dom).querySelector<HTMLButtonElement>('.query-run')!.click();
@@ -3658,7 +3795,7 @@ describe('webview main.js column filtering', () => {
           data: { type: 'query-data', payload: { seq, data: { headers: ['n', 'label'], rows: manyRows(4000), rowCount: 4000, columnCount: 2 }, truncated: false, elapsedMs: 5 } },
         })
       );
-      assert.strictEqual(doc(dom).querySelectorAll('.query-result #csv-table tbody tr').length, 52);
+      assert.strictEqual(doc(dom).querySelectorAll('.table-area #csv-table tbody tr').length, 52);
     });
   });
 
@@ -4072,7 +4209,7 @@ describe('webview main.js column filtering', () => {
           querySuggestion: text,
         },
       });
-      doc(loaded.dom).querySelector<HTMLButtonElement>('.mode-button[data-mode="sql"]')!.click();
+      doc(loaded.dom).querySelector<HTMLButtonElement>('.sql-toggle')!.click();
       return loaded;
     }
     const input = (dom: JSDOM) => doc(dom).querySelector<HTMLTextAreaElement>('.query-input')!;

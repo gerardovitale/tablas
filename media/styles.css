@@ -157,44 +157,23 @@ body.vscode-high-contrast-light {
   border-radius: 3px;
 }
 
-/* Table | SQL switch at the toolbar's left. */
-.mode-toggle {
-  display: inline-flex;
-  flex-shrink: 0;
-  margin: 6px 0 0 12px;
-  border: 1px solid var(--vscode-dropdown-border, var(--vscode-input-border, var(--vscode-editorGroup-border, transparent)));
-  border-radius: 2px;
-}
-
-.mode-button {
-  padding: 3px 10px;
-  font: inherit;
-  color: var(--vscode-foreground);
-  background: transparent;
-  border: 0;
-  cursor: pointer;
-}
-
-.mode-button + .mode-button {
-  border-left: 1px solid var(--vscode-dropdown-border, var(--vscode-input-border, var(--vscode-editorGroup-border, transparent)));
-}
-
-.mode-button:hover {
-  background-color: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
-}
-
-.mode-button[aria-pressed='true'] {
+/* The SQL button: pressed (open) = the panel below is showing. */
+.sql-toggle[aria-expanded='true'] {
   color: var(--vscode-button-foreground);
   background-color: var(--vscode-button-background);
 }
 
-.mode-button:focus-visible {
-  outline: 1px solid var(--vscode-focusBorder);
-  outline-offset: -1px;
+.sql-toggle[aria-expanded='true']:hover {
+  background-color: var(--vscode-button-hoverBackground);
 }
 
 /* ── SQL box ───────────────────────────────────────────
-   Query text above, its result (the usual stats bar + table) below. */
+   A collapsible panel above the grid: query text, Run, status. A result replaces the grid
+   (with a chip to go back); the table and the result both draw into .table-area. */
+
+.query-panel[hidden] {
+  display: none;
+}
 
 .query-panel {
   flex-shrink: 0;
@@ -367,12 +346,54 @@ body.vscode-high-contrast-light {
   color: var(--vscode-errorForeground);
 }
 
-/* Holds the result's stats bar + scroll wrapper, so they size like they do under #app. */
-.query-result {
+/* An error or a note about the last run, under the box. The grid is never replaced by it. */
+.query-message {
+  flex-shrink: 0;
+  max-height: 8em;
+  margin: 6px 0 0;
+  overflow: auto;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+  color: var(--vscode-descriptionForeground);
+  white-space: pre-wrap;
+}
+
+.query-message[hidden] {
+  display: none;
+}
+
+.query-message.error {
+  color: var(--vscode-errorForeground);
+}
+
+/* Holds the table, or the result (chip + stats bar + scroll wrapper), so they size like they do under #app. */
+.table-area {
   display: flex;
   flex: 1;
   flex-direction: column;
   min-height: 0;
+}
+
+/* "Result of query ✕": the result replaces the grid; the button goes back to the table. */
+.result-chip {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 12px;
+  font-size: 12px;
+  color: var(--vscode-foreground);
+  background-color: var(--vscode-editorGroupHeader-tabsBackground, var(--vscode-editor-background));
+  border-bottom: 1px solid var(--vscode-editorGroup-border, var(--vscode-panel-border));
+}
+
+.result-chip-label {
+  font-weight: 600;
+}
+
+.result-chip-close {
+  margin-top: 0;
+  padding: 0 6px;
 }
 
 /* Approximate row count beside a table in the picker. */

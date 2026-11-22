@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- The SQL box no longer has its own Table | SQL mode. A collapsible **SQL** panel sits above the table (button in the toolbar, next to the table picker, which stays visible). Running a query replaces the grid with the result under a `Result of query ✕` chip; ✕ returns to the table with its filters and scroll as you left them. An error shows under the box and keeps the previous result; a refresh re-runs the query and keeps the result's filters and scroll.
 - A DuckDB SQL result is now a real table: it gets column type badges, profile strips and the per-column filter boxes, like any table. A result is kept as a temporary table (the file is untouched) of at most its first 100,000 rows; when the query returned more, the note says statistics and filters cover those rows.
 
 ## [0.1.0] - 2026-11-21

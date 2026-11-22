@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import {
-  currentResultSeq,
+  duckdbDropCurrentResult,
   duckdbDropResult,
   duckdbResultFilter,
   duckdbResultStats,
@@ -704,10 +704,7 @@ export class DuckdbEditorProvider
     }
     const seq = ++document.selectSeq;
     // A table pick leaves the query result (if one was still held): its table is dead weight.
-    const shown = currentResultSeq(document.handle);
-    if (shown !== undefined) {
-      void duckdbDropResult(document.handle, shown);
-    }
+    void duckdbDropCurrentResult(document.handle);
     try {
       // One handle for the list and the read: the table list of one database must not be
       // paired with the rows of another. A reload that swapped `document.handle` while the

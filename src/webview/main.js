@@ -121,7 +121,7 @@
    *          filterSeq: number, filterTimer: number | undefined,
    *          pendingScroll?: { top: number, left: number },
    *          rowsHidden?: boolean, statsSeq?: number,
-   *          resultSeq?: number,
+   *          resultSeq?: number, isResult?: boolean,
    *          rowHeight?: number, scrollQueued?: boolean,
    *          shownRows?: string[][], sel?: Selection, selectionEl?: HTMLElement,
    *          win?: { rows: string[][], rowHeight: number, start: number, end: number, top: HTMLElement, bottom: HTMLElement },
@@ -187,8 +187,8 @@
   // renderTable's empty-data branch so a sibling table selector (multi-table
   // sources) survives. showMessage (below) is the clear-then-append version
   // used everywhere else, where #app should be replaced wholesale.
-  function appendMessage(text, isError) {
-    const app = document.getElementById('app');
+  function appendMessage(text, isError, host) {
+    const app = host || document.getElementById('app');
     if (!app) { return; }
     const p = el('p', { class: isError ? 'message error' : 'message' });
     p.textContent = text;
@@ -1550,11 +1550,11 @@
     releaseCurrentView();
 
     if (tableError !== undefined) {
-      appendMessage('Could not read "' + tableName + '":\n' + tableError, true);
+      appendMessage('Could not read "' + tableName + '":\n' + tableError, true, app);
       return;
     }
     if (data.columnCount === 0) {
-      appendMessage('Empty file — no data to display.', false);
+      appendMessage('Empty file — no data to display.', false, app);
       return;
     }
 
@@ -1703,6 +1703,7 @@
       models: undefined,
       skippedReason: undefined,
       resultSeq: result ? result.seq : undefined,
+      isResult: !!result,
       stats: addressable ? 'idle' : 'skipped',
       originalRows: data.rows,
       baseStatsText,
@@ -1753,42 +1754,55 @@
    */
   let reloadStatusEl;
 
-  // ── SQL mode (sources whose host advertises `capabilities.query`) ─────
-  // Mode, text and the last result are module state, not DOM: every payload
-  // (reload, table switch) rebuilds the page, and they must survive that.
+  // ── SQL box (sources whose host advertises `capabilities.query`) ──────
+  // Module state, not DOM: every payload (reload, table switch) rebuilds the page, and the text,
+  // the result on screen and what a refresh re-runs must survive that. The box lives in a collapsible
+  // panel above the grid; a result *replaces the grid* (with a chip to go back), it is not a separate view.
   const MAX_QUERY_LENGTH = 100000; // mirrors queryLimits.maxSqlLength in src/duckdbParser.ts
-  let queryMode = false;
-  let queryText = '';
-  // Whether the user has changed the box. Until then it holds the host's suggestion for the table
-  // being viewed (re-read every time the box opens); after that the text is theirs and is kept.
-  let queryTextEdited = false;
-  /** The SQL that produced `queryResult`; what a refresh re-runs (not half-typed edits). */
-  let queryRunSql;
-  /** Webview-wide `run-query` counter; only a reply carrying the newest number is applied. */
-  let querySeqCounter = 0;
-  let queryRunning = false;
-  /** @type {{ kind: 'data', data: import('../../src/tableData').ParsedTable, truncated: boolean, elapsedMs: number, seq?: number, capped?: boolean } | { kind: 'error', message: string } | undefined} */
-  let queryResult;
-  /** The last successful multi-table payload, to re-render when the mode is toggled. */
-  let lastMultiOutcome;
-  /** Table-mode filters and scroll, kept while the SQL box is showing. */
-  let savedTableState;
-  let focusQueryInput = false;
-  /** @type {HTMLElement | undefined} */
-  let queryResultHost;
-  /** @type {HTMLTextAreaElement | undefined} */
-  let queryInputEl;
-  /** A refresh landed while a query was still running: re-run once it has answered. */
-  let queryRerun;
-  /** Result scroll position to put back once the re-run's answer is drawn. */
-  let queryScrollToRestore;
-  /**
-   * The data changed (a refresh) while the SQL box was not showing, so the result held for it is
-   * old. It is re-run when the box is opened again, not while nobody can see it.
-   */
-  let queryStale = false;
-  /** @type {HTMLElement | undefined} */
-  let queryStatusEl;
+  const query = {
+    /** The panel (editor + Run) is open. */
+    panelOpen: false,
+    text: '',
+    /**
+     * Whether the user has changed the box. Until then it holds the host's suggestion for the table
+     * being viewed (re-read on every payload); after that the text is theirs and is kept.
+     */
+    textEdited: false,
+    /** The SQL that produced `result` (set when a run succeeds); what a refresh re-runs, not unsent edits. */
+    runSql: /** @type {string | undefined} */ (undefined),
+    /** The SQL of the run in flight. */
+    pendingSql: /** @type {string | undefined} */ (undefined),
+    /** Webview-wide `run-query` counter; only a reply carrying the newest number is applied. */
+    seqCounter: 0,
+    /** The seq of the run in flight, so closing the result can also close what that run will make. */
+    runSeq: /** @type {number | undefined} */ (undefined),
+    running: false,
+    /**
+     * What the grid shows instead of the table, or undefined when it shows the table. `seq` is the
+     * host's address of the result as a table (stats/filters); without one it is rows only.
+     * @type {{ data: import('../../src/tableData').ParsedTable, truncated: boolean, elapsedMs: number, seq?: number, capped?: boolean } | undefined}
+     */
+    result: undefined,
+    /** Under the box: an error, or a note about a statement that returned no columns. @type {{ text: string, isError: boolean } | undefined} */
+    message: undefined,
+    /** A refresh landed while a query was still running: re-run once it has answered. */
+    rerun: false,
+    /** The run in flight was started by a refresh: its answer keeps the result's filters and scroll. */
+    refreshRun: false,
+    /** The table's filters and scroll, kept while a result replaces it; `✕` puts them back. @type {ReturnType<typeof captureReloadState>} */
+    savedTableState: undefined,
+    /** The host's starting query for the table shown (`MultiTableData.querySuggestion`). */
+    suggestion: '',
+    /** @type {HTMLTextAreaElement | undefined} */ input: undefined,
+    /** @type {HTMLElement | undefined} */ panel: undefined,
+    /** @type {HTMLElement | undefined} */ statusEl: undefined,
+    /** @type {HTMLElement | undefined} */ messageEl: undefined,
+    /** @type {HTMLElement | undefined} */ toggleButton: undefined,
+    /** Where the table or the result is drawn. @type {HTMLElement | undefined} */
+    area: undefined,
+    /** Draws the current payload's table into `area`; filters/scroll to restore are passed in. @type {((restoring: ReturnType<typeof captureReloadState>) => void) | undefined} */
+    drawTable: undefined,
+  };
 
   // ── Table picker ──────────────────────────────────────────────────────
 
@@ -2123,19 +2137,15 @@
   /**
    * @param {import('../../src/tableData').MultiTableParseOutcome} outcome
    */
-  function renderMultiTableOutcome(outcome, options) {
-    // `rerender`: the same payload drawn again (the SQL/Table toggle) -- not news
-    // from the host, so no stale-reply check and none of the reload handling.
-    const rerender = !!(options && options.rerender);
-    const isReload = !rerender && outcome.success && outcome.data.reload !== undefined;
-    if (outcome.success && !rerender && outcome.data.hostSelected) {
+  function renderMultiTableOutcome(outcome) {
+    const isReload = outcome.success && outcome.data.reload !== undefined;
+    if (outcome.success && outcome.data.hostSelected) {
       // The host chose this table (dbt "Preview Model"): it is the user's pick from
-      // now on, wherever they were (a pick still in flight is stale, and the SQL box
-      // gives way to the table).
+      // now on, wherever they were (a pick still in flight is stale, and a query
+      // result gives way to the table).
       requestedTable = outcome.data.selectedTable;
-      queryMode = false;
-      savedTableState = undefined;
-    } else if (outcome.success && !rerender) {
+      forgetQueryResult();
+    } else if (outcome.success) {
       const selected = outcome.data.selectedTable;
       if (requestedTable !== undefined && selected !== requestedTable) {
         // A response to an older select-table request, superseded by a newer
@@ -2148,19 +2158,24 @@
         if (outcome.data.tables.some((t) => t.name === requestedTable)) { return; }
         requestedTable = selected;
       }
+      // A table was picked (or the file just opened): any result was the old table's business.
+      if (!isReload) { forgetQueryResult(); }
     }
-    if (outcome.success && outcome.data.tables.length > 0) { lastMultiOutcome = outcome; }
-    // A reload while the table is showing leaves the SQL result behind the data.
-    if (isReload && !queryMode && queryRunSql !== undefined) { queryStale = true; }
-    // A reload re-renders everything; remember what the user was doing.
-    const carried = isReload && !queryMode ? captureReloadState() : undefined;
-    const carriedQuery = isReload && queryMode ? captureQueryUiState() : undefined;
+    // A reload re-renders everything; remember what the user was doing: the filters and scroll of
+    // whatever the grid shows (the table, or the result), and the box's focus, caret and scroll.
+    const carried = isReload ? captureReloadState() : undefined;
+    const carriedBox = captureQueryUiState();
+    // A result on screen through a reload is kept as it is (its filters, strips and selection), only
+    // moved into the rebuilt page; the re-run's answer then replaces it. (Scroll does not survive a move.)
+    const canKeepResult = outcome.success && !!(outcome.data.capabilities && outcome.data.capabilities.query);
+    const keptArea = isReload && canKeepResult && query.result && query.area && query.area.isConnected ? query.area : undefined;
+    if (keptArea) { keptArea.remove(); }
     // A keyboard user who just picked a table has focus on the picker's
     // trigger; the re-render below replaces it, so hand focus to the new one.
     const active = document.activeElement;
     const pickerHadFocus = !!active && active.closest('.table-selector') !== null;
-    const refreshHadFocus = !!active && active.classList.contains('toolbar-button');
-    const modeHadFocus = active && active.classList.contains('mode-button') ? active.getAttribute('data-mode') : null;
+    const refreshHadFocus = !!active && active.classList.contains('refresh-button');
+    const sqlButtonHadFocus = !!active && active.classList.contains('sql-toggle');
     clearApp();
     if (!outcome.success) {
       const msgs = outcome.errors.map((e) => e.message).join('\n');
@@ -2176,19 +2191,29 @@
     const app = document.getElementById('app');
     if (!app) { return; }
     const canQuery = !!(outcome.data.capabilities && outcome.data.capabilities.query);
-    if (!canQuery) { queryMode = false; }
+    if (!canQuery) {
+      forgetQueryResult();
+      query.panelOpen = false;
+    }
+    query.suggestion = outcome.data.querySuggestion || '';
+    // The untouched box offers the suggestion of whichever table is shown.
+    if (!query.textEdited) { query.text = query.suggestion; }
     const selector = renderTableSelector(outcome.data.tables, outcome.data.selectedTable);
     const toolbar = el('div', { class: 'table-toolbar' });
-    if (canQuery) { toolbar.appendChild(renderModeToggle()); }
-    // The picker chooses a table to look at; the SQL box names its tables itself.
-    if (!queryMode) { toolbar.appendChild(selector); }
+    toolbar.appendChild(selector);
+    /** @type {HTMLElement | undefined} */
+    let sqlButton;
+    if (canQuery) {
+      sqlButton = renderSqlToggle();
+      toolbar.appendChild(sqlButton);
+    }
     reloadStatusEl = undefined;
     /** @type {HTMLElement | undefined} */
     let refreshButton;
     if (outcome.data.capabilities && outcome.data.capabilities.refresh) {
       const refresh = el('button', {
         type: 'button',
-        class: 'toolbar-button',
+        class: 'toolbar-button refresh-button',
         'aria-label': 'Refresh from disk',
         title: 'Re-read the file from disk (also happens automatically when it changes)',
       });
@@ -2206,41 +2231,55 @@
     // The reload a click on the refresh button causes replaces that button; focus
     // can only move once the new one is in the document.
     if (refreshHadFocus && refreshButton) { refreshButton.focus(); }
-    if (pickerHadFocus && !queryMode) {
+    if (pickerHadFocus) {
       const newTrigger = selector.querySelector('button');
       if (newTrigger) { newTrigger.focus(); }
     }
-    if (modeHadFocus) {
-      const button = toolbar.querySelector(`.mode-button[data-mode="${modeHadFocus}"]`);
-      if (button) { /** @type {HTMLElement} */ (button).focus(); }
-    }
-    if (queryMode) {
-      renderQueryPanel(app);
-      if (carriedQuery) { restoreQueryUiState(carriedQuery); }
-      // A refresh re-runs what produced the result on screen, so the result follows the data.
-      if (isReload && queryRunSql !== undefined) {
-        const scroll = carriedQuery ? { top: carriedQuery.resultTop, left: carriedQuery.resultLeft } : undefined;
-        if (queryRunning) {
+    if (sqlButtonHadFocus && sqlButton) { sqlButton.focus(); }
+
+    if (canQuery) { app.appendChild(renderQueryPanel()); } else { query.panel = undefined; query.input = undefined; }
+    const area = keptArea || el('div', { class: 'table-area' });
+    app.appendChild(area);
+    query.area = area;
+    const data = outcome.data;
+    query.drawTable = (restoring) => {
+      renderTable(data.data, data.selectedTable, data.tableError, {
+        host: area,
+        columnDescriptions: data.columnDescriptions,
+        deferStats: !!restoring,
+      });
+      if (restoring) {
+        // After a reload, or back from a result: the filters and scroll the table had.
+        restoreReloadState(restoring);
+        // Statistics only now, behind the filter request: the host answers in order.
+        requestStats();
+      }
+    };
+    if (query.result) {
+      // A refresh keeps the result on screen and re-runs what produced it, so it follows the data.
+      if (keptArea) {
+        if (carried && currentView) {
+          currentView.wrapper.scrollTop = carried.top;
+          currentView.wrapper.scrollLeft = carried.left;
+          syncWindow(currentView);
+        }
+      } else {
+        drawResult(carried);
+      }
+      if (isReload && query.runSql !== undefined) {
+        if (query.running) {
           // Not a second run on top of a running one: it follows the running one's answer.
-          queryRerun = { scroll };
+          query.rerun = true;
         } else {
-          runQuery(queryRunSql, scroll);
+          runQuery(query.runSql, { refresh: true });
         }
       }
-      return;
+    } else {
+      query.drawTable(carried);
     }
-    const restoring = carried || (rerender ? savedTableState : undefined);
-    renderTable(outcome.data.data, outcome.data.selectedTable, outcome.data.tableError, {
-      columnDescriptions: outcome.data.columnDescriptions,
-      deferStats: !!restoring,
-    });
-    if (restoring) {
-      // After a reload, or back from the SQL box: the filters and scroll the table had.
-      restoreReloadState(restoring);
-      // Statistics only now, behind the filter request: the host answers in order.
-      requestStats();
-    }
-    if (rerender) { savedTableState = undefined; }
+    // After the panel exists: the box's focus, caret and scroll come back.
+    if (carriedBox) { restoreQueryUiState(carriedBox); }
+    if (query.running) { setQueryStatus('Running…', false); }
   }
 
   // ── SQL highlighting ──────────────────────────────────────────────────
@@ -2389,86 +2428,85 @@
 
   // ── SQL box ───────────────────────────────────────────────────────────
 
-  /** The Table | SQL switch at the toolbar's left. */
-  function renderModeToggle() {
-    const group = el('div', { class: 'mode-toggle', role: 'group', 'aria-label': 'View' });
-    for (const [mode, label] of [['table', 'Table'], ['sql', 'SQL']]) {
-      const button = el('button', {
-        type: 'button',
-        class: 'mode-button',
-        'data-mode': mode,
-        'aria-pressed': String((mode === 'sql') === queryMode),
-      });
-      button.textContent = label;
-      button.addEventListener('click', () => setQueryMode(mode === 'sql'));
-      group.appendChild(button);
-    }
-    return group;
-  }
-
-  /** @param {boolean} on */
-  function setQueryMode(on) {
-    if (queryMode === on || !lastMultiOutcome || !lastMultiOutcome.success) { return; }
-    if (on) {
-      savedTableState = captureReloadState();
-      if (!queryTextEdited) {
-        queryText = lastMultiOutcome.data.querySuggestion || '';
-      }
-      focusQueryInput = true;
-    }
-    queryMode = on;
-    renderMultiTableOutcome(lastMultiOutcome, { rerender: true });
-    if (on && queryStale && queryRunSql !== undefined && !queryRunning) { runQuery(queryRunSql); }
-  }
-
-  /** The result's scroll wrapper, if a result table is showing. */
-  function queryResultWrapper() {
-    return queryResultHost ? /** @type {HTMLElement | null} */ (queryResultHost.querySelector('.scroll-wrapper')) : null;
+  /** The toolbar button that opens and closes the query panel. */
+  function renderSqlToggle() {
+    const button = el('button', {
+      type: 'button',
+      class: 'toolbar-button sql-toggle',
+      'aria-expanded': String(query.panelOpen),
+      'aria-controls': 'query-panel',
+      title: 'Run a read-only SQL query',
+    });
+    button.textContent = 'SQL';
+    button.addEventListener('click', () => setPanelOpen(!query.panelOpen));
+    query.toggleButton = button;
+    return button;
   }
 
   /**
-   * What an auto-refresh must not take from someone typing a query: the box's
-   * focus, caret and scroll, and where they had scrolled the result to.
+   * Opens or closes the panel without rebuilding the page (the table's filters and scroll are
+   * untouched). Opening puts the cursor in the box; closing hands focus back to the button.
+   * @param {boolean} open
+   */
+  function setPanelOpen(open) {
+    query.panelOpen = open;
+    if (query.toggleButton) { query.toggleButton.setAttribute('aria-expanded', String(open)); }
+    if (query.panel) { query.panel.hidden = !open; }
+    // (The untouched box already holds the shown table's suggestion: every payload refreshes it.)
+    const input = query.input;
+    if (open && input) {
+      input.focus();
+    } else if (!open && query.toggleButton && document.activeElement && query.panel && query.panel.contains(document.activeElement)) {
+      query.toggleButton.focus();
+    }
+  }
+
+  /**
+   * Nothing of the last query is relevant any more (the table changed under it, or the host
+   * can no longer query): no result, nothing to re-run, nothing in flight.
+   */
+  function forgetQueryResult() {
+    if (query.running) { query.seqCounter++; } // the answer of the run in flight is no longer wanted
+    query.result = undefined;
+    query.runSql = undefined;
+    query.pendingSql = undefined;
+    query.runSeq = undefined;
+    query.running = false;
+    query.message = undefined;
+    query.rerun = false;
+    query.refreshRun = false;
+    query.savedTableState = undefined;
+  }
+
+  /**
+   * What an auto-refresh must not take from someone typing a query: the box's focus, caret and scroll.
    */
   function captureQueryUiState() {
-    const input = queryInputEl;
+    const input = query.input;
     if (!input || !input.isConnected) { return undefined; }
-    const wrapper = queryResultWrapper();
     return {
       focused: document.activeElement === input,
       start: input.selectionStart,
       end: input.selectionEnd,
       inputTop: input.scrollTop,
-      resultTop: wrapper ? wrapper.scrollTop : 0,
-      resultLeft: wrapper ? wrapper.scrollLeft : 0,
     };
   }
 
   /** @param {NonNullable<ReturnType<typeof captureQueryUiState>>} state */
   function restoreQueryUiState(state) {
-    const input = queryInputEl;
+    const input = query.input;
     if (!input) { return; }
     input.scrollTop = state.inputTop;
     if (state.focused) {
       input.focus();
       if (state.start !== null && state.end !== null) { input.setSelectionRange(state.start, state.end); }
     }
-    putResultScroll({ top: state.resultTop, left: state.resultLeft });
   }
 
-  /** @param {{ top: number, left: number } | undefined} scroll */
-  function putResultScroll(scroll) {
-    const wrapper = queryResultWrapper();
-    if (!scroll || !wrapper) { return; }
-    wrapper.scrollTop = scroll.top;
-    wrapper.scrollLeft = scroll.left;
-    syncWindow(currentView);
-  }
-
-  /** @param {HTMLElement} app */
-  function renderQueryPanel(app) {
-    releaseCurrentView();
-    const panel = el('div', { class: 'query-panel' });
+  /** The query panel: the box with its highlight layer, the Run button and the status/message lines. */
+  function renderQueryPanel() {
+    const panel = el('div', { class: 'query-panel', id: 'query-panel' });
+    panel.hidden = !query.panelOpen;
     const input = /** @type {HTMLTextAreaElement} */ (el('textarea', {
       class: 'query-input',
       'aria-label': 'SQL query',
@@ -2481,8 +2519,8 @@
       autocomplete: 'off',
       placeholder: 'SELECT … (read-only: SELECT, WITH, FROM, SHOW, DESCRIBE, SUMMARIZE, PIVOT, EXPLAIN)',
     }));
-    input.value = queryText;
-    queryInputEl = input;
+    input.value = query.text;
+    query.input = input;
     // The coloured copy of the text, drawn under the (transparent-text) box. It is not for
     // assistive technology or the mouse: the textarea is the real control.
     const layer = el('pre', { class: 'query-highlight', 'aria-hidden': 'true' });
@@ -2509,7 +2547,7 @@
     const status = el('span', { class: 'query-status', role: 'status' });
     const sync = () => { run.disabled = input.value.trim() === ''; };
     sync();
-    input.addEventListener('input', () => { queryText = input.value; queryTextEdited = true; sync(); highlight(); });
+    input.addEventListener('input', () => { query.text = input.value; query.textEdited = true; sync(); highlight(); });
     input.addEventListener('scroll', () => {
       layer.scrollTop = input.scrollTop;
       layer.scrollLeft = input.scrollLeft;
@@ -2529,101 +2567,162 @@
     editor.appendChild(input);
     panel.appendChild(editor);
     panel.appendChild(bar);
-    app.appendChild(panel);
+    // An error or a note about the last run, under the box. Never replaces the grid.
+    const message = el('p', { class: 'query-message', role: 'status' });
+    message.hidden = true;
+    panel.appendChild(message);
     layer.scrollTop = input.scrollTop;
     layer.scrollLeft = input.scrollLeft;
-    const host = el('div', { class: 'query-result' });
-    app.appendChild(host);
-    queryResultHost = host;
-    queryStatusEl = status;
-    paintQueryResult();
-    if (queryRunning) { setQueryStatus('Running…', false); }
-    if (focusQueryInput) {
-      focusQueryInput = false;
-      input.focus();
-    }
+    query.panel = panel;
+    query.statusEl = status;
+    query.messageEl = message;
+    paintQueryMessage();
+    return panel;
   }
 
   /** @param {string} text @param {boolean} isError */
   function setQueryStatus(text, isError) {
-    if (!queryStatusEl) { return; }
-    queryStatusEl.textContent = text;
-    queryStatusEl.classList.toggle('error', isError);
+    if (!query.statusEl) { return; }
+    query.statusEl.textContent = text;
+    query.statusEl.classList.toggle('error', isError);
+  }
+
+  /** Draws `query.message` (the last run's error or note) under the box. */
+  function paintQueryMessage() {
+    const node = query.messageEl;
+    if (!node) { return; }
+    const message = query.message;
+    node.hidden = message === undefined;
+    node.textContent = message ? message.text : '';
+    node.classList.toggle('error', !!message && message.isError);
+    node.setAttribute('role', message && message.isError ? 'alert' : 'status');
   }
 
   /**
-   * Sends `sql` to the host. The previous result stays on screen until the answer replaces it.
+   * Sends `sql` to the host. The previous result (or the table) stays on screen until the answer replaces it.
    * @param {string} sql
-   * @param {{ top: number, left: number }=} scroll result scroll to put back when the answer is drawn (a refresh's re-run)
+   * @param {{ refresh?: boolean }=} options `refresh`: a refresh's re-run, whose answer keeps the result's filters and scroll
    */
-  function runQuery(sql, scroll) {
+  function runQuery(sql, options) {
     if (sql.trim() === '') { return; }
-    queryRunSql = sql;
-    queryRunning = true;
-    queryRerun = undefined;
-    queryStale = false;
-    queryScrollToRestore = scroll;
+    query.pendingSql = sql;
+    query.running = true;
+    query.rerun = false;
+    query.refreshRun = !!(options && options.refresh);
+    query.runSeq = ++query.seqCounter;
     setQueryStatus('Running…', false);
-    vscode.postMessage({ type: 'run-query', seq: ++querySeqCounter, sql });
+    vscode.postMessage({ type: 'run-query', seq: query.runSeq, sql });
   }
 
-  /** Draws `queryResult` into the result area (and the status line beside the Run button). */
-  function paintQueryResult() {
-    const host = queryResultHost;
-    if (!host || !host.isConnected) { return; }
-    host.textContent = '';
-    releaseCurrentView();
-    const note = (/** @type {string} */ text, /** @type {boolean} */ isError) => {
-      const p = el('p', { class: isError ? 'message error' : 'message' });
-      p.textContent = text;
-      host.appendChild(p);
-    };
-    if (!queryResult) {
-      note('Run a query to see its result here.', false);
-      setQueryStatus('', false);
-    } else if (queryResult.kind === 'error') {
-      note(queryResult.message, true);
-      setQueryStatus('Failed', true);
-    } else if (queryResult.data.columnCount === 0) {
-      note('The statement ran and returned no columns.', false);
-      setQueryStatus(`Done · ${queryResult.elapsedMs.toLocaleString()} ms`, false);
-    } else {
-      const { data, truncated, elapsedMs, seq, capped } = queryResult;
-      renderTable(data, undefined, undefined, { host, result: { truncated, seq, capped } });
-      setQueryStatus(
-        `${data.rowCount.toLocaleString()}${truncated ? '+' : ''} row${data.rowCount !== 1 ? 's' : ''} · ${elapsedMs.toLocaleString()} ms`,
-        false
-      );
+  /** The `Result of query ✕` strip above a result: ✕ goes back to the table. */
+  function renderResultChip() {
+    const chip = el('div', { class: 'result-chip' });
+    const label = el('span', { class: 'result-chip-label' });
+    label.textContent = 'Result of query';
+    const close = el('button', {
+      type: 'button',
+      class: 'toolbar-button result-chip-close',
+      'aria-label': 'Close the result and go back to the table',
+      title: 'Close the result and go back to the table',
+    });
+    close.textContent = '✕';
+    close.addEventListener('click', closeResult);
+    chip.appendChild(label);
+    chip.appendChild(close);
+    return chip;
+  }
+
+  /**
+   * Draws the result (chip + the usual table view) into the grid area, in place of the table.
+   * @param {ReturnType<typeof captureReloadState>=} restoring filters and scroll to put back (a refresh's re-run)
+   */
+  function drawResult(restoring) {
+    const area = query.area;
+    const result = query.result;
+    if (!area || !area.isConnected || !result) { return; }
+    area.textContent = '';
+    area.appendChild(renderResultChip());
+    renderTable(result.data, undefined, undefined, {
+      host: area,
+      result: { truncated: result.truncated, seq: result.seq, capped: result.capped },
+      deferStats: !!restoring,
+    });
+    if (restoring) {
+      restoreReloadState(restoring);
+      requestStats();
+    }
+  }
+
+  /**
+   * Back to the table: drops the result (and tells the host, which drops the table it kept for it,
+   * and the one a run still in flight will make) and redraws the table with the filters and scroll
+   * it had. A run still in flight is forgotten, so its answer cannot bring the result back.
+   */
+  function closeResult() {
+    const shown = query.result;
+    const inFlight = query.running ? query.runSeq : undefined;
+    const saved = query.savedTableState;
+    if (shown && shown.seq !== undefined) { vscode.postMessage({ type: 'close-result', seq: shown.seq }); }
+    if (inFlight !== undefined) { vscode.postMessage({ type: 'close-result', seq: inFlight }); }
+    forgetQueryResult();
+    query.seqCounter++;
+    setQueryStatus('', false);
+    paintQueryMessage();
+    const area = query.area;
+    if (area && area.isConnected && query.drawTable) {
+      area.textContent = '';
+      query.drawTable(saved);
+      if (currentView) { currentView.wrapper.focus(); }
     }
   }
 
   /** `query-data` from the host; a reply that a newer run overtook is dropped. @param {import('../../src/queryMessage').QueryPayload | undefined} payload */
   function handleQueryData(payload) {
-    if (!payload || payload.seq !== querySeqCounter) { return; }
-    queryRunning = false;
+    if (!payload || payload.seq !== query.seqCounter || !query.running) { return; }
+    query.running = false;
+    query.runSeq = undefined;
+    // A refresh's re-run puts back what the user had done to the result (read now, from the live view).
+    const restore = query.refreshRun && query.result && currentView && currentView.isResult ? captureReloadState() : undefined;
+    query.refreshRun = false;
     if (typeof payload.error === 'string') {
-      queryResult = { kind: 'error', message: payload.error };
+      query.message = { text: payload.error, isError: true };
+      setQueryStatus('Failed', true);
     } else if (payload.data && Array.isArray(payload.data.headers) && Array.isArray(payload.data.rows)) {
-      queryResult = {
-        kind: 'data',
-        data: payload.data,
-        truncated: payload.truncated === true,
-        elapsedMs: typeof payload.elapsedMs === 'number' ? payload.elapsedMs : 0,
-        seq: Number.isSafeInteger(payload.result) ? payload.result : undefined,
-        capped: payload.capped === true,
-      };
+      const elapsedMs = typeof payload.elapsedMs === 'number' ? payload.elapsedMs : 0;
+      if (payload.data.columnCount === 0) {
+        query.message = { text: 'The statement ran and returned no columns.', isError: false };
+        setQueryStatus(`Done · ${elapsedMs.toLocaleString()} ms`, false);
+      } else {
+        const { data } = payload;
+        // The first result takes the table's place: keep the table's filters and scroll for ✕.
+        if (!query.result && currentView && currentView.resultSeq === undefined) {
+          query.savedTableState = captureReloadState();
+        }
+        query.result = {
+          data,
+          truncated: payload.truncated === true,
+          elapsedMs,
+          seq: Number.isSafeInteger(payload.result) ? payload.result : undefined,
+          capped: payload.capped === true,
+        };
+        query.runSql = query.pendingSql;
+        query.message = undefined;
+        drawResult(restore);
+        const truncated = payload.truncated === true;
+        setQueryStatus(
+          `${data.rowCount.toLocaleString()}${truncated ? '+' : ''} row${data.rowCount !== 1 ? 's' : ''} · ${elapsedMs.toLocaleString()} ms`,
+          false
+        );
+      }
     } else {
-      queryResult = { kind: 'error', message: 'The host sent an unexpected reply.' };
+      query.message = { text: 'The host sent an unexpected reply.', isError: true };
+      setQueryStatus('Failed', true);
     }
-    paintQueryResult();
-    putResultScroll(queryScrollToRestore);
-    queryScrollToRestore = undefined;
+    paintQueryMessage();
     // A refresh landed while this ran: the data changed under it, so run it again.
-    const again = queryRerun;
-    queryRerun = undefined;
-    if (again && queryRunSql !== undefined) {
-      if (queryMode) { runQuery(queryRunSql, again.scroll); } else { queryStale = true; }
-    }
+    const again = query.rerun;
+    query.rerun = false;
+    if (again && query.runSql !== undefined) { runQuery(query.runSql, { refresh: true }); }
   }
 
   /** @param {string} text @param {boolean} isError @param {string=} title */
@@ -2680,6 +2779,7 @@
     const focusedInput = focused >= 0 ? view.filterInputs[focused] : undefined;
     return {
       tableName: view.tableName,
+      isResult: !!view.isResult,
       headers: view.headers,
       filters: view.filterInputs.map((input) => input.value),
       top: view.wrapper.scrollTop,
@@ -2699,7 +2799,8 @@
   function restoreReloadState(state) {
     const view = currentView;
     if (
-      !view || view.tableName !== state.tableName || view.headers.length !== state.headers.length ||
+      !view || view.tableName !== state.tableName || !!view.isResult !== state.isResult ||
+      view.headers.length !== state.headers.length ||
       view.headers.some((header, i) => header !== state.headers[i])
     ) { return; }
     const hasFilter = state.filters.some((text) => text.trim() !== '');
@@ -2750,8 +2851,8 @@
       applySqlTheme(message.colors);
     } else if (message.type === 'show-table') {
       // The host (dbt "Preview Model") asked for the table that is already the selected one:
-      // nothing to re-read, but the SQL box has to give way to it.
-      setQueryMode(false);
+      // nothing to re-read, but a query result has to give way to it.
+      if (query.result) { closeResult(); }
     }
   });
 
