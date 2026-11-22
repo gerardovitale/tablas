@@ -105,7 +105,7 @@ If VS Code re-resolves the same document with a new panel (not verified that it 
 
 ## SQL box (DuckDB)
 
-### Q-9 · A reload while the SQL box shows still reads and posts the hidden table · P3 · M
+### Q-9 · A reload while the SQL box shows still reads and posts the hidden table · P3 · M · superseded by Q-15
 
 The host does `COUNT(*)`, a `maxRows` read and the dbt descriptions for the selected table on every reload even when the webview is in SQL mode and draws none of it. Skipping it needs the webview to tell the host its mode and to ask for the table (a `select-table`) when the user switches back, with filters/scroll restored after that reply. Measure first: it is small next to re-copying the file (R-2).
 
@@ -165,6 +165,38 @@ The statement splitter/classifier in the SQL path strips comments with a regex t
 ### Q-11 · An empty or half-written DuckDB file has no refresh button · P2 · S
 
 If the first load finds no tables (empty file, or a build still writing), the panel shows "No tables found" without the toolbar, so the user must close and reopen the tab. The file watcher usually recovers it, but not with `tablas.autoRefresh` off. Acceptance: render the toolbar (`capabilities.refresh`) on the empty and failed first-load states too.
+
+### SQL box redesign (Q-14 to Q-16)
+
+Why: the box exists only for DuckDB files, lives in a separate Table|SQL mode that hides the table and the picker, and draws a result without type badges, profile strips or filters. Root cause: filters and stats are keyed by a table name the host knows (`get-stats {table}`, `filter {table}`), and a query result has no name (`renderTable(..., {host, result})` skips both; `duckdbRunQuery` stringifies cells and drops the column types). The fix is to make a result an addressable table. Ordered; each is an independently shippable commit.
+
+Decisions already made:
+- A result is materialized into a DuckDB `TEMP` table (verified 2026-11-22: `CREATE TEMP TABLE` and `read_parquet` both work on a `READ_ONLY` database, so the source file is untouched), capped at the **first N rows** (propose N, e.g. 100,000, within `queryLimits.duckdbTimeoutMs`). Stats/filters (and later sort) then cover those N rows and the UI says so ("Statistics and filters cover the first N rows of this result"), in the style of the existing "Statistics cover all N rows" and "N+ rows" notes. A small result (a `GROUP BY` with 30 rows) behaves exactly like a table. Rejected alternative: wrap the user's SQL in each stats/filter request (always complete, but re-runs the query per keystroke and can change between runs).
+- The SQL view of a Parquet/CSV file is named after the **file's stem**: `sales_2024.parquet` -> `select * from sales_2024`. A stem that is not a plain identifier (`sales-2024.final`, spaces, leading digit, reserved word) is quoted, and the box's starting suggestion is already quoted correctly. (Rejected: a fixed name `data`.)
+
+### Q-14 · A query result is a real table: types, statistics and filters · P2 · L
+
+Acceptance:
+- `duckdbRunQuery` writes the result into a `TEMP` table (reserved name that cannot collide with a user table, exposed to the webview as the shown table) capped at N rows, and the existing table-keyed protocol serves it: column type badges (`nativeType`/`DuckDBTypeId`), profile strips (`get-stats`) and filter boxes (`filter`), with `seq`/`table` echo rules correct across re-runs.
+- When the query produced more than N rows the result says statistics and filters cover the first N. The read-only statement guard, `seq` drop of stale queries, 30 s limit and `interrupt()` pattern are unchanged; all temp-table work goes through `runExclusive` (never nested); the table is dropped on the next run, on leaving the result and on dispose.
+- Errors keep the previous result; zero-column statements still show "ran and returned no columns".
+- Tests: unit (vscode-free) for the naming/cap logic; DuckDB parser tests for types/stats/filters on a result; integration test through the provider's handlers; filter parity/differential tests stay green. Update CLAUDE.md ("SQL box") and CHANGELOG.
+
+### Q-15 · One layout: the query box above the table, no Table|SQL toggle · P2 · L · needs Q-14
+
+Acceptance:
+- A collapsible query panel above the table (DataGrip console style); the picker stays visible. Run replaces the grid with the result and shows a chip such as `Result of query ✕`; the ✕ returns to the table with its filters and scroll restored (reuse `savedTableState`/`captureReloadState`). The toggle and the hidden-picker SQL mode go away.
+- Everything that works today keeps working: highlighting and theme colours, Ctrl/Cmd+Enter, re-run after a live refresh (`queryRerun`/`queryStale`), caret/scroll preservation (`captureQueryUiState`), keyboard and screen-reader access, the CSP rules (no `innerHTML`, CSSOM only).
+- Supersedes Q-9 (a reload no longer reads a hidden table the user is not looking at) and simplifies Q-8; delete those two when this ships, and fold the module state (`queryMode`, `queryResult`, `savedTableState`, `queryResultHost`) into the new layout.
+- Verify in a real window in light, dark and high-contrast, with a large result.
+
+### Q-16 · SQL for Parquet and CSV through an in-memory DuckDB · P2 · L · needs Q-14
+
+Acceptance:
+- `capabilities.query` for `.parquet` and `.csv`: the host opens an in-memory DuckDB and exposes the file as a view named after its stem (`read_parquet`/`read_csv`), with the same read-only guard, limits, result table, stats and filters as a DuckDB file. For non-`file:` URIs copy the bytes to a private temp file as `openDuckdbDatabase` does and clean it on dispose. Cover name quoting/sanitising, an empty or colliding stem, and a file replaced on disk.
+- The normal table view keeps its hyparquet/PapaParse paths; DuckDB is only the SQL engine. Decide and document how to keep `select *` close to the table view where DuckDB's CSV sniffer disagrees with PapaParse (types, quoting, headers): explicit read options or `all_varchar`, plus a note under the box.
+- Out of scope: XLSX (DuckDB's Excel reader needs a network `INSTALL`, which the box refuses on purpose) and SQLite via `sql.js` (separate follow-up).
+- Tests against the `filter.parquet`/`filter.csv`/`multiline.csv`/`nested.parquet` fixtures; update README, CLAUDE.md and CHANGELOG.
 
 ### W-1 · The table picker hard-codes DuckDB's `main` schema in the webview · P3 · S
 
