@@ -84,12 +84,39 @@ function checkLayout(files) {
 
 const ENTRY = `
 import * as fs from 'fs';
-import { parseDuckdb } from './src/duckdbParser';
+import * as path from 'path';
+import { duckdbRunQuery, parseDuckdb } from './src/duckdbParser';
+import { isFileSqlError, openFileSqlEngine } from './src/fileSqlEngine';
 import { parseSqlite } from './src/sqliteParser';
 (async () => {
   const read = (file: string) => new Uint8Array(fs.readFileSync(file));
-  const [duckdbFile, sqliteFile] = process.argv.slice(2);
+  const [duckdbFile, sqliteFile, parquetFile, csvFile] = process.argv.slice(2);
   const result: Record<string, unknown> = {};
+  // The SQL box over a Parquet and a CSV file: in place by path, and from bytes (the copy a
+  // non-file source gets), which is where Windows paths and temp folders could differ.
+  for (const [name, format, file, byBytes] of [
+    ['parquet', 'parquet', parquetFile, false],
+    ['csv', 'csv', csvFile, false],
+    ['csv-bytes', 'csv', csvFile, true],
+  ] as const) {
+    const opened = await openFileSqlEngine({
+      format,
+      fileName: path.basename(file),
+      ...(byBytes ? { readBytes: async () => read(file) } : { fsPath: file }),
+    });
+    if (isFileSqlError(opened)) {
+      console.error(name + ' engine failed: ' + opened.error);
+      process.exit(1);
+    }
+    const view = path.parse(file).name;
+    const outcome = await duckdbRunQuery(opened, 'select count(*) as n from ' + view, 10);
+    opened.close();
+    if (!outcome || 'error' in outcome) {
+      console.error(name + ' query failed: ' + JSON.stringify(outcome));
+      process.exit(1);
+    }
+    result[name] = { rows: Number(outcome.data.rows[0][0]) };
+  }
   for (const [name, outcome] of [
     ['duckdb', await parseDuckdb(read(duckdbFile), 100)],
     ['sqlite', await parseSqlite(read(sqliteFile), 100)],
@@ -127,6 +154,8 @@ async function runFromScratchFolder(files) {
         path.join(stage, 'dist', 'smoke.js'),
         path.join(ROOT, 'test', 'fixtures', 'simple.duckdb'),
         path.join(ROOT, 'test', 'fixtures', 'simple.db'),
+        path.join(ROOT, 'test', 'fixtures', 'simple.parquet'),
+        path.join(ROOT, 'test', 'fixtures', 'simple.csv'),
       ],
       { cwd: stage, encoding: 'utf8' }
     );
@@ -134,6 +163,11 @@ async function runFromScratchFolder(files) {
     for (const format of ['duckdb', 'sqlite']) {
       if (!result[format] || result[format].tables.length === 0 || result[format].rows === 0) {
         fail(`${format} opened but showed no data: ${output}`);
+      }
+    }
+    for (const format of ['parquet', 'csv', 'csv-bytes']) {
+      if (!result[format] || !(result[format].rows > 0)) {
+        fail(`${format} SQL engine opened but returned no rows: ${output}`);
       }
     }
     console.log(`opened from the packaged layout: ${output.trim()}`);
