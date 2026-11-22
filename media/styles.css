@@ -346,6 +346,18 @@ body.vscode-high-contrast-light {
   color: var(--vscode-errorForeground);
 }
 
+/* What the host says about how it reads the source, under the box. */
+.query-note {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+
+/* With no picker before it (CSV, Parquet) the button sits at the toolbar's left edge. */
+.table-toolbar > .sql-toggle:first-child {
+  margin-left: 12px;
+}
+
 /* An error or a note about the last run, under the box. The grid is never replaced by it. */
 .query-message {
   flex-shrink: 0;

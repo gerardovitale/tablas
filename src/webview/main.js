@@ -1738,7 +1738,29 @@
       showMessage('Failed to parse file:\n' + msgs, true);
       return;
     }
-    renderTable(outcome.data);
+    const canQuery = !!(outcome.capabilities && outcome.capabilities.query);
+    if (!canQuery) {
+      forgetQueryResult();
+      query.panelOpen = false;
+      renderTable(outcome.data);
+      return;
+    }
+    // A single-table source whose host can run queries: the same toolbar, panel and grid area as a
+    // multi-table one, without a picker.
+    const app = document.getElementById('app');
+    if (!app) { return; }
+    query.suggestion = outcome.querySuggestion || '';
+    query.note = outcome.queryNote || '';
+    if (!query.textEdited) { query.text = query.suggestion; }
+    const toolbar = el('div', { class: 'table-toolbar' });
+    toolbar.appendChild(renderSqlToggle());
+    app.appendChild(toolbar);
+    app.appendChild(renderQueryPanel());
+    const area = el('div', { class: 'table-area' });
+    app.appendChild(area);
+    query.area = area;
+    query.drawTable = tableDrawer(area, outcome.data, undefined, undefined, undefined);
+    query.drawTable(undefined);
   }
 
   // Tracks the most recently user-requested table name, so a stale
@@ -1793,6 +1815,8 @@
     savedTableState: undefined,
     /** The host's starting query for the table shown (`MultiTableData.querySuggestion`). */
     suggestion: '',
+    /** A line under the box from the host (`queryNote`), or ''. */
+    note: '',
     /** @type {HTMLTextAreaElement | undefined} */ input: undefined,
     /** @type {HTMLElement | undefined} */ panel: undefined,
     /** @type {HTMLElement | undefined} */ statusEl: undefined,
@@ -2137,6 +2161,26 @@
   /**
    * @param {import('../../src/tableData').MultiTableParseOutcome} outcome
    */
+  /**
+   * A function that draws the table into `area`, optionally putting back the filters and scroll the
+   * table had (after a reload, or back from a result). Statistics are requested only after the filter,
+   * so the filtered rows are not queued behind a whole-table scan.
+   * @param {HTMLElement} area
+   * @param {import('../../src/tableData').ParsedTable} data
+   * @param {string | undefined} tableName
+   * @param {string | undefined} tableError
+   * @param {Record<string, string> | undefined} columnDescriptions
+   */
+  function tableDrawer(area, data, tableName, tableError, columnDescriptions) {
+    return (/** @type {ReturnType<typeof captureReloadState>} */ restoring) => {
+      renderTable(data, tableName, tableError, { host: area, columnDescriptions, deferStats: !!restoring });
+      if (restoring) {
+        restoreReloadState(restoring);
+        requestStats();
+      }
+    };
+  }
+
   function renderMultiTableOutcome(outcome) {
     const isReload = outcome.success && outcome.data.reload !== undefined;
     if (outcome.success && outcome.data.hostSelected) {
@@ -2196,6 +2240,7 @@
       query.panelOpen = false;
     }
     query.suggestion = outcome.data.querySuggestion || '';
+    query.note = outcome.data.queryNote || '';
     // The untouched box offers the suggestion of whichever table is shown.
     if (!query.textEdited) { query.text = query.suggestion; }
     const selector = renderTableSelector(outcome.data.tables, outcome.data.selectedTable);
@@ -2242,19 +2287,7 @@
     app.appendChild(area);
     query.area = area;
     const data = outcome.data;
-    query.drawTable = (restoring) => {
-      renderTable(data.data, data.selectedTable, data.tableError, {
-        host: area,
-        columnDescriptions: data.columnDescriptions,
-        deferStats: !!restoring,
-      });
-      if (restoring) {
-        // After a reload, or back from a result: the filters and scroll the table had.
-        restoreReloadState(restoring);
-        // Statistics only now, behind the filter request: the host answers in order.
-        requestStats();
-      }
-    };
+    query.drawTable = tableDrawer(area, data.data, data.selectedTable, data.tableError, data.columnDescriptions);
     if (query.result) {
       // A refresh keeps the result on screen and re-runs what produced it, so it follows the data.
       if (keptArea) {
@@ -2567,6 +2600,11 @@
     editor.appendChild(input);
     panel.appendChild(editor);
     panel.appendChild(bar);
+    if (query.note) {
+      const note = el('p', { class: 'query-note' });
+      note.textContent = query.note;
+      panel.appendChild(note);
+    }
     // An error or a note about the last run, under the box. Never replaces the grid.
     const message = el('p', { class: 'query-message', role: 'status' });
     message.hidden = true;

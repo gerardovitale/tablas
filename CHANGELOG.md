@@ -6,7 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- SQL for Parquet and CSV files: the **SQL** panel now appears on `.parquet` and `.csv` files too. The file is a view named after it (`sales_2024.parquet` is `select * from sales_2024`; a name with dashes, dots, spaces or a leading digit is quoted, and the starting query already is). The result gets type badges, profiles and filters like any table. A local file is read in place, so large files cost nothing until you query them. For CSV, DuckDB detects column types itself, so a value can print differently from the table (a note says so).
+
 ### Changed
+- The starting query of the SQL box for a DuckDB file writes plain names without quotes (`select * from orders limit 5`), quoting only when needed.
 - The SQL box no longer has its own Table | SQL mode. A collapsible **SQL** panel sits above the table (button in the toolbar, next to the table picker, which stays visible). Running a query replaces the grid with the result under a `Result of query ✕` chip; ✕ returns to the table with its filters and scroll as you left them. An error shows under the box and keeps the previous result; a refresh re-runs the query and keeps the result's filters and scroll.
 - A DuckDB SQL result is now a real table: it gets column type badges, profile strips and the per-column filter boxes, like any table. A result is kept as a temporary table (the file is untouched) of at most its first 100,000 rows; when the query returned more, the note says statistics and filters cover those rows.
 

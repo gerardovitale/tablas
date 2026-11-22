@@ -76,8 +76,20 @@ export interface ParseError {
   row?: number;
 }
 
+/**
+ * What a single-table source (CSV, Parquet) tells the webview beyond its rows, when its host can run
+ * queries: the same fields `MultiTableData` carries, so the webview treats every source alike.
+ */
+export interface SingleTableQueryInfo {
+  capabilities?: SourceCapabilities;
+  /** The SQL box's starting text (the file's view, named after the file). */
+  querySuggestion?: string;
+  /** A line shown under the box (for example how DuckDB's reading can differ from the table view). */
+  queryNote?: string;
+}
+
 export type TableParseOutcome =
-  | { success: true; data: ParsedTable; errors: ParseError[] }
+  | ({ success: true; data: ParsedTable; errors: ParseError[] } & SingleTableQueryInfo)
   | { success: false; errors: ParseError[] };
 
 /** DuckDB's default schema: tables in it keep their bare name as `TableRef.name`. */
@@ -142,6 +154,8 @@ export interface MultiTableData {
    * on it (and follows the table until the user edits the text); no query text is remembered.
    */
   querySuggestion?: string;
+  /** A line shown under the SQL box, when the host has something to say about how it reads the source. */
+  queryNote?: string;
   /**
    * Column descriptions for the selected table (from dbt's `manifest.json` when the
    * file belongs to a dbt project), by column name; the webview shows them in the

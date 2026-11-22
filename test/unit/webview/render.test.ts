@@ -1524,6 +1524,104 @@ describe('webview main.js rendering', () => {
 
   });
 
+  describe('sql box for a single-table source (CSV, Parquet)', () => {
+    const doc = (dom: JSDOM) => dom.window.document;
+    const rows = [['1', 'Rome'], ['2', 'Paris']];
+    function csvWithSql(extra: Record<string, unknown> = {}): CsvParseOutcome {
+      return {
+        success: true,
+        errors: [],
+        data: { headers: ['id', 'city'], rows, rowCount: 2, columnCount: 2 },
+        capabilities: { query: true },
+        querySuggestion: 'select * from "sales-2024" limit 5',
+        queryNote: 'Types are detected by DuckDB.',
+        ...extra,
+      } as CsvParseOutcome;
+    }
+    const posted = (messages: unknown[], type: string) =>
+      messages.filter((m) => (m as { type: string }).type === type) as Array<Record<string, unknown>>;
+    const sendQueryData = (dom: JSDOM, payload: Record<string, unknown>) =>
+      dom.window.dispatchEvent(new dom.window.MessageEvent('message', { data: { type: 'query-data', payload } }));
+    const filterBox = (dom: JSDOM) => doc(dom).querySelector<HTMLInputElement>('.table-area input.col-filter')!;
+
+    it('offers nothing without the capability', () => {
+      const { dom } = loadWebview();
+      sendCsvData(dom, { success: true, errors: [], data: { headers: ['a'], rows: [['1']], rowCount: 1, columnCount: 1 } });
+      assert.strictEqual(doc(dom).querySelector('.sql-toggle'), null);
+      assert.strictEqual(doc(dom).querySelector('.query-panel'), null);
+      assert.ok(doc(dom).querySelector('#csv-table'));
+    });
+
+    it('has the SQL button and a closed panel, with the table in the grid area and no picker', () => {
+      const { dom } = loadWebview();
+      sendCsvData(dom, csvWithSql());
+      assert.ok(doc(dom).querySelector('.table-toolbar .sql-toggle'));
+      assert.strictEqual(doc(dom).querySelector('.table-picker-trigger'), null, 'one table: nothing to pick');
+      assert.strictEqual(doc(dom).querySelector<HTMLElement>('.query-panel')!.hidden, true);
+      assert.strictEqual(doc(dom).querySelectorAll('.table-area #csv-table tbody tr').length, 2);
+      assert.strictEqual(doc(dom).querySelector('.reload-status'), null, 'a CSV has no refresh');
+    });
+
+    it('opens on the file\'s view, as the host wrote it, and shows the host\'s note under the box', () => {
+      const { dom } = loadWebview();
+      sendCsvData(dom, csvWithSql());
+      doc(dom).querySelector<HTMLButtonElement>('.sql-toggle')!.click();
+      assert.strictEqual(doc(dom).querySelector<HTMLTextAreaElement>('.query-input')!.value, 'select * from "sales-2024" limit 5');
+      assert.strictEqual(doc(dom).querySelector('.query-note')?.textContent, 'Types are detected by DuckDB.');
+    });
+
+    it('shows no note when the host has none (Parquet)', () => {
+      const { dom } = loadWebview();
+      sendCsvData(dom, csvWithSql({ queryNote: undefined }));
+      assert.strictEqual(doc(dom).querySelector('.query-note'), null);
+    });
+
+    it('asks for the table\'s statistics with no table name, as before', () => {
+      const { dom, postedMessages } = loadWebview();
+      sendCsvData(dom, csvWithSql());
+      const request = posted(postedMessages, 'get-stats').at(-1)!;
+      assert.ok(!('table' in request) && !('result' in request));
+    });
+
+    it('runs a query, shows its result as a table, and ✕ brings the table back with its filter', () => {
+      const { dom, postedMessages } = loadWebview();
+      sendCsvData(dom, csvWithSql());
+      filterBox(dom).value = 'Ro';
+      filterBox(dom).dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      const tableFilter = posted(postedMessages, 'filter').at(-1)!;
+      assert.ok(!('table' in tableFilter) && !('result' in tableFilter), 'the file\'s own filter carries no address');
+
+      doc(dom).querySelector<HTMLButtonElement>('.sql-toggle')!.click();
+      doc(dom).querySelector<HTMLButtonElement>('.query-run')!.click();
+      const run = posted(postedMessages, 'run-query').at(-1) as { seq: number; sql: string };
+      assert.strictEqual(run.sql, 'select * from "sales-2024" limit 5');
+      sendQueryData(dom, {
+        seq: run.seq, result: run.seq, materializedRows: 1, truncated: false, elapsedMs: 5,
+        data: { headers: ['n'], rows: [['7']], rowCount: 1, columnCount: 1 },
+      });
+      assert.ok(doc(dom).querySelector('.result-chip'));
+      assert.strictEqual(posted(postedMessages, 'get-stats').at(-1)!.result, run.seq);
+      assert.strictEqual(doc(dom).querySelectorAll('.table-area input.col-filter').length, 1);
+
+      doc(dom).querySelector<HTMLButtonElement>('.result-chip-close')!.click();
+      assert.strictEqual(doc(dom).querySelector('.result-chip'), null);
+      assert.strictEqual(filterBox(dom).value, 'Ro');
+      assert.deepStrictEqual(posted(postedMessages, 'close-result'), [{ type: 'close-result', seq: run.seq }]);
+      assert.deepStrictEqual(posted(postedMessages, 'filter').at(-1)!.filters, [{ column: 0, text: 'Ro' }]);
+    });
+
+    it('keeps an error under the box and the table in place', () => {
+      const { dom, postedMessages } = loadWebview();
+      sendCsvData(dom, csvWithSql());
+      doc(dom).querySelector<HTMLButtonElement>('.sql-toggle')!.click();
+      doc(dom).querySelector<HTMLButtonElement>('.query-run')!.click();
+      const run = posted(postedMessages, 'run-query').at(-1) as { seq: number };
+      sendQueryData(dom, { seq: run.seq, error: 'Could not read the file with DuckDB 2.0.0: nope' });
+      assert.match(doc(dom).querySelector('.query-message')?.textContent ?? '', /Could not read the file/);
+      assert.strictEqual(doc(dom).querySelectorAll('.table-area #csv-table tbody tr').length, 2);
+    });
+  });
+
   describe('dbt awareness', () => {
     function payload(extra: Partial<MultiTableData> = {}, selectedTable = 'a'): MultiTableParseOutcome {
       return {

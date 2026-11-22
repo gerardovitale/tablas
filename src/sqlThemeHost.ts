@@ -6,6 +6,7 @@ import {
   customizationRules,
   parseJsonc,
   resolveSqlColors,
+  sqlThemeMessage,
   UI_THEME_OF_KIND,
   type SqlColors,
   type ThemeKind,
@@ -158,4 +159,24 @@ export async function loadSqlColors(): Promise<SqlColors> {
   } catch {
     return {};
   }
+}
+
+/**
+ * Keeps a webview's SQL box coloured with the active theme: `send()` posts the colours now
+ * (call it after the webview's ready handshake) and they are posted again whenever the theme or
+ * one of `SQL_THEME_SETTINGS` changes, until `dispose()`.
+ */
+export function watchSqlTheme(post: (message: unknown) => void): { send: () => Promise<void>; dispose: () => void } {
+  const send = async (): Promise<void> => {
+    post(sqlThemeMessage(await loadSqlColors()));
+  };
+  const subscriptions = [
+    vscode.window.onDidChangeActiveColorTheme(() => void send()),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (SQL_THEME_SETTINGS.some((setting) => event.affectsConfiguration(setting))) {
+        void send();
+      }
+    }),
+  ];
+  return { send, dispose: () => subscriptions.forEach((subscription) => subscription.dispose()) };
 }

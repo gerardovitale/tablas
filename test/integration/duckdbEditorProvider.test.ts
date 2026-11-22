@@ -608,7 +608,7 @@ describe('DuckdbEditorProvider Integration', () => {
         assert.ok(first.outcome.success);
         if (first.outcome.success) {
           assert.deepStrictEqual(first.outcome.data.capabilities, { refresh: true, query: true });
-          assert.strictEqual(first.outcome.data.querySuggestion, 'select * from "customer_totals" limit 5');
+          assert.strictEqual(first.outcome.data.querySuggestion, 'select * from customer_totals limit 5');
           assert.ok(!('lastQuery' in first.outcome.data), 'no remembered query is sent');
         }
         await first.provider.handleRunQuery(first.document, { type: 'run-query', seq: 1, sql: 'SELECT count(*) FROM orders' });
@@ -619,7 +619,7 @@ describe('DuckdbEditorProvider Integration', () => {
       const second = await open('multi-table.duckdb', context);
       try {
         assert.ok(second.outcome.success && !('lastQuery' in second.outcome.data));
-        assert.ok(second.outcome.success && second.outcome.data.querySuggestion === 'select * from "customer_totals" limit 5');
+        assert.ok(second.outcome.success && second.outcome.data.querySuggestion === 'select * from customer_totals limit 5');
       } finally {
         second.document.dispose();
       }
@@ -666,7 +666,7 @@ describe('DuckdbEditorProvider Integration', () => {
         const outcome = await provider.handleSelectTable(document, 'main_marts.orders');
         assert.ok(outcome?.success);
         if (outcome?.success) {
-          assert.strictEqual(outcome.data.querySuggestion, 'select * from "main_marts"."orders" limit 5');
+          assert.strictEqual(outcome.data.querySuggestion, 'select * from main_marts.orders limit 5');
         }
       } finally {
         document.dispose();
@@ -785,8 +785,8 @@ describe('DuckdbEditorProvider Integration', () => {
           assert.deepStrictEqual(outcome.data.capabilities, { refresh: true, query: true });
         }
         assert.notStrictEqual(document.handle, old, 'a fresh handle replaces the old one');
-        await waitUntil(() => !fs.existsSync(old.tempFilePath), 'the old handle should be closed');
-        assert.ok(fs.existsSync(document.handle!.tempFilePath), 'the new handle stays open');
+        await waitUntil(() => !fs.existsSync(old.tempFilePath!), 'the old handle should be closed');
+        assert.ok(fs.existsSync(document.handle!.tempFilePath!), 'the new handle stays open');
       } finally {
         document.dispose();
       }
@@ -849,7 +849,7 @@ describe('DuckdbEditorProvider Integration', () => {
         assert.strictEqual(empty?.success, false);
         assert.match(empty?.success === false ? empty.errors[0].message : '', /empty/);
         assert.strictEqual(document.handle, old, 'the working handle must survive a failed reload');
-        assert.ok(fs.existsSync(old.tempFilePath));
+        assert.ok(fs.existsSync(old.tempFilePath!));
         // ...and it still answers queries.
         const stillWorks = await provider.handleSelectTable(document, 'orders');
         assert.strictEqual(stillWorks?.success, true);
@@ -921,7 +921,7 @@ describe('DuckdbEditorProvider Integration', () => {
         assert.strictEqual(outcome?.success, false, 'a table that cannot be read is a failed reload, not a new view');
         assert.match(outcome?.success === false ? outcome.errors[0].message : '', /Could not read "v"/);
         assert.strictEqual(document.handle, opened, 'the working handle must survive');
-        assert.ok(fs.existsSync(opened.tempFilePath));
+        assert.ok(fs.existsSync(opened.tempFilePath!));
         assert.strictEqual(document.selectedTable, 'v');
       } finally {
         document.dispose();

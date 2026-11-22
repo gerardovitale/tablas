@@ -416,9 +416,9 @@ describe('views that name their own catalog (dbt-duckdb writes warehouse.main.t 
         throw new Error(`${JSON.stringify(fileName)}: ${opened.error.message}`);
       }
       try {
-        const dir = path.dirname(opened.tempFilePath);
-        assert.ok(path.basename(dir).startsWith('tablas-db-'), `${opened.tempFilePath} is in a private tablas-db-* folder`);
-        assert.strictEqual(path.dirname(path.dirname(opened.tempFilePath)), path.dirname(dir));
+        const dir = path.dirname(opened.tempFilePath!);
+        assert.ok(path.basename(dir).startsWith('tablas-db-'), `${opened.tempFilePath!} is in a private tablas-db-* folder`);
+        assert.strictEqual(path.dirname(path.dirname(opened.tempFilePath!)), path.dirname(dir));
         assert.strictEqual((await readDuckdbTable(opened, 'people')).rowCount, 3);
       } finally {
         opened.close();
@@ -433,7 +433,7 @@ describe('views that name their own catalog (dbt-duckdb writes warehouse.main.t 
     if ('error' in opened) {
       throw new Error(opened.error.message);
     }
-    const dir = path.dirname(opened.tempFilePath);
+    const dir = path.dirname(opened.tempFilePath!);
     assert.strictEqual(fsSync.existsSync(dir), true);
     opened.close();
     assert.strictEqual(fsSync.existsSync(dir), false, 'the folder goes with the file');
@@ -615,7 +615,7 @@ describe('openDuckdbDatabase / listDuckdbTables / readDuckdbTable', () => {
 
   it('deletes its backing temp file on close', async () => {
     const handle = await openFixture('simple.duckdb');
-    const tempFilePath = handle.tempFilePath;
+    const tempFilePath = handle.tempFilePath!;
     assert.strictEqual(fsSync.existsSync(tempFilePath), true);
     handle.close();
     assert.strictEqual(fsSync.existsSync(tempFilePath), false);
@@ -851,7 +851,7 @@ describe('duckdbTableStats', () => {
         return typeof value === 'function' ? value.bind(target) : value;
       },
     });
-    const hanging: DuckdbHandle = { connection, tempFilePath: handle.tempFilePath, close: handle.close };
+    const hanging: DuckdbHandle = { connection, tempFilePath: handle.tempFilePath!, close: handle.close };
     return { hanging, events, aggregateStarts: () => aggregateStarts };
   }
 
@@ -910,7 +910,7 @@ describe('duckdbTableStats', () => {
     function failingHandle(handle: DuckdbHandle) {
       let attempts = 0;
       const failing: DuckdbHandle = {
-        tempFilePath: handle.tempFilePath,
+        tempFilePath: handle.tempFilePath!,
         close: handle.close,
         connection: new Proxy(handle.connection, {
           get(target, prop) {
@@ -1199,7 +1199,7 @@ describe('duckdbTableFilter', () => {
           return typeof value === 'function' ? value.bind(target) : value;
         },
       });
-      const hanging: DuckdbHandle = { connection, tempFilePath: handle.tempFilePath, close: handle.close };
+      const hanging: DuckdbHandle = { connection, tempFilePath: handle.tempFilePath!, close: handle.close };
       return { hanging, events };
     }
 
@@ -1478,11 +1478,9 @@ describe('duckdbRunQuery (the read-only SQL box)', () => {
   describe('suggestQuery', () => {
     it('selects from the table as the file needs it written', async () => {
       await withQueryHandle('schemas.duckdb', async (handle) => {
-        assert.strictEqual(suggestQuery(handle, 'raw_events'), 'select * from "raw_events" limit 5');
-        assert.strictEqual(
-          suggestQuery(handle, 'main_marts.orders'),
-          'select * from "main_marts"."orders" limit 5'
-        );
+        // Plain names stay bare (as one would type them); anything else is quoted.
+        assert.strictEqual(suggestQuery(handle, 'raw_events'), 'select * from raw_events limit 5');
+        assert.strictEqual(suggestQuery(handle, 'main_marts.orders'), 'select * from main_marts.orders limit 5');
         assert.strictEqual(
           suggestQuery(handle, 'my schema.odd "name"'),
           'select * from "my schema"."odd ""name""" limit 5'
@@ -1691,10 +1689,10 @@ describe('a query result kept as a table', () => {
 
   it('never writes to the database file the handle opened (temp tables are in memory)', async () => {
     await withResultHandle('multi-table.duckdb', async (handle) => {
-      const before = fsSync.readFileSync(handle.tempFilePath);
+      const before = fsSync.readFileSync(handle.tempFilePath!);
       dataOf(await runAs(handle, 1, 'SELECT * FROM customers'));
       dataOf(await runAs(handle, 2, 'SELECT * FROM orders'));
-      assert.ok(before.equals(fsSync.readFileSync(handle.tempFilePath)));
+      assert.ok(before.equals(fsSync.readFileSync(handle.tempFilePath!)));
     });
   });
 

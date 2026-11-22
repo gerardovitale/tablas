@@ -45,6 +45,7 @@ import {
   type FilterOutcome,
 } from './filter';
 import { RESULT_GONE_REASON, type QueryOutcome } from './queryMessage';
+import { quoteIdentifierIfNeeded } from './sqlNames';
 import {
   clampMaxRows,
   MAIN_SCHEMA,
@@ -82,7 +83,8 @@ import {
  */
 export interface DuckdbHandle {
   readonly connection: DuckDBConnection;
-  readonly tempFilePath: string;
+  /** The temp copy of the database file; absent for a handle that is not a copy of a database (see `fileSqlEngine.ts`). */
+  readonly tempFilePath?: string;
   close(): void;
 }
 
@@ -97,7 +99,7 @@ const DEFAULT_TEMP_NAME = 'database.duckdb';
  * different catalog, so such a view fails with `schema "warehouse.main" does not
  * exist`. Characters a file name cannot hold are replaced, so any name is safe.
  */
-function tempCopyName(fileName: string | undefined): string {
+export function tempCopyName(fileName: string | undefined): string {
   const cleaned = Array.from(fileName ?? '')
     .map((ch) => (ch.charCodeAt(0) < 32 || '\\/:*?"<>|'.includes(ch) ? '_' : ch))
     .join('')
@@ -920,7 +922,12 @@ function refusal(statementType: StatementType): string {
 
 /** `select * from <table> limit 5`, with the table qualified as the file needs it. */
 export function suggestQuery(handle: DuckdbHandle, tableName: string): string {
-  return `select * from ${quotedTableName(handle, tableName)} limit 5`;
+  const ref = tableRefs.get(handle)?.get(tableName);
+  const name =
+    ref?.schema !== undefined
+      ? `${quoteIdentifierIfNeeded(ref.schema)}.${quoteIdentifierIfNeeded(ref.table ?? tableName)}`
+      : quoteIdentifierIfNeeded(tableName);
+  return `select * from ${name} limit 5`;
 }
 
 /**

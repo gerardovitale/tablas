@@ -13,6 +13,7 @@
     "src/duckdbEditorProvider.ts",
     "src/dbtCommands.ts",
     "src/sqlThemeHost.ts",
+    "src/fileSqlHost.ts",
     "src/webviewHtml.ts"
   ],
   "extension": [".ts", ".js"],

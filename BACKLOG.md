@@ -166,21 +166,9 @@ The statement splitter/classifier in the SQL path strips comments with a regex t
 
 If the first load finds no tables (empty file, or a build still writing), the panel shows "No tables found" without the toolbar, so the user must close and reopen the tab. The file watcher usually recovers it, but not with `tablas.autoRefresh` off. Acceptance: render the toolbar (`capabilities.refresh`) on the empty and failed first-load states too.
 
-### SQL box redesign (Q-16)
+### Q-16 follow-ups: SQL for SQLite and XLSX · P3 · M
 
-Why: the box exists only for DuckDB files. (A result is already a real table with types, strips and filters: see CHANGELOG.) The layout is now one panel above the table (see CHANGELOG); what is left is SQL for Parquet/CSV (Q-16). Ordered; each is an independently shippable commit.
-
-Decisions already made:
-- A result is materialized into a DuckDB `TEMP` table (verified 2026-11-22: `CREATE TEMP TABLE` and `read_parquet` both work on a `READ_ONLY` database, so the source file is untouched), capped at the **first N rows** (propose N, e.g. 100,000, within `queryLimits.duckdbTimeoutMs`). Stats/filters (and later sort) then cover those N rows and the UI says so ("Statistics and filters cover the first N rows of this result"), in the style of the existing "Statistics cover all N rows" and "N+ rows" notes. A small result (a `GROUP BY` with 30 rows) behaves exactly like a table. Rejected alternative: wrap the user's SQL in each stats/filter request (always complete, but re-runs the query per keystroke and can change between runs).
-- The SQL view of a Parquet/CSV file is named after the **file's stem**: `sales_2024.parquet` -> `select * from sales_2024`. A stem that is not a plain identifier (`sales-2024.final`, spaces, leading digit, reserved word) is quoted, and the box's starting suggestion is already quoted correctly. (Rejected: a fixed name `data`.)
-
-### Q-16 · SQL for Parquet and CSV through an in-memory DuckDB · P2 · L
-
-Acceptance:
-- `capabilities.query` for `.parquet` and `.csv`: the host opens an in-memory DuckDB and exposes the file as a view named after its stem (`read_parquet`/`read_csv`), with the same read-only guard, limits, result table, stats and filters as a DuckDB file. For non-`file:` URIs copy the bytes to a private temp file as `openDuckdbDatabase` does and clean it on dispose. Cover name quoting/sanitising, an empty or colliding stem, and a file replaced on disk.
-- The normal table view keeps its hyparquet/PapaParse paths; DuckDB is only the SQL engine. Decide and document how to keep `select *` close to the table view where DuckDB's CSV sniffer disagrees with PapaParse (types, quoting, headers): explicit read options or `all_varchar`, plus a note under the box.
-- Out of scope: XLSX (DuckDB's Excel reader needs a network `INSTALL`, which the box refuses on purpose) and SQLite via `sql.js` (separate follow-up).
-- Tests against the `filter.parquet`/`filter.csv`/`multiline.csv`/`nested.parquet` fixtures; update README, CLAUDE.md and CHANGELOG.
+Parquet and CSV shipped (see CHANGELOG). Still open: SQLite through `sql.js` (a read-only SQL box over its own engine, or by attaching the file to the in-memory DuckDB with its `sqlite` extension, which needs a network `INSTALL`, so not by default), and XLSX (DuckDB's Excel reader needs the same). Decide per format whether the box is worth a second engine.
 
 ### W-1 · The table picker hard-codes DuckDB's `main` schema in the webview · P3 · S
 

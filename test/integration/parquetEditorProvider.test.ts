@@ -285,4 +285,103 @@ describe('ParquetEditorProvider Integration', () => {
       assert.deepStrictEqual(payload, { seq: 1, failedReason: FILTER_FAILED_REASON });
     });
   });
+
+  describe('SQL over the file (DuckDB, no webview involved)', () => {
+    function providerAndDocument(name: string) {
+      const provider = new ParquetEditorProvider({ extensionPath: process.cwd() } as vscode.ExtensionContext);
+      return { provider, document: provider.openCustomDocument(fixtureUri(name)) };
+    }
+
+    it('tells the webview the box is available and starts on the file\'s view', async () => {
+      const outcome = await openParquetAndAwaitOutcome('filter.parquet');
+      assert.ok(outcome.success);
+      if (outcome.success) {
+        assert.deepStrictEqual(outcome.capabilities, { query: true });
+        assert.strictEqual(outcome.querySuggestion, 'select * from filter limit 5');
+        assert.strictEqual(outcome.queryNote, undefined);
+      }
+    });
+
+    it('runs a query, and serves statistics and filters of its result by result seq', async () => {
+      const { provider, document } = providerAndDocument('filter.parquet');
+      try {
+        const payload = await provider.handleRunQuery(document, {
+          type: 'run-query',
+          seq: 4,
+          sql: 'select * from filter order by id',
+        });
+        assert.strictEqual(payload?.seq, 4);
+        assert.strictEqual(payload?.result, 4);
+        assert.strictEqual(payload?.data?.rowCount, 7);
+
+        const stats = await provider.handleGetStats(document, 4);
+        assert.strictEqual(stats.result, 4);
+        assert.strictEqual(stats.table, undefined);
+        assert.strictEqual(stats.stats?.columns[0].type, 'integer');
+
+        const filtered = await provider.handleFilter(document, {
+          type: 'filter',
+          seq: 1,
+          result: 4,
+          filters: [{ column: 2, text: 'rome' }],
+        });
+        assert.strictEqual(filtered?.result, 4);
+        assert.deepStrictEqual(idsOf(filtered?.rows ?? []), [1, 4]);
+
+        await provider.handleCloseResult(document, 4);
+        const gone = await provider.handleFilter(document, {
+          type: 'filter',
+          seq: 2,
+          result: 4,
+          filters: [{ column: 2, text: 'rome' }],
+        });
+        assert.match(gone?.failedReason ?? '', /no longer available/);
+      } finally {
+        document.dispose();
+      }
+    });
+
+    it('leaves the file\'s own statistics and filters on their usual path', async () => {
+      const { provider, document } = providerAndDocument('filter.parquet');
+      try {
+        await provider.handleRunQuery(document, { type: 'run-query', seq: 1, sql: 'select 1' });
+        const stats = await provider.handleGetStats(document);
+        assert.strictEqual(stats.result, undefined);
+        assert.strictEqual(stats.stats?.columns.length, 8);
+        const filtered = await provider.handleFilter(document, {
+          type: 'filter',
+          seq: 3,
+          filters: [{ column: 2, text: 'rome' }],
+        });
+        assert.strictEqual(filtered?.result, undefined);
+        assert.deepStrictEqual(idsOf(filtered?.rows ?? []), [1, 4]);
+      } finally {
+        document.dispose();
+      }
+    });
+
+    it('refuses a statement that writes', async () => {
+      const { provider, document } = providerAndDocument('filter.parquet');
+      try {
+        const payload = await provider.handleRunQuery(document, {
+          type: 'run-query',
+          seq: 1,
+          sql: "COPY (SELECT 1) TO '/tmp/tablas-never.csv'",
+        });
+        assert.match(payload?.error ?? '', /^Only read queries can be run here/);
+      } finally {
+        document.dispose();
+      }
+    });
+
+    it('answers with an error, not a crash, for a file DuckDB cannot read', async () => {
+      const { provider, document } = providerAndDocument('corrupt.parquet');
+      try {
+        const payload = await provider.handleRunQuery(document, { type: 'run-query', seq: 1, sql: 'select 1' });
+        assert.match(payload?.error ?? '', /Could not read the file with DuckDB/);
+      } finally {
+        document.dispose();
+      }
+    });
+  });
 });

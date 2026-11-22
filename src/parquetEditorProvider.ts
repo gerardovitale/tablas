@@ -14,6 +14,16 @@ import {
 } from './filter';
 import { filterDataMessage, isFilterMessage, type FilterMessage, type FilterPayload } from './filterMessage';
 import { isGetStatsMessage, statsDataMessage, type StatsPayload } from './statsMessage';
+import { createFileQuerySession, queryInfoFor } from './fileSqlHost';
+import type { QuerySession } from './querySession';
+import {
+  isCloseResultMessage,
+  isRunQueryMessage,
+  queryDataMessage,
+  type QueryPayload,
+  type RunQueryMessage,
+} from './queryMessage';
+import { watchSqlTheme } from './sqlThemeHost';
 import { buildWebviewHtml } from './webviewHtml';
 import { getMaxRowsSetting } from './config';
 
@@ -29,8 +39,11 @@ class ParquetDocument implements vscode.CustomDocument {
    * not noticed until then.
    */
   filterRows?: FilterableRows;
+  /** The SQL box's engine, created on the first query (see `QuerySession`). */
+  sql?: QuerySession;
   dispose(): void {
     this.filterRows = undefined;
+    this.sql?.dispose();
   }
 }
 
@@ -104,22 +117,41 @@ export class ParquetEditorProvider
     // handshake it also answers 'get-stats' requests (the guard keeps a
     // duplicate 'ready' from decoding the file twice).
     let hasLoadedInitial = false;
+    // The SQL box colours its text with the active theme's syntax colours (see `sqlThemeHost.ts`).
+    let panelDisposed = false;
+    const theme = watchSqlTheme((themeMessage) => {
+      if (!panelDisposed) {
+        void webview.postMessage(themeMessage).then(undefined, () => undefined);
+      }
+    });
+    webviewPanel.onDidDispose(() => {
+      panelDisposed = true;
+      theme.dispose();
+    });
     webview.onDidReceiveMessage(async (message) => {
       if (message?.type === 'ready') {
         if (hasLoadedInitial) {
           return;
         }
         hasLoadedInitial = true;
+        void theme.send();
         const outcome = await this.loadAndParseParquet(document.uri);
         await webview.postMessage({ type: 'parquet-data', payload: outcome });
         this._onDidPostParquetData.fire(outcome);
       } else if (isGetStatsMessage(message)) {
-        await webview.postMessage(statsDataMessage(await this.handleGetStats(document), message.seq));
+        await webview.postMessage(statsDataMessage(await this.handleGetStats(document, message.result), message.seq));
       } else if (isFilterMessage(message)) {
         const payload = await this.handleFilter(document, message);
         if (payload) {
           await webview.postMessage(filterDataMessage(payload));
         }
+      } else if (isRunQueryMessage(message)) {
+        const payload = await this.handleRunQuery(document, message);
+        if (payload) {
+          await webview.postMessage(queryDataMessage(payload));
+        }
+      } else if (isCloseResultMessage(message)) {
+        await this.handleCloseResult(document, message.seq);
       }
     });
   }
@@ -132,6 +164,10 @@ export class ParquetEditorProvider
    * without a webview.
    */
   public async handleFilter(document: ParquetDocument, message: FilterMessage): Promise<FilterPayload | undefined> {
+    if (message.result !== undefined) {
+      // A query result the SQL engine keeps as a table, not the file's own rows.
+      return this.sqlSession(document).resultFilter(message, getMaxRowsSetting());
+    }
     document.filterSeq = message.seq;
     const plan = planFilter(message);
     if (plan.kind === 'cleared') {
@@ -175,7 +211,10 @@ export class ParquetEditorProvider
    * edited on disk since it was loaded therefore yields stats for its newer
    * content. Public so an integration test can exercise it without a webview.
    */
-  public async handleGetStats(document: ParquetDocument): Promise<StatsPayload> {
+  public async handleGetStats(document: ParquetDocument, result?: number): Promise<StatsPayload> {
+    if (result !== undefined) {
+      return this.sqlSession(document).resultStats(result);
+    }
     try {
       return { stats: await parquetStats(await vscode.workspace.fs.readFile(document.uri)) };
     } catch (err) {
@@ -184,11 +223,33 @@ export class ParquetEditorProvider
     }
   }
 
+  /** The document's SQL engine, created (not yet opened) on first use. */
+  private sqlSession(document: ParquetDocument): QuerySession {
+    document.sql ??= createFileQuerySession(document.uri, 'parquet');
+    return document.sql;
+  }
+
+  /**
+   * Runs the SQL box's query over the file through DuckDB (opened on the first one; see
+   * `QuerySession`). `undefined` = nothing to post. Public so an integration test can call it
+   * without a webview.
+   */
+  public async handleRunQuery(document: ParquetDocument, message: RunQueryMessage): Promise<QueryPayload | undefined> {
+    return this.sqlSession(document).runQuery(message, getMaxRowsSetting());
+  }
+
+  /** The webview stopped showing the result made by run `seq`: drop its table. */
+  public async handleCloseResult(document: ParquetDocument, seq: number): Promise<void> {
+    await this.sqlSession(document).closeResult(seq);
+  }
+
   private async loadAndParseParquet(uri: vscode.Uri): Promise<ParquetParseOutcome> {
     try {
       // Binary format -- no TextDecoder step, bytes go straight to parseParquet.
       const bytes = await vscode.workspace.fs.readFile(uri);
-      return await parseParquet(bytes, getMaxRowsSetting());
+      const outcome = await parseParquet(bytes, getMaxRowsSetting());
+      // The SQL box is offered next to the table (see `queryInfoFor`).
+      return outcome.success ? { ...outcome, ...queryInfoFor(uri, 'parquet') } : outcome;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return {
