@@ -226,6 +226,56 @@ Acceptance:
 - Next/previous (Enter / Shift+Enter) moves the selection cursor and scrolls with `revealCell`; highlighting is painted only on drawn cells (virtualization), like `paintSelection`.
 - Works together with active filters and sort (positions are indices into the rows being shown). Esc closes the bar.
 
+## Postgres (first remote source)
+
+Open and browse tables of a PostgreSQL server, read-only. The first source that is a *connection*, not a file, so the work is mostly the connection layer; the table view reuses the multi-table protocol (`MultiTableParseOutcome`, `select-table`, `capabilities.refresh`). Items are ordered; PG-1 gates the rest.
+
+Design decisions already made (from the planning discussion):
+- **Driver:** `pg` (node-postgres), pure JS, bundled by esbuild (mark or ignore its optional `pg-native`), so the `.vsix` matrix does not change. Not DuckDB's postgres extension: `INSTALL`/`LOAD` reach outside the file and are refused in the SQL box on purpose.
+- **Credentials:** profiles (no password) in `globalState`, passwords only in `context.secrets`. Connections come from user settings/secrets only, never from a workspace file, and every connect is user-initiated (the manifest declares `untrustedWorkspaces: limited`, and a workspace must not be able to point the extension at a host). Mind `test/unit/packageManifest.test.ts`.
+- **Read-only and bounded:** `SET default_transaction_read_only = on` (or `BEGIN READ ONLY`) plus `statement_timeout` per session, so the server enforces it; every read has a `LIMIT` at `tablas.maxRows`; recommend a read-only role in the README.
+- **Text for everything:** force all values to text (custom `types` parser or `::text`) so BIGINT/NUMERIC/dates are exact and display like the other engines; column kinds for stats come from the result's type OIDs (`dataTypeID`).
+- **Document identity:** a virtual URI such as `tablas-postgres:/<connId>` opened with `vscode.openWith`; a restored tab whose secret is gone prompts instead of failing. Like `DuckdbDocument`, the document holds the live client for its lifetime, closes it on dispose and reconnects on a dropped connection.
+
+### PG-1 · Spike: `pg` client in the extension bundle · P2 · S
+
+Prove the shape before building on it. Acceptance:
+- `pg` connects to a local Postgres (docker) from the extension host, reads one table and bundles with esbuild (`pg-native` handled); report the bundle size, that `smoke-package.js`'s file-count and `node_modules` limits still hold, and that nothing needs `.vscodeignore` entries.
+- Settle the test infrastructure: a `services: postgres` container in `package.yml`'s `check` job, plus tests that skip when `TABLAS_TEST_PG_URL` is unset so `npm run test:unit` still works offline. Fixtures cannot be binary files here: a script that seeds the schema (including a `filter.*`-parity table).
+
+### PG-2 · MVP: connect, pick a table, view rows · P2 · L
+
+Needs PG-1. Acceptance:
+- Command "Tablas: Connect to Postgres" (host/port/database/user/SSL mode, password to SecretStorage), a saved-connections quick pick, and a virtual-URI custom editor (`postgresParser.ts` + `postgresEditorProvider.ts`, parallel to `duckdbParser.ts`/`duckdbEditorProvider.ts`) producing `MultiTableParseOutcome`.
+- The table picker lists schemas, tables, views and materialized views from `pg_catalog`, with `TableRef.approxRows` from `pg_class.reltuples` (no scan) and the same `schema.table` naming as DuckDB (see Q-5 for the collision caveat).
+- Read-only session, `statement_timeout` and a `maxRows` cap on every read; manual refresh only (`↻`, `tablas.refresh`); the last table per connection is remembered like DuckDB's.
+- Stats and filters: either implemented (PG-4) or the webview gains capability gating, so the MVP never shows boxes that do nothing. Decide this before building (see "Open questions").
+- Workspace Trust: connect refused or restricted in an untrusted workspace; `packageManifest.test.ts` updated.
+- Integration test against the CI Postgres; README note that the extension now makes outbound network connections (Marketplace privacy).
+
+### PG-3 · Browse connections in a tree view · P3 · M · after A-1
+
+Connections → schemas → tables in the Activity Bar tree designed in A-1; clicking a table opens or selects it (the `DuckdbEditorProvider.revealTable` flow). Acceptance: the tree never connects until the user expands a connection, and a table list comes from the live client the editor already holds when one is open.
+
+### PG-4 · Filter and statistics parity for Postgres · P2 · L
+
+Needs PG-2. Acceptance:
+- `filterPredicateSql` for Postgres, a third hand-written mirror of `compileCellPredicate` (change one, change the other, as for DuckDB), added to `FILTER_CASES` and `filterParity.test.ts` (runs only when `TABLAS_TEST_PG_URL` is set), with its known text-form differences documented in `CLAUDE.md`.
+- Statistics pushed down as aggregate SQL with a timeout, like `duckdbTableStats`. The "stats cover the whole table" rule cannot hold for a remote table with hundreds of millions of rows: skip (or `TABLESAMPLE`) above a `reltuples` threshold with a `skippedReason`, and say so in the card.
+- Filters follow `filterLimits` semantics (timeout, `maxTextLength`) and the `seq`/`table` echo rules.
+
+### PG-5 · SQL box for Postgres · P3 · M
+
+Needs PG-2 and PG-4. Reuse the DuckDB box (protocol in `queryMessage.ts`, highlighting, Table/SQL toggle). The guard differs: Postgres has no "prepare to learn the statement type", so run inside `BEGIN READ ONLY` with a timeout and rely on the server, and document that side-effecting functions (`nextval`, `pg_terminate_backend`, `dblink`) remain possible, so a read-only role is the real boundary. Acceptance: the refused-statement behaviour and the 30 s budget match the DuckDB box, with tests against the CI Postgres.
+
+### PG-6 · Out of scope for the first version · P3 · L · not started
+
+SSH tunnels, RDS/IAM token auth, client certificates beyond the basic SSL modes, pgbouncer quirks, and other servers (MySQL, SQL Server). Keep the connection layer generic enough that a second server is a new parser module, not a rewrite. dbt-postgres manifests (`database`/`schema`) could later feed column descriptions as for DuckDB (D-1..D-4).
+
+**Open questions** (answer before PG-2):
+1. May the MVP ship without filter/stats parity (capability-gated webview), or must it match the other formats first?
+2. Entry point: a command + quick pick first, or wait for the A-1 tree view?
+
 ## Selection
 
 ### S-1 · No auto-scroll while dragging a selection past the edge · P3 · S
@@ -277,5 +327,6 @@ Column sort and in-table find were promoted to T-1 and T-2.
 
 Tracked in `README.md`, listed here so nothing lives in two places:
 - Column sort: see T-1. In-table find (JetBrains-style, not VS Code's text Ctrl+F): see T-2. Per-column filtering is already done.
+- Postgres connections (read-only): see PG-1 to PG-6.
 - Basic cell editing. This needs a real edit model (dirty state, undo/redo, save) instead of `CustomReadonlyEditorProvider`.
 - Marketplace publishing: see the release order at the top, P-3 for per-platform `.vsix` builds, `PUBLISHING.md` and the packaging notes in `CLAUDE.md`.
