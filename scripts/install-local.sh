@@ -35,11 +35,14 @@ Publishing is done by GitHub Actions, not from this machine (see PUBLISHING.md):
     Access Token is needed (global Azure DevOps PATs are retired on 2026-12-01).
 
 To publish a new version:
-  a. Bump version in package.json (e.g. 0.1.0 -> 0.2.0)
-  b. Update CHANGELOG.md (required by vsce)
+  a. Bump version in package.json (e.g. 0.1.0 -> 0.2.0) and package-lock.json
+  b. Move [Unreleased] in CHANGELOG.md into a dated "## [0.2.0] - YYYY-MM-DD"
   c. Push main and wait for the "Package" workflow to be green
-  d. GitHub -> Actions -> "Publish" -> Run workflow, first with "publish"
-     unticked (build + test only), then ticked.
+  d. bash scripts/check-release.sh 0.2.0 --on-main HEAD
+  e. git tag -a v0.2.0 -m "Tablas 0.2.0" && git push origin v0.2.0
+     The tag starts the "Publish" workflow: it builds all 8 targets, publishes
+     them and creates the GitHub Release. (Actions -> "Publish" -> Run workflow
+     with "publish" unticked is still there to rehearse.)
 
 Marketplace assets to prepare before first publish:
   - README.md        (shown on the extension's Marketplace page)

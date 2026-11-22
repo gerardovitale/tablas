@@ -1,9 +1,9 @@
 name: Package
 
 # Builds one .vsix per platform on a runner of that platform and proves each one can open a
-# DuckDB and a SQLite file from the packaged layout (scripts/smoke-package.js). Nothing here
-# publishes: the .vsix files are uploaded as workflow artifacts, and `vsce publish` stays manual
-# (see PUBLISHING.md).
+# DuckDB and a SQLite file from the packaged layout (scripts/smoke-package.js). Nothing in this
+# file publishes: the .vsix files are uploaded as workflow artifacts. publish.yml calls this
+# workflow and publishes them when a vX.Y.Z tag is pushed (see PUBLISHING.md).
 
 on:
   push:

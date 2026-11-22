@@ -1,17 +1,31 @@
 name: Publish
 
 # Publishes the per-platform .vsix files to the Visual Studio Marketplace with Trusted Publishing
-# (GitHub OIDC; no stored token). The Marketplace policy "Release workflow" on publisher
-# `gerardovitale` names THIS file, so the `vsce publish --oidc` step must stay in it: the policy
-# does not accept a token minted by a different workflow.
+# (GitHub OIDC; no stored token) and attaches them to a GitHub Release. The Marketplace policy
+# "Release workflow" on publisher `gerardovitale` names THIS file (and no environment), so the
+# `vsce publish --oidc` step must stay in it and the publish job must not get an `environment:`:
+# the policy does not accept a token minted by a different workflow.
 #
-# Manual only. A run always builds and smoke-tests every target (package.yml); it publishes only
-# when `publish` is ticked, `confirm_version` equals package.json's version, and the run is on main.
-# Leave `publish` unticked to rehearse. `targets` limits what is published (a target already published
-# for a version cannot be published again). A published version cannot be replaced, so bump
-# "version" in package.json first and keep CHANGELOG.md in step.
+# Two ways to run it:
+#
+# 1. Push a version tag `vX.Y.Z` (the normal release). The tag must equal package.json's version,
+#    point at a commit on main, and CHANGELOG.md must have a dated `## [X.Y.Z] - YYYY-MM-DD`
+#    section (scripts/check-release.sh; run it locally before tagging). The run builds and
+#    smoke-tests every target (package.yml), publishes all 8, then creates the GitHub Release with
+#    the CHANGELOG section as notes and the .vsix files attached. Re-running a failed run is safe:
+#    a target already published for the version is skipped (`--skip-duplicate`).
+#
+# 2. Manual run (workflow_dispatch), for rehearsals and partial re-publishes. It always builds and
+#    smoke-tests every target; it publishes only when `publish` is ticked, `confirm_version` equals
+#    package.json's version, and the run is on main. Leave `publish` unticked to rehearse. `targets`
+#    limits what is published. No GitHub Release is made.
+#
+# A published version cannot be replaced, so bump "version" in package.json first and keep
+# CHANGELOG.md in step. A tag push runs the workflow file as it is at the tagged commit.
 
 on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
   workflow_dispatch:
     inputs:
       publish:
@@ -23,21 +37,70 @@ on:
         type: string
         default: ''
       targets:
-        description: 'Only when publishing: space-separated targets to publish, e.g. "linux-x64 win32-x64" (empty = all 8). A target already published for this version cannot be published again.'
+        description: 'Only when publishing: space-separated targets to publish, e.g. "linux-x64 win32-x64" (empty = all 8). A target already published for this version is skipped.'
         type: string
         default: ''
 
 permissions:
   contents: read
 
+# One publish at a time across all refs (a tag run and a manual fallback run on main must not race),
+# and never cancel one half way: a cancelled run can leave some targets published and others not.
+# (GitHub keeps at most one *pending* run per group; a newer queued run replaces an older pending one.)
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
 jobs:
+  # Cheap checks first, so a wrong tag or a stray tick fails before 8 platform builds.
+  verify:
+    name: verify the release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # origin/main is needed to check that a tag is on main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: check version, changelog and branch
+        env:
+          EVENT: ${{ github.event_name }}
+          PUBLISH: ${{ inputs.publish }}
+          CONFIRM: ${{ inputs.confirm_version }}
+          TARGETS: ${{ inputs.targets }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "$EVENT" = "push" ]; then
+            bash scripts/check-release.sh "${GITHUB_REF_NAME#v}" --on-main "$GITHUB_SHA"
+          elif [ "$PUBLISH" = "true" ]; then
+            if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+              echo "publishing is only allowed from main (this run is on $GITHUB_REF)" >&2
+              exit 1
+            fi
+            for t in $TARGETS; do
+              case " darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64 win32-arm64 alpine-x64 alpine-arm64 " in
+                *" $t "*) ;;
+                *) echo "unknown target '$t'" >&2; exit 1 ;;
+              esac
+            done
+            if [ "$CONFIRM" != "$version" ]; then
+              echo "confirm_version '$CONFIRM' does not match package.json version '$version'; not publishing" >&2
+              exit 1
+            fi
+            bash scripts/check-release.sh "$version"
+          else
+            echo "rehearsal: build and test only"
+          fi
+
   build:
+    needs: verify
     uses: ./.github/workflows/package.yml
 
   publish:
     name: publish to the Marketplace
     needs: build
-    if: ${{ inputs.publish && github.ref == 'refs/heads/main' }}
+    if: ${{ github.event_name == 'push' || (inputs.publish && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -46,18 +109,11 @@ jobs:
       EXPECTED_TARGETS: '8'
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false # vsce is fetched with npx below; keep the repo token away from it
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: confirm the version being published
-        env:
-          CONFIRM: ${{ inputs.confirm_version }}
-        run: |
-          version=$(node -p "require('./package.json').version")
-          if [ "$CONFIRM" != "$version" ]; then
-            echo "confirm_version '$CONFIRM' does not match package.json version '$version'; not publishing" >&2
-            exit 1
-          fi
       - uses: actions/download-artifact@v4
         with:
           pattern: vsix-*
@@ -89,4 +145,42 @@ jobs:
             done
           fi
           echo "publishing:$files"
-          npx --yes @vscode/vsce@4.1.0 publish --oidc --packagePath $files
+          # --skip-duplicate skips only a target already published for this version, so a re-run
+          # after a partial failure publishes just what is missing.
+          npx --yes @vscode/vsce@4.1.0 publish --oidc --skip-duplicate --packagePath $files
+
+  # Separate job so the token that can write to the repo never sits next to the npx-fetched vsce.
+  release:
+    name: create the GitHub Release
+    needs: publish
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: vsix-*
+          merge-multiple: true
+          path: vsix
+      - name: create the GitHub Release
+        run: |
+          version="${TAG#v}"
+          # The CHANGELOG section for this version, without its own heading.
+          awk -v h="## [$version]" 'index($0, h) == 1 { f = 1; next } /^## \[/ { f = 0 } f' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "no CHANGELOG section found for $version" >&2
+            exit 1
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # A re-run: the Release exists already.
+            gh release upload "$TAG" vsix/*.vsix --clobber
+            gh release edit "$TAG" --notes-file notes.md
+          else
+            gh release create "$TAG" vsix/*.vsix --title "$TAG" --notes-file notes.md --verify-tag
+          fi
