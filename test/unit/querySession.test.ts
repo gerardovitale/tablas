@@ -163,6 +163,16 @@ describe('QuerySession', () => {
     });
   });
 
+  it('never opens an engine after it was disposed', async () => {
+    let opened = 0;
+    const s = session(() => opened++);
+    s.dispose();
+    assert.strictEqual(await s.runQuery(run(1, 'select 1'), 10), undefined);
+    assert.strictEqual((await s.resultStats(1)).stats, undefined);
+    await s.closeResult(1);
+    assert.strictEqual(opened, 0, 'no engine (and no temp folder) that nobody would close');
+  });
+
   it('closes its engine on dispose, even while a query is queued on it', async () => {
     let handle: DuckdbHandle | undefined;
     const s = new QuerySession(async () => {

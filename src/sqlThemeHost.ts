@@ -167,8 +167,15 @@ export async function loadSqlColors(): Promise<SqlColors> {
  * one of `SQL_THEME_SETTINGS` changes, until `dispose()`.
  */
 export function watchSqlTheme(post: (message: unknown) => void): { send: () => Promise<void>; dispose: () => void } {
+  // Only the newest send posts: a slower, older load (a cold theme file) must not overwrite the
+  // colours of a change that came after it.
+  let latest = 0;
   const send = async (): Promise<void> => {
-    post(sqlThemeMessage(await loadSqlColors()));
+    const mine = ++latest;
+    const colors = await loadSqlColors();
+    if (mine === latest) {
+      post(sqlThemeMessage(colors));
+    }
   };
   const subscriptions = [
     vscode.window.onDidChangeActiveColorTheme(() => void send()),

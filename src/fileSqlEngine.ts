@@ -76,14 +76,16 @@ export async function openFileSqlEngine(source: FileSqlSource): Promise<DuckdbHa
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tablas-sql-'));
     if (source.fsPath !== undefined && !GLOB_CHARACTERS.test(source.fsPath)) {
       filePath = source.fsPath;
-    } else if (source.readBytes) {
-      filePath = path.join(tempDir, tempCopyName(source.fileName));
-      fs.writeFileSync(filePath, await source.readBytes(), { mode: 0o600 });
     } else if (source.fsPath !== undefined) {
-      // A local path with glob characters: copy it (same bytes, a name DuckDB reads literally).
+      // A local path with glob characters: copy it on disk (a name DuckDB reads literally), never
+      // through memory -- the file may be several GB.
       filePath = path.join(tempDir, tempCopyName(source.fileName));
       fs.copyFileSync(source.fsPath, filePath);
       fs.chmodSync(filePath, 0o600);
+    } else if (source.readBytes) {
+      // No local path: the bytes come from the FileSystemProvider.
+      filePath = path.join(tempDir, tempCopyName(source.fileName));
+      fs.writeFileSync(filePath, await source.readBytes(), { mode: 0o600 });
     } else {
       return fail(new Error('The file has no path or contents to query.'));
     }
@@ -125,7 +127,7 @@ export async function openFileSqlEngine(source: FileSqlSource): Promise<DuckdbHa
       );
     } catch (err) {
       handle.close();
-      return { error: cleanDuckdbMessage(err) };
+      return { error: describeOpenFailure(err, source.format) };
     }
     return handle;
   } catch (err) {
@@ -138,10 +140,18 @@ export async function openFileSqlEngine(source: FileSqlSource): Promise<DuckdbHa
   }
 }
 
-/** DuckDB's text without the engine version line noise some errors carry. */
-function cleanDuckdbMessage(err: unknown): string {
+/**
+ * What the user sees when the view cannot be created: DuckDB's own message under a prefix naming
+ * the engine. For a CSV it also says why a file the table shows fine can fail here: DuckDB's
+ * reader is stricter than PapaParse (ragged rows, other encodings, odd delimiters).
+ */
+function describeOpenFailure(err: unknown, format: FileSqlFormat): string {
   const raw = err instanceof Error ? err.message : String(err);
-  return `Could not read the file with DuckDB ${version()}: ${raw}`;
+  const hint =
+    format === 'csv'
+      ? '\n\nThe table view reads CSV more leniently than DuckDB does (rows of different lengths, other encodings, unusual delimiters).'
+      : '';
+  return `Could not read the file with DuckDB ${version()}: ${raw}${hint}`;
 }
 
 /** True for the failure shape of `openFileSqlEngine`. */

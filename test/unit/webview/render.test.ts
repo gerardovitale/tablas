@@ -1309,6 +1309,24 @@ describe('webview main.js rendering', () => {
         assert.ok(doc(second.dom).querySelector('#csv-table'));
       });
 
+      it('show-table during a first run in flight keeps the table (and its filter), and the late answer is ignored', () => {
+        const { dom, postedMessages } = inPanel();
+        const box = filterBoxIn(dom, '.table-area');
+        box.value = 'Rome';
+        box.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        runButton(dom).click();
+        const run = runQueries(postedMessages).at(-1)!.seq;
+        const table = doc(dom).querySelector('#csv-table');
+
+        dom.window.dispatchEvent(new dom.window.MessageEvent('message', { data: { type: 'show-table' } }));
+        assert.strictEqual(doc(dom).querySelector('#csv-table'), table, 'the table is not redrawn (its filter stays)');
+        assert.strictEqual(filterBoxIn(dom, '.table-area').value, 'Rome');
+        assert.deepStrictEqual(sentOf(postedMessages, 'close-result').map((m) => m.seq), [run], 'the run\'s result is closed on the host');
+
+        sendQueryData(dom, resultOk(run, { rows: [['late']], rowCount: 1 }));
+        assert.strictEqual(chip(dom), null, 'the answer must not cover the table');
+      });
+
       it('shows the refreshed table when the file was refreshed while the result was on screen', () => {
         const { dom } = withResult();
         sendDuckdbData(

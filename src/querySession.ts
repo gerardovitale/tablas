@@ -31,6 +31,10 @@ export class QuerySession {
   constructor(private readonly open: () => Promise<DuckdbHandle | FileSqlError>) {}
 
   private opened(): Promise<DuckdbHandle | FileSqlError> {
+    if (this.disposed) {
+      // Never open an engine nobody will close.
+      return Promise.resolve({ error: 'The editor was closed.' });
+    }
     if (!this.engine) {
       const attempt = this.open().then(
         (opened) => {
@@ -52,7 +56,7 @@ export class QuerySession {
 
   /** The engine if it is already open (a request about a result implies one was). */
   private async ready(): Promise<DuckdbHandle | undefined> {
-    const opened = this.engine ? await this.engine : undefined;
+    const opened = this.engine && !this.disposed ? await this.engine : undefined;
     return opened && !('error' in opened) ? opened : undefined;
   }
 

@@ -282,14 +282,19 @@ describe('openFileSqlEngine', () => {
       try {
         const file = path.join(dir, 'data[1].csv');
         fs.copyFileSync(fixture('filter.csv'), file);
+        let readThroughMemory = 0;
         const handle = await open({
           format: 'csv',
           fileName: 'data[1].csv',
           fsPath: file,
-          readBytes: async () => new Uint8Array(fs.readFileSync(file)),
+          readBytes: async () => {
+            readThroughMemory++;
+            return new Uint8Array(fs.readFileSync(file));
+          },
         });
         try {
           assert.deepStrictEqual((await rowsOf(handle, 'select count(*) from "data[1]"')).rows, [['7']]);
+          assert.strictEqual(readThroughMemory, 0, 'a local file is copied on disk, never read into memory');
         } finally {
           handle.close();
         }
@@ -316,6 +321,13 @@ describe('openFileSqlEngine', () => {
     it('is the same for a file that does not exist', async () => {
       const opened = await openFileSqlEngine({ format: 'csv', fileName: 'nope.csv', fsPath: path.join(os.tmpdir(), 'tablas-nope.csv') });
       assert.ok(isFileSqlError(opened));
+    });
+
+    it('says a CSV is read more strictly than the table view reads it; a Parquet error has no such hint', async () => {
+      const csv = await openFileSqlEngine({ format: 'csv', fileName: 'nope.csv', fsPath: path.join(os.tmpdir(), 'tablas-nope.csv') });
+      assert.match(isFileSqlError(csv) ? csv.error : '', /table view reads CSV more leniently than DuckDB/);
+      const parquet = await openFileSqlEngine({ format: 'parquet', fileName: 'corrupt.parquet', fsPath: fixture('corrupt.parquet') });
+      assert.ok(isFileSqlError(parquet) && !/leniently/.test(parquet.error));
     });
   });
 

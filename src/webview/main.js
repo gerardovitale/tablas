@@ -2159,9 +2159,6 @@
   });
 
   /**
-   * @param {import('../../src/tableData').MultiTableParseOutcome} outcome
-   */
-  /**
    * A function that draws the table into `area`, optionally putting back the filters and scroll the
    * table had (after a reload, or back from a result). Statistics are requested only after the filter,
    * so the filtered rows are not queued behind a whole-table scan.
@@ -2181,6 +2178,9 @@
     };
   }
 
+  /**
+   * @param {import('../../src/tableData').MultiTableParseOutcome} outcome
+   */
   function renderMultiTableOutcome(outcome) {
     const isReload = outcome.success && outcome.data.reload !== undefined;
     if (outcome.success && outcome.data.hostSelected) {
@@ -2706,8 +2706,9 @@
     query.seqCounter++;
     setQueryStatus('', false);
     paintQueryMessage();
+    // With only a run in flight the table is still on screen: nothing to redraw (it would reset its filters).
     const area = query.area;
-    if (area && area.isConnected && query.drawTable) {
+    if (shown && area && area.isConnected && query.drawTable) {
       area.textContent = '';
       query.drawTable(saved);
       if (currentView) { currentView.wrapper.focus(); }
@@ -2890,7 +2891,8 @@
     } else if (message.type === 'show-table') {
       // The host (dbt "Preview Model") asked for the table that is already the selected one:
       // nothing to re-read, but a query result has to give way to it.
-      if (query.result) { closeResult(); }
+      // (A first run still in flight has no result yet, but its answer must not cover the table either.)
+      if (query.result || query.running) { closeResult(); }
     }
   });
 
